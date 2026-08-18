@@ -138,6 +138,7 @@ export function normalizeCodex(raw: unknown): QuotaWindow[] {
 
 export const codexAdapter: PlanAdapter = {
   slug: 'codex',
+  credentialHint: '缺少凭据：运行 `codex` 登录，或 planofplan auth set codex --key <token>',
 
   async detectCredentials(ctx: AdapterContext): Promise<Credential | null> {
     if (ctx.plan.credRef) {

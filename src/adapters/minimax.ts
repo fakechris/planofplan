@@ -230,6 +230,8 @@ export function normalizeMiniMax(raw: unknown, now: number): { windows: QuotaWin
 
 export const minimaxAdapter: PlanAdapter = {
   slug: 'minimax',
+  credentialHint:
+    '缺少凭据：设置 MINIMAX_CODING_API_KEY 或运行 planofplan auth set minimax --key <sk-cp-*>',
 
   async detectCredentials(ctx: AdapterContext): Promise<Credential | null> {
     // 手动 key（credentials.json，经 config cred_ref 引用）优先

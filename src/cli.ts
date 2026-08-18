@@ -89,9 +89,6 @@ function printPlanHuman(p: OverviewPlan): void {
   console.log(`${p.name} (${p.slug}) ${STATUS_BADGE[p.status] ?? '[' + p.status + ']'}`);
   if (p.windows.length === 0) {
     console.log(`  ${p.lastError ?? '暂无数据'}`);
-    if (p.status === 'not_configured') {
-      console.log('  设置 MINIMAX_CODING_API_KEY 或运行: planofplan auth set minimax --key <sk-cp-*>');
-    }
     console.log('');
     return;
   }

@@ -3,7 +3,7 @@
 本地 dashboard，管理多个 AI Coding Plan 订阅的用量/限额。
 展示形态参考 **CodexBar**（逐 plan 用量条 + 总览 dashboard），架构参考 **onWatch**（守护进程 + SQLite + localhost Web）。
 
-当前状态：**M1**（骨架 + MiniMax legacy adapter 闭环）。
+当前状态：**M2**（7 个 adapter 接入：MiniMax、GLM legacy/current、Codex、Kimi、Grok、Cursor、Claude；其中 MiniMax/Codex/Cursor/Claude 已本机真机验证）。
 
 ## 快速开始
 
@@ -90,9 +90,23 @@ web/              静态前端（无构建，vanilla JS + CSS）
 
 adapter 接口见 `src/types.ts`。MiniMax 的端点/解析规格出处：CodexBar `docs/minimax.md` + `MiniMaxUsageFetcher.swift`、JinHanAI/coding-plan-monitor（实测实现）。
 
-## 已知限制（M1）
+## 覆盖矩阵与验证状态（2026-08-18）
 
-- 仅 MiniMax adapter；其余 7 个 plan（GLM legacy/current、Claude、Codex、Kimi、Grok、Cursor）在 M2 接入，规格已定稿在 `docs/planofplan-design.md`
+| plan | adapter | 真机验证 | 备注 |
+|---|---|---|---|
+| MiniMax legacy | minimax | ✅ | 5h 多车道（general/video）+ weekly 车道 |
+| GLM legacy / GLM current | glm | ⏳ | 端点按 CodexBar 规格实现+单测；缺 key：设 `BIGMODEL_API_KEY` 或 `planofplan auth set glm_legacy --key` |
+| Claude Code | claude | ✅ | 读 Keychain OAuth；5H 7% / Week 18%（实测） |
+| OpenAI Codex | codex | ✅ | 读 `~/.codex/auth.json`；5H 90%（实测） |
+| Kimi Code | kimi | ⏳ | 实现+单测；本机 CLI token 已过期：重新登录或 `KIMI_CODE_API_KEY` |
+| Grok | grok | ⏳ | 实现+单测；token 已过期需 `grok login`，且 `cli-chat-proxy.grok.com` 国内网络需代理 |
+| Cursor legacy | cursor | ✅ | 读 `state.vscdb`；legacy 0/500（实测，本月已重置） |
+
+## 已知限制（M2）
+
+- Grok/Kimi/GLM 的实时数据待凭据就绪后复验（列表见上）
+- Bun fetch 不读取 HTTP(S)_PROXY；Grok 等需要代理的端点建议用系统级 TUN/全局代理（M3 可加 CONNECT 隧道）
+- Kimi 月度会员池仅网页会话可取（未实现，设计 §9）
 - 无 session 鉴权（仅监听 localhost；如部署到其他机器需自行加反向代理/密码）
 - UI 的启停/授权开关写 db，重启后以 config.json 为准（文档见设计 §8）
 

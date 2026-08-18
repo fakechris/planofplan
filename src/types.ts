@@ -46,6 +46,8 @@ export interface Credential {
   source: string;
   /** 部分 provider（Codex）需要 account id 头 */
   accountId?: string | null;
+  /** 会话型 provider（Cursor）用完整 Cookie 头鉴权 */
+  cookie?: string | null;
 }
 
 export interface PlanAdapter {
@@ -54,6 +56,8 @@ export interface PlanAdapter {
   detectCredentials(ctx: AdapterContext): Promise<Credential | null>;
   /** 拉取并归一化出多窗口快照 */
   fetchUsage(ctx: AdapterContext, cred: Credential): Promise<QuotaWindow[]>;
+  /** 缺少凭据时的引导文案 */
+  credentialHint?: string;
 }
 
 /** 带错误分类的 adapter 异常，供 scheduler 判定 auth/network/api/parse */

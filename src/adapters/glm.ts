@@ -189,6 +189,8 @@ function cnEnvKey(): string | null {
 
 export const glmAdapter: PlanAdapter = {
   slug: 'glm',
+  credentialHint:
+    '缺少凭据：设置 Z_AI_API_KEY / BIGMODEL_API_KEY，或运行 planofplan auth set <slug> --key <key>',
 
   async detectCredentials(ctx: AdapterContext): Promise<Credential | null> {
     if (ctx.plan.credRef) {

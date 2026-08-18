@@ -167,8 +167,8 @@ export class Scheduler {
 
     if (!cred) {
       const message =
-        `缺少凭据：请设置 ${plan.adapter === 'minimax' ? 'MINIMAX_CODING_API_KEY' : '环境变量或 API Key'}，` +
-        `或运行 planofplan auth set ${slug} --key <key>`;
+        adapter.credentialHint ??
+        `缺少凭据：请设置对应 API Key，或运行 planofplan auth set ${slug} --key <key>`;
       this.store.setState(slug, {
         auth_status: AUTH_STATUS.MISSING,
         last_error: message,

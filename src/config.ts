@@ -45,6 +45,42 @@ const DEFAULT_PLANS: PlanConfig[] = [
     credRef: null,
     extra: {},
   },
+  {
+    slug: 'kimi',
+    name: 'Kimi Code',
+    adapter: 'kimi',
+    enabled: true,
+    pollIntervalSec: 60,
+    credRef: null,
+    extra: {},
+  },
+  {
+    slug: 'grok',
+    name: 'Grok',
+    adapter: 'grok',
+    enabled: true,
+    pollIntervalSec: 300,
+    credRef: null,
+    extra: {},
+  },
+  {
+    slug: 'cursor',
+    name: 'Cursor legacy',
+    adapter: 'cursor',
+    enabled: true,
+    pollIntervalSec: 300,
+    credRef: null,
+    extra: {},
+  },
+  {
+    slug: 'claude',
+    name: 'Claude Code',
+    adapter: 'claude',
+    enabled: true,
+    pollIntervalSec: 900,
+    credRef: null,
+    extra: {},
+  },
 ];
 
 export function homeDir(): string {
