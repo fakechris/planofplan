@@ -95,10 +95,10 @@ adapter 接口见 `src/types.ts`。MiniMax 的端点/解析规格出处：CodexB
 | plan | adapter | 真机验证 | 备注 |
 |---|---|---|---|
 | MiniMax legacy | minimax | ✅ | 5h 多车道（general/video）+ weekly 车道 |
-| GLM legacy / GLM current | glm | ⏳ | 端点按 CodexBar 规格实现+单测；zcode 凭据加密(enc:v1)不可复用，需 bigmodel.cn 控制台 API key |
+| GLM legacy / GLM current | glm | ⏳ | 三窗口(5h/week/MCP) 已对照 CodexBar zai.js + opencode-quota glm-coding-plan.ts（unit 3/6 + TIME_LIMIT）实现+单测；zcode 凭据加密(enc:v1)不可复用，需 bigmodel.cn 控制台 API key |
 | Claude Code | claude | ✅ | 读 Keychain OAuth；5H 7% / Week 18%（实测） |
 | OpenAI Codex | codex | ✅ | 读 `~/.codex/auth.json`；5H 90%（实测） |
-| Kimi Code | kimi | ✅ | 读 `~/.kimi-code/credentials/kimi-code.json`；Week 97%（实测，8/18 重登后） |
+| Kimi Code | kimi | ✅ | 读 `~/.kimi-code/credentials/kimi-code.json`；Week 97% + 5H 0%（实测 8/18，`KIMI_USE_REFRESH=1` 自动续期 CLI token）；月限额需 kimi.com 网页登录态（当前会话已过期，未显示） |
 | Grok | grok | ✅ | 读 `~/.grok/auth.json`；Credits 95%（实测，8/18 重登后；SuperGrok） |
 | Cursor legacy | cursor | ✅ | 读 `state.vscdb`；legacy 0/500（实测，本月已重置） |
 
@@ -106,7 +106,9 @@ adapter 接口见 `src/types.ts`。MiniMax 的端点/解析规格出处：CodexB
 
 - GLM（legacy/current）待 API key：去 bigmodel.cn 控制台生成，`planofplan auth set glm_legacy --key <key>` 或设 `BIGMODEL_API_KEY`（zcode CLI 的凭据为加密存储，无法复用）
 - Bun fetch 不读取 HTTP(S)_PROXY；Grok 等需要代理的端点建议用系统级 TUN/全局代理（M3 可加 CONNECT 隧道）
-- Kimi 月度会员池仅网页会话可取（未实现，设计 §9）；Kimi 周额度接口按 100 计（97/100 = 剩余 3%）
+- Kimi 月限额仅网页会话可取：自动读本机 kimi-auth cookie（kimi-desktop / Chromium 系明文 / Firefox）调 GetSubscriptionStats → amountUsedRatio；加密 cookie（Chrome 默认）需 Keychain 解密（M3）；当前本机会话已过期，需重新登录 kimi.com
+- Kimi CLI access_token 只有 15 分钟有效期：默认只读不刷新（CodexBar 同策略）；持续轮询请设 `KIMI_USE_REFRESH=1`（用 refresh_token 静默续期，不写回凭据文件）
+- Kimi 周额度接口按 100 计（97/100 = 剩余 3%）；5h 窗口接口无 used 字段，用 remaining 反推
 - 无 session 鉴权（仅监听 localhost；如部署到其他机器需自行加反向代理/密码）
 - UI 的启停/授权开关写 db，重启后以 config.json 为准（文档见设计 §8）
 

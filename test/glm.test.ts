@@ -63,6 +63,38 @@ describe('normalizeGlm', () => {
     expect(windows[1]!.percentage).toBe(10);
   });
 
+  test('unit=3/6 显式分类（opencode-quota 语义）优先于时长排序', () => {
+    const raw = {
+      code: 200,
+      data: {
+        limits: [
+          { type: 'TOKENS_LIMIT', unit: 6, percentage: 15, nextResetTime: NOW + 3 * 3_600_000 },
+          { type: 'TOKENS_LIMIT', unit: 3, percentage: 25, nextResetTime: NOW + 7 * 86_400_000 },
+        ],
+      },
+    };
+    const { windows } = normalizeGlm(raw, NOW);
+    expect(windows).toHaveLength(2);
+    // 排序按 nextResetTime（unit6 那条 3h 重置排前面），但窗口归属按 unit：unit3→5h、unit6→周
+    const five = windows.find((w) => w.window === 'rolling_5h')!;
+    expect(five.percentage).toBe(25);
+    const week = windows.find((w) => w.window === 'weekly')!;
+    expect(week.percentage).toBe(15);
+  });
+
+  test('percentage 超界钳制：130 → 100、-5 → 0', () => {
+    const raw = {
+      code: 0,
+      data: { limits: [{ type: 'TOKENS_LIMIT', percentage: 130, nextResetTime: in5h }] },
+    };
+    expect(normalizeGlm(raw, NOW).windows[0]!.percentage).toBe(100);
+    const raw2 = {
+      code: 0,
+      data: { limits: [{ type: 'TOKENS_LIMIT', percentage: -5, nextResetTime: in5h }] },
+    };
+    expect(normalizeGlm(raw2, NOW).windows[0]!.percentage).toBe(0);
+  });
+
   test('percentageIsRemaining 选项：把百分比当剩余值翻转', () => {
     const raw = {
       code: 200,

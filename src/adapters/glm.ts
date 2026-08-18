@@ -1,21 +1,20 @@
 /**
- * z.ai / GLM Coding Plan adapter（M2.1）
+ * z.ai / GLM Coding Plan adapter（M2.1，M2.5 对齐 opencode-quota）
  *
  * 同时覆盖「GLM legacy（智谱 BigModel CN，早期单 5h 窗口）」与「GLM current（周+5h+MCP）」：
  * 同一端点家族，靠 extra.region 区分 host 与可用 token 源。
  *
- * 规格出处：CodexBar docs/zai.md
- * - 端点：GET {host}/api/monitor/usage/quota/limit（cn: open.bigmodel.cn；global: api.z.ai）
+ * 规格出处：CodexBar docs/zai.md + ZaiProviderDescriptor.swift + opencode-quota glm-coding-plan.ts
+ * - 端点：GET {host}/api/monitor/usage/quota/limit（cn: open.bigmodel.cn / bigmodel.cn；global: api.z.ai）
  * - 头：Authorization: Bearer <token> + accept: application/json
  * - token 源（cn）：Z_AI_API_KEY → BIGMODEL_API_KEY/ZHIPU_API_KEY/ZHIPUAI_API_KEY/GLM_API_KEY
  *   → relay 文件 ~/.coding-relay/glm-api-key / ~/.config/bigmodel/api_key / ~/.config/zhipu/api_key
  *   （global 只认 Z_AI_API_KEY，BigModel 别名不用于 global 路由）
- * - 解析：data.limits[] 取最短 TOKENS_LIMIT（5h）为主窗口、较长 TOKENS_LIMIT 为周窗口、
- *   TIME_LIMIT 为 MCP 通道；nextResetTime(epoch ms) → 重置时间；data.planName/level/plan → 套餐名
+ * - 解析：data.limits[] TOKENS_LIMIT 按 unit（3=5h / 6=周，与 opencode-quota 判定一致，
+ *   缺 unit 时退回按 nextResetTime 长短分类）为主/周窗口、TIME_LIMIT 为 MCP 通道；
+ *   percentage 为【已用 %】（剩余 = 100 - percentage，opencode-quota 同语义，超界钳制 0-100）；
+ *   nextResetTime(epoch ms) → 重置时间；data.planName/level/plan → 套餐名
  * - team 需 Bigmodel-Organization/Bigmodel-Project 头 + type=2（本实现预留 extra.orgId/projId）
- *
- * 注意（待实测）：GLM quota/limit 的 percentage 语义按【已用 %】处理（与 MiniMax 的 remaining 相反），
- * 若你账号实测为剩余值，改 extra.percentageIsRemaining=true。
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -27,25 +26,27 @@ const LIMIT_PATH = '/api/monitor/usage/quota/limit';
 
 function hostsFor(region: string): string[] {
   if (region === 'global') return ['https://api.z.ai'];
-  return ['https://open.bigmodel.cn'];
+  // opencode-quota zhipu 实测端点 bigmodel.cn；CodexBar 文档为 open.bigmodel.cn → 依次尝试
+  return ['https://open.bigmodel.cn', 'https://bigmodel.cn'];
 }
 
-function quotaUrl(plan: AdapterContext['plan']): string {
+function quotaUrls(plan: AdapterContext['plan']): string[] {
   const env = process.env;
-  const override =
-    env.Z_AI_QUOTA_URL ?? plan.extra.quotaUrl;
+  const override = env.Z_AI_QUOTA_URL ?? plan.extra.quotaUrl;
   if (override) {
     if (!/^https:\/\//.test(override)) {
       throw new AdapterError('api', 'GLM quota URL 覆写必须为 https');
     }
-    return override;
+    return [override];
   }
-  const host = env.Z_AI_API_HOST ?? plan.extra.host ?? hostsFor(plan.extra.region ?? 'cn')[0]!;
-  return host.replace(/\/+$/, '') + LIMIT_PATH;
+  const hostOverride = env.Z_AI_API_HOST ?? plan.extra.host;
+  const hosts = hostOverride ? [hostOverride] : hostsFor(plan.extra.region ?? 'cn');
+  return [...new Set(hosts.map((h) => h.replace(/\/+$/, '') + LIMIT_PATH))];
 }
 
 interface LimitEntry {
   type?: string;
+  unit?: number;
   percentage?: number;
   nextResetTime?: number;
   used?: number;
@@ -73,6 +74,10 @@ function num(v: unknown): number | null {
 
 function now(): number {
   return Date.now();
+}
+
+function clampPct(v: number): number {
+  return Math.min(100, Math.max(0, v));
 }
 
 export function normalizeGlm(
@@ -105,7 +110,7 @@ export function normalizeGlm(
   const tokensLimits = limits
     .filter((l) => l && typeof l === 'object' && l.type === 'TOKENS_LIMIT')
     .map((l) => ({ ...l, remainingMs: (num(l.nextResetTime) ?? Number.POSITIVE_INFINITY) - at }))
-    .sort((a, b) => a.remainingMs - b.remainingMs); // 最短（5h）在前，较长（周）在后
+    .sort((a, b) => a.remainingMs - b.remainingMs); // 先按长短排，unit 缺失时的兜底
 
   const percentageIsRemaining = opts.percentageIsRemaining === true;
 
@@ -113,13 +118,14 @@ export function normalizeGlm(
   tokensLimits.forEach((l, i) => {
     const pct = num(l.percentage);
     if (pct == null) return;
-    const used = percentageIsRemaining ? 100 - pct : pct;
+    const used = clampPct(percentageIsRemaining ? 100 - pct : pct);
     const resetAt = num(l.nextResetTime);
-    const label =
-      (typeof l.windowName === 'string' && l.windowName) ||
-      (i === 0 ? '5H' : 'Week'); // 最短 → 5h 主窗口，较长 → 周窗口
+    // opencode-quota 判定：TOKENS_LIMIT unit=3 → 5h、unit=6 → 周；缺 unit 退回按时长分类
+    const unit = num(l.unit);
+    const is5h = unit === 3 || (unit == null && i === 0);
+    const label = (typeof l.windowName === 'string' && l.windowName) || (is5h ? '5H' : 'Week');
     windows.push({
-      window: i === 0 ? 'rolling_5h' : 'weekly',
+      window: is5h ? 'rolling_5h' : 'weekly',
       label,
       used: num(l.used),
       total: num(l.total),
@@ -134,7 +140,7 @@ export function normalizeGlm(
     if (l && typeof l === 'object' && l.type === 'TIME_LIMIT') {
       const pct = num(l.percentage);
       if (pct == null) continue;
-      const used = percentageIsRemaining ? 100 - pct : pct;
+      const used = clampPct(percentageIsRemaining ? 100 - pct : pct);
       const resetAt = num(l.nextResetTime);
       windows.push({
         window: 'mcp',
@@ -210,7 +216,8 @@ export const glmAdapter: PlanAdapter = {
   },
 
   async fetchUsage(ctx: AdapterContext, cred: Credential): Promise<QuotaWindow[]> {
-    const url = quotaUrl(ctx.plan);
+    const urls = quotaUrls(ctx.plan);
+    // 多个 host（open.bigmodel.cn → bigmodel.cn）逐个尝试；鉴权错误直接失败，网络/API 错误换下一 host
     const headers: Record<string, string> = {
       Authorization: `Bearer ${cred.value}`,
       accept: 'application/json',
@@ -221,36 +228,47 @@ export const glmAdapter: PlanAdapter = {
       headers['Bigmodel-Project'] = ctx.plan.extra.projId;
     }
 
-    let res: Response;
-    try {
-      res = await fetch(url, {
-        method: 'GET',
-        headers,
-        signal: AbortSignal.timeout(10_000),
-      });
-    } catch (e) {
-      if (e instanceof Error && e.name === 'TimeoutError') {
-        throw new AdapterError('network', `GLM 请求超时：${url}`);
+    let lastErr: Error | null = null;
+    for (const url of urls) {
+      let res: Response;
+      try {
+        res = await fetch(url, {
+          method: 'GET',
+          headers,
+          signal: AbortSignal.timeout(10_000),
+        });
+      } catch (e) {
+        if (e instanceof Error && e.name === 'TimeoutError') {
+          lastErr = new AdapterError('network', `GLM 请求超时：${url}`);
+        } else {
+          lastErr = new AdapterError(
+            'network',
+            `GLM 网络错误：${String(e instanceof Error ? e.message : e)}`,
+          );
+        }
+        continue; // 尝试下一个 host
       }
-      throw new AdapterError('network', `GLM 网络错误：${String(e instanceof Error ? e.message : e)}`);
-    }
 
-    if (res.status === 401 || res.status === 403) {
-      throw new AdapterError('auth', `GLM 鉴权失败(HTTP ${res.status})：请检查 API Key`);
-    }
-    if (!res.ok) {
-      if (res.status === 429) throw new AdapterError('api', 'GLM 请求被限流(HTTP 429)');
-      throw new AdapterError('api', `GLM API 错误(HTTP ${res.status})`);
-    }
+      if (res.status === 401 || res.status === 403) {
+        throw new AdapterError('auth', `GLM 鉴权失败(HTTP ${res.status})：请检查 API Key`);
+      }
+      if (!res.ok) {
+        if (res.status === 429) throw new AdapterError('api', 'GLM 请求被限流(HTTP 429)');
+        lastErr = new AdapterError('api', `GLM API 错误(HTTP ${res.status})`);
+        continue;
+      }
 
-    let json: unknown;
-    try {
-      json = await res.json();
-    } catch {
-      throw new AdapterError('parse', `GLM 响应不是合法 JSON：${url}`);
+      let json: unknown;
+      try {
+        json = await res.json();
+      } catch {
+        lastErr = new AdapterError('parse', `GLM 响应不是合法 JSON：${url}`);
+        continue;
+      }
+      return normalizeGlm(json, now(), {
+        percentageIsRemaining: ctx.plan.extra.percentageIsRemaining === 'true',
+      }).windows;
     }
-    return normalizeGlm(json, now(), {
-      percentageIsRemaining: ctx.plan.extra.percentageIsRemaining === 'true',
-    }).windows;
+    throw lastErr ?? new AdapterError('api', 'GLM 无可用 host');
   },
 };

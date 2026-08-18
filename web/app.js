@@ -132,7 +132,7 @@ function renderPlan(p, now) {
     const empty = document.createElement('div');
     empty.className = 'empty';
     if (p.status === 'not_configured') {
-      empty.textContent = '设置 MINIMAX_CODING_API_KEY 或运行: planofplan auth set minimax --key <sk-cp-*>';
+      empty.textContent = `设置对应凭据（见 README），或运行: planofplan auth set ${p.slug} --key <key>`;
     } else {
       empty.textContent = p.lastError ?? '暂无数据';
     }
