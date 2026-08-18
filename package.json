@@ -1,0 +1,22 @@
+{
+  "name": "planofplan",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local dashboard for tracking usage/quota across AI coding-plan subscriptions",
+  "scripts": {
+    "serve": "bun src/cli.ts serve",
+    "demo": "bun src/cli.ts serve --demo",
+    "usage": "bun src/cli.ts usage",
+    "status": "bun src/cli.ts status",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "hono": "^4"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5"
+  }
+}

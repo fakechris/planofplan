@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>planofplan</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header>
+    <div class="brand">planofplan</div>
+    <div class="header-meta">
+      <span id="generatedAt" class="muted"></span>
+      <button id="refreshBtn" type="button">刷新</button>
+    </div>
+  </header>
+
+  <section id="summary" class="summary"></section>
+
+  <main id="grid" class="grid"></main>
+
+  <template id="winTpl">
+    <div class="win">
+      <div class="win-head">
+        <span class="win-label"></span>
+        <span class="win-meta"></span>
+      </div>
+      <div class="track"><div class="fill"></div></div>
+      <div class="win-foot"><span class="win-reset"></span></div>
+    </div>
+  </template>
+
+  <script src="/app.js"></script>
+</body>
+</html>
