@@ -44,6 +44,8 @@ export interface Credential {
   value: string;
   /** 来源：manual（credentials.json）| env | auto */
   source: string;
+  /** 部分 provider（Codex）需要 account id 头 */
+  accountId?: string | null;
 }
 
 export interface PlanAdapter {

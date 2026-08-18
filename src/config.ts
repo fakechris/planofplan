@@ -18,6 +18,33 @@ const DEFAULT_PLANS: PlanConfig[] = [
     credRef: null,
     extra: { region: 'cn' },
   },
+  {
+    slug: 'glm_legacy',
+    name: 'GLM legacy',
+    adapter: 'glm',
+    enabled: true,
+    pollIntervalSec: 60,
+    credRef: null,
+    extra: { region: 'cn' },
+  },
+  {
+    slug: 'glm_current',
+    name: 'GLM current',
+    adapter: 'glm',
+    enabled: true,
+    pollIntervalSec: 60,
+    credRef: null,
+    extra: { region: 'cn' },
+  },
+  {
+    slug: 'codex',
+    name: 'OpenAI Codex',
+    adapter: 'codex',
+    enabled: true,
+    pollIntervalSec: 60,
+    credRef: null,
+    extra: {},
+  },
 ];
 
 export function homeDir(): string {

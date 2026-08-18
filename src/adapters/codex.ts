@@ -1,0 +1,207 @@
+/**
+ * OpenAI Codex adapter（M2.2）
+ *
+ * 规格出处：CodexBar docs/codex.md + docs/codex-oauth.md（源码级）
+ * - 凭据：~/.codex/auth.json（或 $CODEX_HOME/auth.json）→ tokens.access_token + account_id；
+ *   token 刷新归 Codex CLI 所有，本 adapter 只读不刷新（过期时提示运行 `codex` 重新登录）
+ * - 端点：GET https://chatgpt.com/backend-api/wham/usage
+ * - 头：Authorization: Bearer <token>；ChatGPT-Account-Id: <account_id>；User-Agent
+ * - 响应：rate_limit.primary_window(used_percent, reset_at 秒, limit_window_seconds=18000→5h)
+ *   + secondary_window(周) + credits(has_credits/unlimited/balance) + plan_type
+ */
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
+import type { AdapterContext, Credential, PlanAdapter, QuotaWindow } from '../types.ts';
+import { AdapterError } from '../types.ts';
+
+const USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage';
+
+function codexHome(): string {
+  return process.env.CODEX_HOME ?? join(homedir(), '.codex');
+}
+
+interface AuthFile {
+  tokens?: {
+    access_token?: string;
+    account_id?: string;
+    id_token?: string;
+  };
+}
+
+function readAuthFile(): AuthFile {
+  const file = join(codexHome(), 'auth.json');
+  if (!existsSync(file)) return {};
+  try {
+    return JSON.parse(readFileSync(file, 'utf8')) as AuthFile;
+  } catch {
+    return {};
+  }
+}
+
+/** JWT exp 校验（不解析内容，只看过期时间）；无效返回 null */
+function jwtExp(token: string): number | null {
+  try {
+    const payload = token.split('.')[1];
+    if (!payload) return null;
+    const padded = payload + '='.repeat((-payload.length % 4 + 4) % 4);
+    const data = JSON.parse(Buffer.from(padded, 'base64url').toString('utf8')) as { exp?: number };
+    return typeof data.exp === 'number' ? data.exp * 1000 : null;
+  } catch {
+    return null;
+  }
+}
+
+interface WindowPayload {
+  used_percent?: number;
+  reset_at?: number;
+  limit_window_seconds?: number;
+}
+
+interface UsagePayload {
+  plan_type?: string;
+  rate_limit?: {
+    primary_window?: WindowPayload;
+    secondary_window?: WindowPayload;
+    additional_rate_limits?: Array<{ used_percent?: number; reset_at?: number }>;
+  };
+  credits?: {
+    has_credits?: boolean;
+    unlimited?: boolean;
+    balance?: number | null;
+  };
+}
+
+function num(v: unknown): number | null {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return null;
+  return v;
+}
+
+export function normalizeCodex(raw: unknown): QuotaWindow[] {
+  if (raw == null || typeof raw !== 'object') {
+    throw new AdapterError('parse', 'Codex 响应不是 JSON 对象');
+  }
+  const root = raw as UsagePayload;
+  const windows: QuotaWindow[] = [];
+
+  const pushWindow = (id: string, label: string, w: WindowPayload | undefined): void => {
+    if (!w || typeof w !== 'object') return;
+    const usedPercent = num(w.used_percent);
+    if (usedPercent == null) return;
+    const resetSec = num(w.reset_at);
+    windows.push({
+      window: id,
+      label,
+      used: null, // 接口只给百分比
+      total: null,
+      unit: 'percent',
+      percentage: Math.min(100, Math.max(0, usedPercent)),
+      resetAt: resetSec != null ? resetSec * 1000 : null,
+      note: null,
+    });
+  };
+
+  pushWindow('rolling_5h', '5H', root.rate_limit?.primary_window);
+  pushWindow('weekly', 'Week', root.rate_limit?.secondary_window);
+
+  // 模型级附加窗口（如 Codex Spark 5h/weekly）尽力解析；多条用序号区分避免同 key 覆盖
+  let extraIdx = 0;
+  for (const extra of root.rate_limit?.additional_rate_limits ?? []) {
+    if (!extra || typeof extra !== 'object') continue;
+    const usedPercent = num(extra.used_percent);
+    if (usedPercent == null) continue;
+    extraIdx += 1;
+    pushWindow('extra', `Extra${extraIdx}`, extra);
+  }
+
+  // credits：余额信息（无窗口百分比）
+  const credits = root.credits;
+  if (credits && credits.has_credits) {
+    const balance = num(credits.balance);
+    windows.push({
+      window: 'credits',
+      label: 'Credits',
+      used: balance,
+      total: null,
+      unit: 'usd',
+      percentage: null,
+      resetAt: null,
+      note: credits.unlimited ? '不限量' : balance != null ? `余额 $${balance}` : null,
+    });
+  }
+
+  if (windows.length === 0) {
+    throw new AdapterError('parse', 'Codex 响应没有可用窗口');
+  }
+  return windows;
+}
+
+export const codexAdapter: PlanAdapter = {
+  slug: 'codex',
+
+  async detectCredentials(ctx: AdapterContext): Promise<Credential | null> {
+    if (ctx.plan.credRef) {
+      const { readCredential } = await import('../auth.ts');
+      const stored = readCredential(ctx.plan.credRef);
+      if (stored) return { kind: 'bearer', value: stored.value, source: 'manual' };
+    }
+    const envToken = process.env.CODEX_TOKEN;
+    if (envToken && envToken.trim()) {
+      return { kind: 'bearer', value: envToken.trim(), source: 'env' };
+    }
+    const auth = readAuthFile();
+    const token = auth.tokens?.access_token;
+    if (!token) return null;
+    return {
+      kind: 'bearer',
+      value: token,
+      accountId: auth.tokens?.account_id ?? null,
+      source: 'auto',
+    };
+  },
+
+  async fetchUsage(_ctx: AdapterContext, cred: Credential): Promise<QuotaWindow[]> {
+    // 过期预检：token 刷新归 Codex CLI 所有，过期时引导用户重新登录
+    const exp = jwtExp(cred.value);
+    if (exp != null && exp < Date.now() + 60_000) {
+      throw new AdapterError('auth', 'Codex OAuth token 已过期：请运行 `codex` 重新登录后重试');
+    }
+
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${cred.value}`,
+      accept: 'application/json',
+      'user-agent': cred.source === 'manual' ? 'planofplan' : 'codex-cli',
+    };
+    if (cred.accountId) headers['ChatGPT-Account-Id'] = cred.accountId;
+
+    let res: Response;
+    try {
+      res = await fetch(USAGE_URL, {
+        method: 'GET',
+        headers,
+        signal: AbortSignal.timeout(10_000),
+      });
+    } catch (e) {
+      if (e instanceof Error && e.name === 'TimeoutError') {
+        throw new AdapterError('network', `Codex 请求超时：${USAGE_URL}`);
+      }
+      throw new AdapterError('network', `Codex 网络错误：${String(e instanceof Error ? e.message : e)}`);
+    }
+
+    if (res.status === 401 || res.status === 403) {
+      throw new AdapterError('auth', `Codex 鉴权失败(HTTP ${res.status})：请运行 \`codex\` 重新登录`);
+    }
+    if (!res.ok) {
+      if (res.status === 429) throw new AdapterError('api', 'Codex 请求被限流(HTTP 429)');
+      throw new AdapterError('api', `Codex API 错误(HTTP ${res.status})`);
+    }
+
+    let json: unknown;
+    try {
+      json = await res.json();
+    } catch {
+      throw new AdapterError('parse', 'Codex 响应不是合法 JSON');
+    }
+    return normalizeCodex(json);
+  },
+};

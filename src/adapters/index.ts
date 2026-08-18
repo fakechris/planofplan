@@ -1,8 +1,12 @@
 import type { PlanAdapter } from '../types.ts';
 import { minimaxAdapter } from './minimax.ts';
+import { glmAdapter } from './glm.ts';
+import { codexAdapter } from './codex.ts';
 
 export const registry: Record<string, PlanAdapter> = {
   minimax: minimaxAdapter,
+  glm: glmAdapter,
+  codex: codexAdapter,
 };
 
 export function getAdapter(slug: string): PlanAdapter | null {
