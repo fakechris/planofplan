@@ -101,8 +101,8 @@ export function normalizeCodex(raw: unknown): QuotaWindow[] {
     });
   };
 
-  pushWindow('rolling_5h', '5H', root.rate_limit?.primary_window);
-  pushWindow('weekly', 'Week', root.rate_limit?.secondary_window);
+  pushWindow('rolling_5h', '5小时限额', root.rate_limit?.primary_window);
+  pushWindow('weekly', '周限额', root.rate_limit?.secondary_window);
 
   // 模型级附加窗口（如 Codex Spark 5h/weekly）尽力解析；多条用序号区分避免同 key 覆盖
   let extraIdx = 0;

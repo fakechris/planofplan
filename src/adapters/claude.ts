@@ -27,6 +27,7 @@ interface OauthWindow {
   limit_dollars?: number | null;
   used_dollars?: number | null;
   remaining_dollars?: number | null;
+  resets_at?: string | number | null;
 }
 
 interface ExtraUsage {
@@ -47,6 +48,15 @@ function num(v: unknown): number | null {
   return v;
 }
 
+function resetTimeMs(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value > 1e12 ? value : value * 1000;
+  }
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 export function normalizeClaude(raw: unknown): QuotaWindow[] {
   if (raw == null || typeof raw !== 'object') {
     throw new AdapterError('parse', 'Claude 响应不是 JSON 对象');
@@ -65,7 +75,7 @@ export function normalizeClaude(raw: unknown): QuotaWindow[] {
       total: num(w.limit_dollars),
       unit: 'percent',
       percentage: Math.min(100, Math.max(0, utilization)),
-      resetAt: null,
+      resetAt: resetTimeMs(w.resets_at),
       note: null,
     });
   };

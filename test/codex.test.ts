@@ -24,9 +24,11 @@ describe('normalizeCodex', () => {
     expect(windows).toHaveLength(3);
     const five = windows.find((w) => w.window === 'rolling_5h')!;
     expect(five.percentage).toBe(15);
+    expect(five.label).toBe('5小时限额');
     expect(five.resetAt).toBe(1735401600 * 1000); // 秒 → 毫秒
     const weekly = windows.find((w) => w.window === 'weekly')!;
     expect(weekly.percentage).toBe(5);
+    expect(weekly.label).toBe('周限额');
     const credits = windows.find((w) => w.window === 'credits')!;
     expect(credits.unit).toBe('usd');
     expect(credits.used).toBe(150);

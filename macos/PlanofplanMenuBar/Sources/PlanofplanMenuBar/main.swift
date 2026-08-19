@@ -341,6 +341,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 NSLog("planofplan: invalid overview response: \(error)")
             }
             self.rebuildMenu()
+            self.startSafariPermissionOnboardingIfNeeded()
             self.bootstrapBrowserSessions()
         }
     }

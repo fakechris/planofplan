@@ -5,16 +5,28 @@ import { AdapterError, type AdapterContext, type Credential } from '../src/types
 describe('normalizeClaude', () => {
   test('本机实测响应形状：five_hour/seven_day utilization', () => {
     const raw = {
-      five_hour: { utilization: 7, limit_dollars: null, used_dollars: null },
-      seven_day: { utilization: 18, limit_dollars: null, used_dollars: null },
+      five_hour: {
+        utilization: 7,
+        resets_at: '2026-08-18T05:00:00.000Z',
+        limit_dollars: null,
+        used_dollars: null,
+      },
+      seven_day: {
+        utilization: 18,
+        resets_at: '2026-08-25T00:00:00.000Z',
+        limit_dollars: null,
+        used_dollars: null,
+      },
       extra_usage: { is_enabled: false, monthly_limit: null, used_credits: null, utilization: null },
     };
     const windows = normalizeClaude(raw);
     expect(windows).toHaveLength(2);
     const five = windows.find((w) => w.window === 'rolling_5h')!;
     expect(five.percentage).toBe(7);
+    expect(five.resetAt).toBe(Date.parse('2026-08-18T05:00:00.000Z'));
     const week = windows.find((w) => w.window === 'weekly')!;
     expect(week.percentage).toBe(18);
+    expect(week.resetAt).toBe(Date.parse('2026-08-25T00:00:00.000Z'));
   });
 
   test('extra_usage 启用且有额定时渲染月度窗口', () => {
