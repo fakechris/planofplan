@@ -50,6 +50,48 @@ describe('Kimi browser policy', () => {
     expect(body.scanStatus.state).toBe('idle');
   });
 
+  test('usage API caches the report between scans', async () => {
+    const store = openMemoryDb();
+    for (const plan of DEFAULT_PLANS) store.syncPlan(plan);
+    const server = createServer(store, scheduler as never, { port: 9291, plans: DEFAULT_PLANS });
+    const timestamp = Date.now() - 60_000;
+    const record: UsageRecord = {
+      id: 'local:test:cache-a',
+      day: new Date(timestamp).toISOString().slice(0, 10),
+      timestamp,
+      provider: 'codex',
+      model: 'gpt-5',
+      inputTokens: 10,
+      cachedInputTokens: 0,
+      cacheCreationInputTokens: 0,
+      outputTokens: 5,
+      reasoningOutputTokens: 0,
+      totalTokens: 15,
+      billableTokens: null,
+      estimatedCostUsd: null,
+      source: 'local',
+      confidence: 'measured',
+    };
+    store.upsertUsageRecords([record]);
+    const first = await (await server.request('http://localhost/api/usage?days=7&official=0')).json() as {
+      recordCount: number;
+    };
+    expect(first.recordCount).toBe(1);
+
+    // TTL 内的写入不重算（真实写入方是扫描子进程，完成时主动失效缓存）。
+    store.upsertUsageRecords([{ ...record, id: 'local:test:cache-b' }]);
+    const cached = await (await server.request('http://localhost/api/usage?days=7&official=0')).json() as {
+      recordCount: number;
+    };
+    expect(cached.recordCount).toBe(1);
+
+    // 不同 days/provider 组合是独立缓存键，不命中。
+    const other = await (await server.request('http://localhost/api/usage?days=7&provider=codex&official=0')).json() as {
+      recordCount: number;
+    };
+    expect(other.recordCount).toBe(2);
+  });
+
   test('refresh all reports failed provider details despite HTTP 200', async () => {
     const plans = [
       { ...DEFAULT_PLANS.find((plan) => plan.slug === 'factory')!, enabled: true },

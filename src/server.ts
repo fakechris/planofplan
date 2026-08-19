@@ -19,6 +19,11 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
   let usageRefreshProcess: Bun.Subprocess | null = null;
   let usageRefreshStartedAt: number | null = null;
   let usageRefreshError: string | null = null;
+  // usage 报表缓存：usage_records 只随扫描子进程 / 手动 CLI 写入变化，聚合
+  // 十几万行是秒级同步 CPU+IO 工作，前端 30s 一次的轮询不应每次重算。
+  // 扫描完成时整体失效；TTL 兜底覆盖外部 CLI 的直写。
+  const usageReportCache = new Map<string, { report: ReturnType<typeof buildUsageReport>; at: number }>();
+  const USAGE_CACHE_TTL_MS = 60_000;
 
   const startUsageRefresh = (days: number, includeOfficial: boolean): void => {
     if (usageRefreshProcess) return;
@@ -48,6 +53,7 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
       .finally(() => {
         usageRefreshProcess = null;
         usageRefreshStartedAt = null;
+        usageReportCache.clear();
       });
   };
 
@@ -105,12 +111,29 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     const now = Date.now();
     const since = now - days * 86_400_000;
     if (refresh && !usageRefreshProcess) {
+      usageReportCache.clear();
       startUsageRefresh(days, includeOfficial);
+    }
+    const cacheKey = `${days}:${provider ?? 'all'}`;
+    if (!refresh) {
+      const cached = usageReportCache.get(cacheKey);
+      if (cached && now - cached.at < USAGE_CACHE_TTL_MS) {
+        return c.json({
+          ...cached.report,
+          scanStatus: usageRefreshProcess
+            ? { state: 'running', startedAt: usageRefreshStartedAt }
+            : usageRefreshError
+              ? { state: 'error', startedAt: null, error: usageRefreshError }
+              : { state: 'idle', startedAt: null },
+        });
+      }
     }
     const records = store.getUsageRecords(since, now);
     const filtered = provider ? records.filter((record) => record.provider === provider) : records;
+    const report = buildUsageReport(filtered, { since, until: now, generatedAt: now });
+    usageReportCache.set(cacheKey, { report, at: now });
     return c.json({
-      ...buildUsageReport(filtered, { since, until: now, generatedAt: now }),
+      ...report,
       scanStatus: usageRefreshProcess
         ? { state: 'running', startedAt: usageRefreshStartedAt }
         : usageRefreshError
