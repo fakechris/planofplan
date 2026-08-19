@@ -146,23 +146,31 @@ Cookie token 不写入数据库或凭据文件。
 }
 ```
 
-## 常驻 daemon（launchd 自愈）
+## 常驻 daemon（launchd 自愈，默认关闭）
 
 menubar app 只在自身启动时探测并拉起一次 daemon，daemon 之后死掉它不会重试
-（2026-08-19 的事故原因）。安装 launchd 守护后：daemon 崩溃/被杀约 10 秒内自动重启，
-登录自启，端口与 menubar bundle 一致（默认 9291），menubar 探测到端口健康就不会重复 spawn：
+（2026-08-19 的事故原因）。**开机自启默认不开启**，也不会替用户安装任何
+LaunchAgent；在 Dashboard header 的「开机自启」开关里显式选择：
+
+- **从关到开**：安装 `local.planofplan.daemon` LaunchAgent（KeepAlive 崩溃/被杀
+  约 10s 自动重启，RunAtLoad 登录自启），daemon 会切换到 launchd 守护下重启接管，
+  页面短暂重连。端口与 menubar bundle 一致（默认 9291），menubar 探测到端口健康
+  就不会重复 spawn。
+- **从开到关**：删除 LaunchAgent 注册；注销/重启后不再自动启动。当前会话里已在
+  运行的 daemon 不受影响，继续服务到注销为止。
+
+CLI 等价命令与检查方式：
 
 ```bash
-bun run daemon:install                                    # 安装并立即启动
-launchctl print gui/$(id -u)/local.planofplan.daemon      # 查看状态
-launchctl bootout gui/$(id -u)/local.planofplan.daemon    # 停止（下次登录仍会自启）
-rm ~/Library/LaunchAgents/local.planofplan.daemon.plist   # 彻底卸载
+bun run daemon:install                                    # 安装并立即启动（同开关开启）
+bun run daemon:uninstall                                   # 删除自启注册（同开关关闭）
+launchctl print gui/$(id -u)/local.planofplan.daemon      # 查看守护状态
 ```
 
 - 日志在 `~/.planofplan/serve.log`（kimi Safari 授权警告每分钟追加约两行，注意定期
   `: > ~/.planofplan/serve.log` 清空）。
 - plist 记录的是仓库绝对路径，仓库移动/改名后需重新 `bun run daemon:install`。
-- 装了守护后不要再手动 `bun run serve`：默认端口不同（9288 vs 9291），会出现两个
+- 开启守护后不要再手动 `bun run serve`：默认端口不同（9288 vs 9291），会出现两个
   daemon 同时轮询并写同一个 SQLite 库。
 
 ## 配置

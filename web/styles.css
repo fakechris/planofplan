@@ -91,6 +91,11 @@ button {
 button:hover { border-color: var(--cyan); background: var(--surface-soft); }
 .button-primary { color: #071014; background: var(--cyan); border-color: var(--cyan); font-weight: 700; }
 .button-primary:hover { background: #8be7f2; border-color: #8be7f2; }
+.startup-toggle { color: var(--muted); padding: 7px 11px; font-size: 11px; }
+.startup-toggle i { display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; background: var(--faint); }
+.startup-toggle.on { color: var(--ok); border-color: rgba(87, 211, 154, .4); }
+.startup-toggle.on i { background: var(--ok); }
+.startup-toggle:disabled { opacity: .55; cursor: wait; }
 .button-quiet { color: var(--muted); background: transparent; padding: 7px 10px; }
 .inline-action { border: 0; padding: 0; color: var(--cyan); background: transparent; font-size: 11px; }
 .inline-action:hover { background: transparent; }

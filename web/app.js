@@ -602,7 +602,56 @@ document.getElementById('refreshBtn').addEventListener('click', async () => {
   }
 });
 
+let launchOnStartupEnabled = null; // null = 不可用/未知，按钮保持隐藏
+
+function renderStartupToggle(enabled) {
+  launchOnStartupEnabled = enabled;
+  const btn = document.getElementById('startupToggle');
+  btn.innerHTML = '<i></i>开机自启';
+  btn.hidden = false;
+  btn.setAttribute('aria-pressed', String(enabled));
+  btn.classList.toggle('on', enabled);
+}
+
+async function loadStartupSettings() {
+  try {
+    const settings = await request('/api/settings');
+    if (settings.launchOnStartup?.available) {
+      renderStartupToggle(Boolean(settings.launchOnStartup.enabled));
+    }
+  } catch {
+    // 离线时保持现有状态，30s 轮询重连后自然恢复
+  }
+}
+
+document.getElementById('startupToggle')?.addEventListener('click', async (event) => {
+  const btn = event.currentTarget;
+  if (btn.disabled || launchOnStartupEnabled == null) return;
+  const next = !launchOnStartupEnabled;
+  btn.disabled = true;
+  try {
+    const result = await request('/api/settings/launch-on-startup', {
+      method: 'PUT',
+      body: JSON.stringify({ enabled: next }),
+    });
+    renderStartupToggle(result.enabled);
+    showToast(next
+      ? '开机自启已开启：daemon 正在切换到 launchd 守护，页面会短暂重连'
+      : '开机自启已关闭：注销/重启后不再自动启动，当前服务继续运行');
+    if (next) {
+      // 开启会让 daemon 在 launchd 下重启接管，连接短暂中断，稍后重连刷新
+      setTimeout(() => { void render(); void loadStartupSettings(); }, 2500);
+      setTimeout(() => { void render(); void loadStartupSettings(); }, 7000);
+    }
+  } catch (error) {
+    showToast(error.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 render();
+loadStartupSettings();
 tickClock();
 setInterval(tickClock, 1000);
 setInterval(render, 30_000);

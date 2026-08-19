@@ -10,6 +10,7 @@ import { KIMI_BROWSER, KIMI_BROWSERS, type KimiBrowser } from './browser-cookies
 import { acceptFactoryBrowserCookies } from './factory-session.ts';
 import { getBuildInfo } from './build-info.ts';
 import { buildUsageReport } from './usage.ts';
+import { getStartupSettings, setLaunchOnStartup } from './startup.ts';
 
 const WEB_DIR = resolve(import.meta.dir, '../web');
 
@@ -56,6 +57,27 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
 
   app.get('/api/build-info', (c) => {
     return c.json(getBuildInfo());
+  });
+
+  app.get('/api/settings', (c) => {
+    return c.json(getStartupSettings());
+  });
+
+  app.put('/api/settings/launch-on-startup', async (c) => {
+    let body: { enabled?: boolean } | null = null;
+    try {
+      body = (await c.req.json()) as { enabled?: boolean };
+    } catch {
+      return c.json({ ok: false, error: 'body 必须是 JSON' }, 400);
+    }
+    if (typeof body.enabled !== 'boolean') {
+      return c.json({ ok: false, error: 'enabled 必须是 boolean' }, 400);
+    }
+    try {
+      return c.json(setLaunchOnStartup(body.enabled));
+    } catch (error) {
+      return c.json({ ok: false, error: error instanceof Error ? error.message : '设置失败' }, 400);
+    }
   });
 
   app.get('/api/plans/:slug', (c) => {

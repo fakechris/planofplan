@@ -44,6 +44,24 @@ EOF
 
 launchctl bootout "gui/$UID_/$LABEL" 2>/dev/null || true
 
+# 接管端口：bootout 已处理 launchd 自身的旧任务，这里清理 menubar/手动
+# 启动的旧 daemon（可能正是发起本次安装的 HTTP 服务进程）。先等 1s 让
+# 响应落地，再等端口真正释放，避免 bootstrap 撞 EADDRINUSE。
+sleep 1
+if command -v lsof >/dev/null 2>&1; then
+  for pid in $(lsof -t -nP -iTCP:"$PORT" -sTCP:LISTEN 2>/dev/null); do
+    kill "$pid" 2>/dev/null || true
+  done
+  i=0
+  while [ "$i" -lt 10 ] && lsof -t -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; do
+    sleep 0.5
+    i=$((i + 1))
+  done
+fi
+
+# 清掉历史上可能残留的 disable 标记，否则 bootstrap 后任务不会运行。
+launchctl enable "gui/$UID_/$LABEL" 2>/dev/null || true
+
 # bootout 异步生效，立即 bootstrap 可能报 5: I/O error，小退避重试。
 BOOTSTRAPPED=0
 for _ in 1 2 3 4 5; do

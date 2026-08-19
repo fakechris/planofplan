@@ -10,6 +10,7 @@ describe('dashboard shell', () => {
       'connectionState',
       'generatedAt',
       'refreshBtn',
+      'startupToggle',
       'summary',
       'usageScanBtn',
       'usageDays',
