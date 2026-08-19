@@ -485,6 +485,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     domainMatch: .suffix,
                     includeExpired: false
                 )
+                let workos = selection.planSlug == "factory"
+                    ? self.workOSCredentials(in: nativeBrowser)
+                    : nil
+                if let workos {
+                    NSLog("planofplan browser \(browser) factory: submitting WorkOS session")
+                    let payload = BrowserSessionPayload(
+                        planSlug: selection.planSlug,
+                        browser: browser,
+                        cookies: [],
+                        workos: workos
+                    )
+                    let body = try JSONEncoder().encode(payload)
+                    self.request(path: "/api/browser-session", method: "POST", body: body) { [weak self] _, status in
+                        NSLog("planofplan browser \(browser) \(selection.planSlug): session POST status \(status)")
+                        self?.refreshOverview()
+                    }
+                    return
+                }
                 let sources = try client.records(matching: query, in: nativeBrowser)
                 NSLog(
                     "planofplan browser \(browser) \(selection.planSlug): found \(sources.reduce(0) { $0 + $1.records.count }) cookie records"
@@ -510,10 +528,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                     break
                 }
-                let workos = selection.planSlug == "factory"
-                    ? self.workOSCredentials(in: nativeBrowser)
-                    : nil
-                guard let cookies = selectedCookies ?? (workos == nil ? nil : []) else {
+                guard let cookies = selectedCookies else {
                     throw BrowserSessionError.noSessionCookie
                 }
                 let payload = BrowserSessionPayload(
