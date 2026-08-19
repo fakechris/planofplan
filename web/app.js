@@ -141,6 +141,20 @@ function renderSummary(ov) {
 }
 
 function renderCredentialSettings(card, p) {
+  if (p.adapter === 'factory') {
+    return `
+      <div class="settings-section">
+        <div class="settings-title">Factory API key</div>
+        <p class="settings-copy">优先使用 FACTORY_API_KEY 或 <code>~/.factory/.env</code>。也可在 Factory API keys 页面创建 key。</p>
+        <form class="key-form" data-auth-form>
+          <input type="password" name="apiKey" autocomplete="new-password" placeholder="粘贴 Factory API key" aria-label="Factory API key" />
+          <button type="submit" class="button-primary">保存并验证</button>
+          <button type="button" class="button-quiet" data-auth-auto>使用自动凭据</button>
+        </form>
+        <div class="settings-links"><a href="https://app.factory.ai/settings/api-keys" target="_blank" rel="noreferrer">打开 Factory API keys ↗</a></div>
+      </div>
+    `;
+  }
   if (p.adapter !== 'glm') {
     if (!p.credentialHint) return '';
     return `<div class="credential-hint">${escapeHtml(p.credentialHint)}</div>`;
@@ -172,9 +186,11 @@ function renderBrowserSettings(card, p) {
         <label>读取 ${escapeHtml(p.name)} 的登录态
           <select data-browser-select aria-label="${escapeHtml(p.name)} 浏览器">${options}</select>
         </label>
-        <button type="button" class="button-quiet" data-browser-auth>读取并刷新</button>
+        ${p.adapter === 'factory'
+          ? '<span class="muted browser-native-note">由 menubar 自动读取</span>'
+          : '<button type="button" class="button-quiet" data-browser-auth>读取并刷新</button>'}
       </div>
-      <p class="settings-copy">仅此 provider 使用该浏览器，会话 token 只保存在当前 daemon 内存。</p>
+      <p class="settings-copy">${p.adapter === 'factory' ? 'Factory 浏览器会话由原生 menubar 读取，token 只保存在当前 daemon 内存。' : '仅此 provider 使用该浏览器，会话 token 只保存在当前 daemon 内存。'}</p>
     </div>
   `;
 }

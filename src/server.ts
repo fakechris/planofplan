@@ -7,6 +7,7 @@ import { buildOverview } from './core.ts';
 import { writeCredential, deleteCredential } from './auth.ts';
 import { acceptKimiBrowserCookies, refreshKimiBrowserSession } from './adapters/kimi.ts';
 import { KIMI_BROWSERS, type KimiBrowser } from './browser-cookies.ts';
+import { acceptFactoryBrowserCookies } from './factory-session.ts';
 import { getBuildInfo } from './build-info.ts';
 
 const WEB_DIR = resolve(import.meta.dir, '../web');
@@ -87,7 +88,7 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     const slug = c.req.param('slug');
     const plan = store.getPlan(slug);
     if (!plan) return c.json({ ok: false, error: 'unknown plan' }, 404);
-    if (plan.adapter !== 'kimi') {
+    if (plan.adapter !== 'kimi' && plan.adapter !== 'factory') {
       return c.json({ ok: false, error: `${plan.name} 暂不支持浏览器会话` }, 400);
     }
     let body: { browser?: string } = {};
@@ -107,8 +108,11 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     const slug = c.req.param('slug');
     const plan = store.getPlan(slug);
     if (!plan) return c.json({ ok: false, error: 'unknown plan' }, 404);
-    if (plan.adapter !== 'kimi') {
+    if (plan.adapter !== 'kimi' && plan.adapter !== 'factory') {
       return c.json({ ok: false, error: `${plan.name} 暂不支持浏览器会话` }, 400);
+    }
+    if (plan.adapter === 'factory') {
+      return c.json({ ok: false, slug, error: 'Factory 浏览器会话请从 menubar 读取' }, 400);
     }
     let body: { browser?: string } = {};
     try {
@@ -156,7 +160,18 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     const cookies = Array.isArray(body?.cookies) ? body.cookies : [];
     let kimiResult: unknown = null;
     const planSlug = body.planSlug ?? 'kimi';
-    if (acceptKimiBrowserCookies(cookies, `${body?.browser ?? 'browser'} (native)`, planSlug)) {
+    const source = `${body?.browser ?? 'browser'} (native)`;
+    const accepted = planSlug === 'factory'
+      ? acceptFactoryBrowserCookies(
+          cookies.flatMap((cookie) =>
+            typeof cookie.name === 'string' && typeof cookie.value === 'string'
+              ? [{ ...cookie, name: cookie.name, value: cookie.value }]
+              : []
+          ),
+          source,
+        )
+      : acceptKimiBrowserCookies(cookies, source, planSlug);
+    if (accepted) {
       store.updatePlanExtra(planSlug, { browser: body.browser ?? null });
       kimiResult = await scheduler.refreshPlan(planSlug);
     }

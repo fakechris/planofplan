@@ -3,7 +3,7 @@
 本地 dashboard，管理多个 AI Coding Plan 订阅的用量/限额。
 展示形态参考 **CodexBar**（逐 plan 用量条 + 总览 dashboard），架构参考 **onWatch**（守护进程 + SQLite + localhost Web）。
 
-当前状态：**M2**（7 个 adapter 接入：MiniMax、GLM legacy/current、Codex、Kimi、Grok、Cursor、Claude；其中 MiniMax/Codex/Cursor/Claude 已本机真机验证）。
+当前状态：**M2**（8 个 adapter 接入：MiniMax、GLM legacy/current、Codex、Kimi、Grok、Cursor、Claude、Factory Droid；其中 MiniMax/Codex/Cursor/Claude 已本机真机验证）。
 
 ## 快速开始
 
@@ -47,7 +47,7 @@ open /Applications/planofplan.app
 commit 的完整 SHA、短 SHA、构建时间和版本写入 app，并原子替换
 `/Applications/planofplan.app`。不要从 `dist` 启动旧副本。
 
-menubar app 会启动本地 Bun daemon，并提供查看用量、刷新全部 plan、打开 Dashboard，以及**选择一个浏览器**读取 Kimi 网页会话。
+menubar app 会启动本地 Bun daemon，并提供查看用量、刷新全部 plan、打开 Dashboard，以及**选择一个浏览器**读取 Kimi/Factory 网页会话。
 
 浏览器读取不会自动遍历所有浏览器。每个浏览器的 Keychain 结果和 Kimi token 只在当前进程内存缓存，后台轮询不会再次弹出密码：
 
@@ -147,10 +147,12 @@ adapter 接口见 `src/types.ts`。MiniMax 的端点/解析规格出处：CodexB
 | Kimi Code | kimi | ✅ | 读 `~/.kimi-code/credentials/kimi-code.json`；按 onWatch 规则自动刷新并写回轮换 token；月限额需 kimi.com 网页登录态 |
 | Grok | grok | ✅ | 读 `~/.grok/auth.json`；Credits 95%（实测，8/18 重登后；SuperGrok） |
 | Cursor legacy | cursor | ✅ | 读 `state.vscdb`；legacy 0/500（实测，本月已重置） |
+| Factory Droid | factory | ⏳ | 对齐 CodexBar：API key 走 `/api/billing/limits`，网页会话走 Factory cookie；Standard 5H/Week/Month + legacy Standard/Premium |
 
 ## 已知限制（M2）
 
 - GLM 待 API key：在 Dashboard 的 GLM 设置弹窗填写，或运行 `planofplan auth set glm --key <key>`；也可设置 `Z_AI_API_KEY` / `ZAI_API_KEY` / `BIGMODEL_API_KEY`
+- Factory 可设置 `FACTORY_API_KEY`、`~/.factory/.env` 或运行 `planofplan auth set factory --key <key>`；也可在 `app.factory.ai` 登录后通过 menubar 读取 Safari/Chromium/Firefox 的 Factory session cookie。接口与窗口语义对齐 CodexBar `docs/factory.md`，onWatch 当前没有 Factory adapter
 - Bun fetch 不读取 HTTP(S)_PROXY；Grok 等需要代理的端点建议用系统级 TUN/全局代理（M3 可加 CONNECT 隧道）
 - Kimi 月限额仅网页会话可取：menubar 会按 provider 自动读取所选浏览器；遵循 CodexBar 的 `desktopAuthToken()`/`importSession().authToken` 会话导入，不以 JWT `exp` 单独判断网页是否登出。Keychain 结果与 token 只在内存缓存，不遍历、不重复授权
 - Kimi CLI access_token 只有 15 分钟有效期：按 onWatch 规则在过期时自动调用 `auth.kimi.com/api/oauth/token`，并把轮换后的 access/refresh token 安全写回原 `kimi-code.json`；设 `KIMI_USE_REFRESH=0` 可关闭

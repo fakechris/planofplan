@@ -120,7 +120,7 @@ function buildPlanOverview(store: Store, plan: PlanConfig): OverviewPlan {
     lastAttemptAt: state?.last_attempt_at ?? null,
     lastError: state?.last_error ?? null,
     browser: plan.extra.browser ?? null,
-    browserSupported: plan.adapter === 'kimi',
+    browserSupported: plan.adapter === 'kimi' || plan.adapter === 'factory',
     credentialHint: adapter?.credentialHint ?? null,
   };
 }

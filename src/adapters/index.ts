@@ -6,6 +6,7 @@ import { kimiAdapter } from './kimi.ts';
 import { grokAdapter } from './grok.ts';
 import { cursorAdapter } from './cursor.ts';
 import { claudeAdapter } from './claude.ts';
+import { factoryAdapter } from './factory.ts';
 
 export const registry: Record<string, PlanAdapter> = {
   minimax: minimaxAdapter,
@@ -15,6 +16,7 @@ export const registry: Record<string, PlanAdapter> = {
   grok: grokAdapter,
   cursor: cursorAdapter,
   claude: claudeAdapter,
+  factory: factoryAdapter,
 };
 
 export function getAdapter(slug: string): PlanAdapter | null {

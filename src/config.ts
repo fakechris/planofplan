@@ -72,6 +72,15 @@ const DEFAULT_PLANS: PlanConfig[] = [
     credRef: null,
     extra: {},
   },
+  {
+    slug: 'factory',
+    name: 'Factory Droid',
+    adapter: 'factory',
+    enabled: true,
+    pollIntervalSec: 300,
+    credRef: null,
+    extra: { browser: 'safari' },
+  },
 ];
 
 export function homeDir(): string {

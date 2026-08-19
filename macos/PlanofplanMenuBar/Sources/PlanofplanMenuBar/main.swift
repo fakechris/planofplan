@@ -343,10 +343,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func startSafariPermissionOnboardingIfNeeded() {
         guard safariPermissionTimer == nil else { return }
-        guard overview?.plans.contains(where: { $0.slug == "kimi" && $0.browserSupported == true }) == true else {
+        guard overview?.plans.contains(where: {
+            $0.browserSupported == true && selectedBrowser(for: $0.slug) == "safari"
+        }) == true else {
             return
         }
-        guard selectedBrowser(for: "kimi") == "safari" else { return }
         switch probeSafariPermission() {
         case .denied:
             beginSafariPermissionOnboarding()
@@ -365,9 +366,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             safariPermissionTimer = nil
             safariPermissionState = .granted
             rebuildMenu()
-            readBrowserSession(
-                for: BrowserSelection(planSlug: "kimi", browser: "safari")
-            )
+            for plan in overview?.plans ?? [] where
+                plan.browserSupported == true && selectedBrowser(for: plan.slug) == "safari"
+            {
+                readBrowserSession(for: BrowserSelection(planSlug: plan.slug, browser: "safari"))
+            }
         case .denied:
             break
         case .notRequired:
@@ -453,7 +456,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             do {
                 let client = BrowserCookieClient()
                 let query = BrowserCookieQuery(
-                    domains: ["www.kimi.com", "kimi.com"],
+                    domains: self.cookieDomains(for: selection.planSlug),
                     domainMatch: .suffix,
                     includeExpired: false
                 )
@@ -466,7 +469,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 for group in sortedGroups where !group.isEmpty {
                     let mergedRecords = self.mergeBrowserRecords(group)
                     let cookies = BrowserCookieClient.makeHTTPCookies(mergedRecords, origin: query.origin)
-                    guard cookies.contains(where: { $0.name == "kimi-auth" }) else { continue }
+                    guard cookies.contains(where: {
+                        self.isSessionCookie($0.name, for: selection.planSlug)
+                    }) else { continue }
                     selectedCookies = cookies.map {
                         BrowserCookiePayload(
                             domain: $0.domain,
@@ -478,7 +483,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     break
                 }
                 guard let cookies = selectedCookies else {
-                    throw BrowserSessionError.noKimiCookie
+                    throw BrowserSessionError.noSessionCookie
                 }
                 let payload = BrowserSessionPayload(planSlug: selection.planSlug, browser: browser, cookies: cookies)
                 let body = try JSONEncoder().encode(payload)
@@ -487,6 +492,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             } catch {
                 if browser == "safari",
+                   (selection.planSlug == "kimi" || selection.planSlug == "factory"),
                    let browserError = error as? BrowserCookieError,
                    browserError.browser == .safari,
                    browserError.accessDeniedHint != nil
@@ -496,6 +502,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 NSLog("planofplan browser \(browser) failed: \(error)")
                 self.refreshOverview()
             }
+        }
+    }
+
+    private func cookieDomains(for planSlug: String) -> [String] {
+        switch planSlug {
+        case "factory":
+            return ["factory.ai", "app.factory.ai", "auth.factory.ai"]
+        default:
+            return ["www.kimi.com", "kimi.com"]
+        }
+    }
+
+    private func isSessionCookie(_ name: String, for planSlug: String) -> Bool {
+        switch planSlug {
+        case "factory":
+            return [
+                "wos-session",
+                "__Secure-next-auth.session-token",
+                "next-auth.session-token",
+                "__Secure-authjs.session-token",
+                "__Host-authjs.csrf-token",
+                "authjs.session-token",
+                "session",
+                "access-token",
+            ].contains(name)
+        default:
+            return name == "kimi-auth"
         }
     }
 
@@ -585,12 +618,12 @@ struct BrowserSelection {
 }
 
 enum BrowserSessionError: LocalizedError {
-    case noKimiCookie
+    case noSessionCookie
 
     var errorDescription: String? {
         switch self {
-        case .noKimiCookie:
-            return "No kimi-auth cookie found in the selected browser session."
+        case .noSessionCookie:
+            return "No supported session cookie found in the selected browser."
         }
     }
 }
