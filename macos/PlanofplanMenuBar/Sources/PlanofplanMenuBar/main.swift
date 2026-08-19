@@ -291,7 +291,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let stored = UserDefaults.standard.string(forKey: "\(selectedBrowserKey).\(planSlug)") {
             return stored
         }
+        if planSlug == "factory",
+           let factoryBrowser = preferredFactoryBrowser()
+        {
+            return factoryBrowser
+        }
         return overview?.plans.first(where: { $0.slug == planSlug })?.browser ?? "safari"
+    }
+
+    private func preferredFactoryBrowser() -> String? {
+        for browser in ["comet", "chrome", "brave", "arc", "chromium", "safari", "firefox"] {
+            guard let nativeBrowser = nativeBrowser(for: browser),
+                  !BrowserCookieClient().stores(for: nativeBrowser).isEmpty
+            else { continue }
+            return browser
+        }
+        return nil
     }
 
     private func bootstrapBrowserSessions() {
