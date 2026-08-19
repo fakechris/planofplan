@@ -9,6 +9,7 @@ import { refreshKimiBrowserSession } from './adapters/kimi.ts';
 import { KIMI_BROWSERS, type KimiBrowser } from './browser-cookies.ts';
 import type { Store } from './db.ts';
 import type { QuotaWindow } from './types.ts';
+import { buildUsageReport, collectUsageReport } from './usage.ts';
 
 const argv = process.argv.slice(2);
 
@@ -31,6 +32,7 @@ function help(): void {
 用法:
   planofplan serve [--demo] [--port N]     启动守护进程 + Web dashboard（http://localhost:9288）
   planofplan usage [--json] [--provider sl] 全 plan 用量输出
+  planofplan tokens [--json] [--days N] [--provider sl] token usage & spend 报表
   planofplan status                         各 plan 调度/凭据/最近抓取状态
   planofplan refresh [slug]                 手动刷新一个/全部 plan
   planofplan browser-auth                  读取 Safari kimi-auth 并刷新 Kimi
@@ -40,8 +42,8 @@ function help(): void {
 `);
 }
 
-function flags(): { demo: boolean; port: number | null; json: boolean; provider: string | null; key: string | null; auto: boolean; browser: KimiBrowser | null } {
-  const f = { demo: false, port: null as number | null, json: false, provider: null as string | null, key: null as string | null, auto: false, browser: null as KimiBrowser | null };
+function flags(): { demo: boolean; port: number | null; json: boolean; provider: string | null; key: string | null; auto: boolean; browser: KimiBrowser | null; days: number; official: boolean; db: string | null } {
+  const f = { demo: false, port: null as number | null, json: false, provider: null as string | null, key: null as string | null, auto: false, browser: null as KimiBrowser | null, days: 30, official: true, db: null as string | null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === '--demo') f.demo = true;
@@ -50,12 +52,49 @@ function flags(): { demo: boolean; port: number | null; json: boolean; provider:
     else if (a === '--port') f.port = Number(argv[++i]);
     else if (a === '--key') f.key = argv[++i] ?? null;
     else if (a === '--provider') f.provider = argv[++i] ?? null;
+    else if (a === '--days') f.days = Math.min(365, Math.max(1, Number(argv[++i] ?? 30) || 30));
+    else if (a === '--no-official') f.official = false;
+    else if (a === '--db') f.db = argv[++i] ?? null;
     else if (a === '--browser') {
       const browser = argv[++i];
       if (browser && KIMI_BROWSERS.includes(browser as KimiBrowser)) f.browser = browser as KimiBrowser;
     }
   }
   return f;
+}
+
+async function tokenUsage(): Promise<void> {
+  const f = flags();
+  const cfg = loadConfig();
+  const store = openDb(f.db ?? join(ensureHome(), 'planofplan.db'));
+  syncStore(store, cfg);
+  const now = Date.now();
+  const since = now - f.days * 86_400_000;
+  await collectUsageReport(store, { since, until: now, includeOfficial: f.official });
+  const records = f.provider
+    ? store.getUsageRecords(since, now).filter((record) => record.provider === f.provider)
+    : store.getUsageRecords(since, now);
+  const report = buildUsageReport(records, { since, until: now, generatedAt: now });
+  if (f.json) {
+    console.log(JSON.stringify(report, null, 2));
+    return;
+  }
+  console.log(`Token usage (${f.days} days) · ${report.recordCount} records`);
+  console.log(
+    `  total ${formatTokens(report.totals.totalTokens)} · input ${formatTokens(report.totals.inputTokens)} · cache-read ${formatTokens(report.totals.cachedInputTokens)} · cache-create ${formatTokens(report.totals.cacheCreationInputTokens)} · output ${formatTokens(report.totals.outputTokens)} · reasoning ${formatTokens(report.totals.reasoningOutputTokens)} · estimated $${report.totals.estimatedCostUsd?.toFixed(4) ?? '--'}`,
+  );
+  if (report.sources.length > 0) {
+    console.log(`  sources ${report.sources.map((source) => `${source.source} ${formatTokens(source.totalTokens)}`).join(' · ')}`);
+  }
+  for (const model of report.models.slice(0, 12)) {
+    console.log(`  ${model.provider}/${model.model}: ${formatTokens(model.totalTokens)} · $${model.estimatedCostUsd?.toFixed(4) ?? '--'}`);
+  }
+}
+
+function formatTokens(value: number): string {
+  if (value < 1_000) return String(value);
+  if (value < 1_000_000) return `${(value / 1_000).toFixed(1)}K`;
+  return `${(value / 1_000_000).toFixed(2)}M`;
 }
 
 // ── serve ──────────────────────────────────────────────────────────
@@ -231,6 +270,10 @@ switch (cmd) {
     break;
   case 'usage':
     usage();
+    break;
+  case 'tokens':
+  case 'token-usage':
+    await tokenUsage();
     break;
   case 'status':
     status();

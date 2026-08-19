@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { createServer } from '../src/server.ts';
 import { openMemoryDb } from '../src/db.ts';
 import { DEFAULT_PLANS } from '../src/config.ts';
+import type { UsageRecord } from '../src/types.ts';
 
 const scheduler = {
   refreshPlan: async () => ({ ok: true, slug: 'kimi', windows: [] }),
@@ -14,6 +15,41 @@ function app() {
 }
 
 describe('Kimi browser policy', () => {
+  test('usage API returns token aggregates separately from quota overview', async () => {
+    const store = openMemoryDb();
+    for (const plan of DEFAULT_PLANS) store.syncPlan(plan);
+    const timestamp = Date.now() - 60_000;
+    const record: UsageRecord = {
+      id: 'local:test:usage',
+      day: new Date(timestamp).toISOString().slice(0, 10),
+      timestamp,
+      provider: 'codex',
+      model: 'gpt-5',
+      inputTokens: 10,
+      cachedInputTokens: 2,
+      cacheCreationInputTokens: 0,
+      outputTokens: 5,
+      reasoningOutputTokens: 1,
+      totalTokens: 15,
+      billableTokens: null,
+      estimatedCostUsd: 0.01,
+      source: 'local',
+      confidence: 'measured',
+    };
+    store.upsertUsageRecords([record]);
+    const response = await createServer(store, scheduler as never, { port: 9291, plans: DEFAULT_PLANS })
+      .request('http://localhost/api/usage?days=7&official=0&scan=0');
+    expect(response.status).toBe(200);
+    const body = await response.json() as {
+      totals: { totalTokens: number };
+      models: Array<{ provider: string }>;
+      scanStatus: { state: string };
+    };
+    expect(body.totals.totalTokens).toBe(15);
+    expect(body.models.map((model) => model.provider)).toEqual(['codex']);
+    expect(body.scanStatus.state).toBe('idle');
+  });
+
   test('refresh all reports failed provider details despite HTTP 200', async () => {
     const plans = [
       { ...DEFAULT_PLANS.find((plan) => plan.slug === 'factory')!, enabled: true },

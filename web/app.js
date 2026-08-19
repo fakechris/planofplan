@@ -23,6 +23,7 @@ const BROWSER_NAMES = {
 
 let latestOverview = null;
 let latestBuildInfo = null;
+let latestUsage = null;
 
 function fmtTime(ms, withSeconds = false) {
   if (ms == null) return '--';
@@ -92,12 +93,105 @@ async function request(path, options = {}) {
 }
 
 async function load() {
-  const [overview, buildInfo] = await Promise.all([
+  const days = document.getElementById('usageDays')?.value || '30';
+  const [overview, buildInfo, usage] = await Promise.all([
     request('/api/overview'),
     request('/api/build-info'),
+    request(`/api/usage?days=${encodeURIComponent(days)}`),
   ]);
   latestBuildInfo = buildInfo;
+  latestUsage = usage;
   return overview;
+}
+
+function fmtTokens(value) {
+  const n = Number(value || 0);
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}K`;
+  return `${(n / 1_000_000).toFixed(2)}M`;
+}
+
+function fmtUsd(value) {
+  return value == null ? '--' : `$${Number(value).toFixed(4)}`;
+}
+
+function usageSourceLabel(source, confidence) {
+  if (source === 'official') return confidence === 'official' ? '官方 Analytics' : '官方';
+  return '本地日志';
+}
+
+function renderUsage(report) {
+  const el = document.getElementById('usageReport');
+  if (!el) return;
+  const scanNote = report?.scanStatus?.state === 'running'
+    ? '本地日志扫描中，当前显示上次已保存的数据。'
+    : report?.scanStatus?.state === 'error'
+      ? `本地日志扫描失败：${escapeHtml(report.scanStatus.error || '未知错误')}`
+      : '配额百分比与 token 消耗分开统计。本地成本是模型价格表估算，官方数据保留官方来源标记。';
+  if (!report || report.recordCount === 0) {
+    el.innerHTML = `
+      <div class="usage-empty">
+        <strong>还没有 token usage</strong>
+        <span>${scanNote} 点击“扫描本地日志”读取 Codex、Claude、ZCode、Kimi CLI、Grok CLI 和 DSH；官方 Analytics 需要对应的 Admin/API key。</span>
+      </div>
+    `;
+    return;
+  }
+  const totals = report.totals;
+  const sourceHtml = report.sources.map((source) => `
+    <span class="source-chip source-${escapeHtml(source.source)}">
+      ${escapeHtml(usageSourceLabel(source.source, source.confidence))}
+      <b>${fmtTokens(source.totalTokens)}</b>
+      <small>${source.fetchedAt ? fmtAgo(source.fetchedAt, Date.now()) : ''}</small>
+    </span>
+  `).join('');
+  const models = report.models.slice(0, 10).map((model) => `
+    <tr>
+      <td>${escapeHtml(model.provider)}</td>
+      <td class="model-cell">${escapeHtml(model.model)}</td>
+      <td>${fmtTokens(model.inputTokens)}</td>
+      <td>${fmtTokens(model.cachedInputTokens)}</td>
+      <td>${fmtTokens(model.cacheCreationInputTokens)}</td>
+      <td>${fmtTokens(model.outputTokens)}</td>
+      <td>${fmtTokens(model.reasoningOutputTokens)}</td>
+      <td>${fmtTokens(model.totalTokens)}</td>
+      <td>${fmtUsd(model.estimatedCostUsd)}</td>
+      <td><span class="source-label">${escapeHtml(usageSourceLabel(model.source, model.confidence))}</span></td>
+    </tr>
+  `).join('');
+  const dailyMax = Math.max(1, ...report.daily.map((day) => day.totalTokens));
+  const dailyHtml = report.daily.slice(0, 14).map((day) => `
+    <div class="daily-row">
+      <span>${escapeHtml(day.day || '--')}</span>
+      <div class="daily-track"><i style="width:${Math.max(2, day.totalTokens / dailyMax * 100)}%"></i></div>
+      <b>${fmtTokens(day.totalTokens)}</b>
+    </div>
+  `).join('');
+  el.innerHTML = `
+    <div class="usage-topline">
+      <div class="usage-metric"><span>总 token</span><strong>${fmtTokens(totals.totalTokens)}</strong></div>
+      <div class="usage-metric"><span>Input</span><strong>${fmtTokens(totals.inputTokens)}</strong></div>
+      <div class="usage-metric"><span>Output</span><strong>${fmtTokens(totals.outputTokens)}</strong></div>
+      <div class="usage-metric"><span>估算成本</span><strong>${fmtUsd(totals.estimatedCostUsd)}</strong></div>
+      <div class="usage-sources">${sourceHtml}</div>
+    </div>
+    <div class="usage-grid">
+      <div class="usage-panel">
+        <div class="panel-title">Daily activity <span>按 UTC 日期</span></div>
+        <div class="daily-list">${dailyHtml || '<span class="muted">暂无日数据</span>'}</div>
+      </div>
+      <div class="usage-panel usage-table-panel">
+        <div class="panel-title">Model breakdown <span>成本按可用价格表估算</span></div>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Provider</th><th>Model</th><th>Input</th><th>Cache read</th><th>Cache create</th><th>Output</th><th>Reasoning</th><th>Total</th><th>Cost</th><th>Source</th></tr></thead>
+            <tbody>${models}</tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    <div class="usage-note">${scanNote}</div>
+  `;
 }
 
 function renderSummary(ov) {
@@ -428,6 +522,7 @@ async function render() {
       ? `${latestBuildInfo.commitSha} · ${latestBuildInfo.buildTimestamp}`
       : '当前运行构建';
     renderSummary(latestOverview);
+    renderUsage(latestUsage);
     const grid = document.getElementById('grid');
     grid.innerHTML = '';
     for (const p of latestOverview.plans) grid.appendChild(renderPlan(p, now));
@@ -457,3 +552,22 @@ render();
 tickClock();
 setInterval(tickClock, 1000);
 setInterval(render, 30_000);
+
+document.getElementById('usageDays')?.addEventListener('change', () => { void render(); });
+
+document.getElementById('usageScanBtn')?.addEventListener('click', async () => {
+  const btn = document.getElementById('usageScanBtn');
+  const days = document.getElementById('usageDays')?.value || '30';
+  btn.disabled = true;
+  btn.textContent = '扫描中…';
+  try {
+    await request(`/api/usage?days=${encodeURIComponent(days)}&refresh=1`);
+    await render();
+    showToast('本地日志扫描已启动，完成后 Usage & Spend 会自动更新。');
+  } catch (error) {
+    showToast(error.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '扫描本地日志';
+  }
+});

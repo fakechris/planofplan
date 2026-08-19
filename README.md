@@ -25,13 +25,46 @@ bun run demo
 ## CLI
 ```
 planofplan serve [--demo] [--port N]    启动守护进程 + Web dashboard
-planofplan usage [--json] [--provider sl] 全 plan 用量输出（CodexBar usage 风格）
+planofplan usage [--json] [--provider sl] 全 plan 配额输出
+planofplan tokens [--json] [--days N] [--provider sl] token usage & spend 报表
 planofplan status                        各 plan 调度/凭据/最近抓取状态
 planofplan refresh [slug]                手动刷新一个/全部 plan
 planofplan browser-auth                  只读取 Safari kimi-auth 并刷新 Kimi
 planofplan auth set <slug> --key <v>     存手动 key（credentials.json, 0600）
 planofplan auth set <slug> --auto        改回自动检测（env / CLI 凭据）
 planofplan auth clear <slug>             清掉手动 key
+```
+
+`tokens` / `/api/usage` 是独立于 quota 百分比的 Usage & Spend 报表：
+
+- 默认只读本地 provider 日志：Codex `~/.codex/sessions`、Claude
+  `~/.claude/projects`、ZCode `~/.zcode/cli/rollout`、Kimi CLI
+  `~/.kimi-code/sessions`、Grok CLI `~/.grok/logs/unified.jsonl`、DSH
+  `~/.dsh/sessions`。Codex 使用累计 token 的非负增量，Claude 使用
+  `message.id + requestId` 去重，DSH 只取最终 `assistant/message` 事件避免
+  streaming chunk 重复。
+- Droid/Factory 的 `~/.factory/sessions` 当前只有 session/message 元数据，没有可靠的
+  per-turn token ledger，因此不会把 `summaryTokens` 或消息数伪装成 token usage；Droid
+  的真实组织 token consumption 仍使用 Factory Analytics。
+- 统计 input、cache read、cache creation、output、reasoning、total，并按日期、provider、
+  model、source 聚合。
+- 本地成本是价格表估算，不是账单；未知模型不显示虚构价格。
+- 设置 `ANTHROPIC_ADMIN_API_KEY` 可加入 Claude Code Analytics，设置
+  `FACTORY_API_KEY` 可加入 Factory organization Analytics。二者要求各自的组织级权限，
+  并作为 `official` 来源单独标记。
+- 设置 `CODEX_APP_SERVER_USAGE=1` 可尝试调用本机 Codex app-server 的
+  `account/usage/read` 官方日汇总。官方数据与本地日志可能存在范围差异，报表不会把它们
+  伪装成同一份账单。
+- Dashboard 普通打开和 `GET /api/usage` 默认只读已保存数据，不会同步扫描大日志目录。
+  使用 Dashboard 的“扫描本地日志”按钮，或调用 `GET /api/usage?days=30&refresh=1`
+  显式启动后台扫描；扫描期间 API 会返回上次已保存的数据和 `scanStatus`。
+
+JSON API：
+
+```text
+GET /api/usage?days=30
+GET /api/usage?days=7&provider=codex
+GET /api/usage?days=30&refresh=1
 ```
 
 ## macOS menubar app
@@ -128,9 +161,11 @@ Cookie token 不写入数据库或凭据文件。
 ```
 src/cli.ts        入口：serve / usage / status / refresh / auth
 src/core.ts       Scheduler（轮询/退避/stale）+ overview 组装
-src/db.ts         SQLite：plans / snapshots / plan_state
+src/db.ts         SQLite：plans / snapshots / plan_state / usage_records
 src/auth.ts       manual key 存取（0600）+ env 读取
 src/adapters/     每 plan 一个 adapter：detectCredentials -> fetchUsage -> QuotaWindow[]
+src/usage.ts      本地 JSONL scanner、token 去重、日期/model/provider 聚合
+src/official-usage.ts  Anthropic / Factory Analytics + 可选 Codex app-server usage
 web/              静态前端（无构建，vanilla JS + CSS）
 ```
 

@@ -1,7 +1,9 @@
 import { Hono } from 'hono';
-import { resolve, isAbsolute } from 'node:path';
+import { existsSync, unlinkSync } from 'node:fs';
+import { join, resolve, isAbsolute } from 'node:path';
 import type { AppConfig } from './config.ts';
-import type { Store } from './db.ts';
+import { ensureHome } from './config.ts';
+import { openDb, type Store } from './db.ts';
 import type { Scheduler } from './core.ts';
 import { buildOverview } from './core.ts';
 import { writeCredential, deleteCredential } from './auth.ts';
@@ -9,11 +11,59 @@ import { acceptKimiBrowserCookies, refreshKimiBrowserSession } from './adapters/
 import { KIMI_BROWSER, KIMI_BROWSERS, type KimiBrowser } from './browser-cookies.ts';
 import { acceptFactoryBrowserCookies } from './factory-session.ts';
 import { getBuildInfo } from './build-info.ts';
+import { buildUsageReport } from './usage.ts';
 
 const WEB_DIR = resolve(import.meta.dir, '../web');
 
 export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig): Hono {
   const app = new Hono();
+  let usageRefreshProcess: Bun.Subprocess | null = null;
+  let usageRefreshStartedAt: number | null = null;
+  let usageRefreshError: string | null = null;
+
+  const startUsageRefresh = (days: number, includeOfficial: boolean): void => {
+    if (usageRefreshProcess) return;
+    usageRefreshError = null;
+    usageRefreshStartedAt = Date.now();
+    const scanDbPath = join(ensureHome(), `.usage-scan-${Date.now()}.db`);
+    const scanProcess = Bun.spawn([
+      process.execPath,
+      join(import.meta.dir, 'cli.ts'),
+      'tokens',
+      '--days',
+      String(days),
+      '--db',
+      scanDbPath,
+      ...(includeOfficial ? [] : ['--no-official']),
+    ], {
+      stdout: 'ignore',
+      stderr: 'ignore',
+    });
+    usageRefreshProcess = scanProcess;
+    void scanProcess.exited
+      .then((exitCode) => {
+        if (exitCode !== 0) {
+          usageRefreshError = `本地日志扫描失败（exit ${exitCode}）`;
+          return;
+        }
+        const scanStore = openDb(scanDbPath);
+        try {
+          store.upsertUsageRecords(scanStore.getUsageRecords(0, Date.now() + 1));
+        } finally {
+          scanStore.close();
+        }
+      })
+      .catch((error) => {
+        usageRefreshError = error instanceof Error ? error.message : '本地日志扫描失败';
+      })
+      .finally(() => {
+        if (existsSync(scanDbPath)) {
+          try { unlinkSync(scanDbPath); } catch { /* best effort cleanup */ }
+        }
+        usageRefreshProcess = null;
+        usageRefreshStartedAt = null;
+      });
+  };
 
   app.get('/api/overview', (c) => {
     return c.json(buildOverview(store, cfg.plans, Date.now()));
@@ -38,6 +88,28 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     const since = Date.now() - days * 86_400_000;
     const rows = store.history(slug, window, since);
     return c.json({ slug, window, days, rows });
+  });
+
+  app.get('/api/usage', (c) => {
+    const days = Math.min(365, Math.max(1, Number(c.req.query('days') ?? 30) || 30));
+    const provider = c.req.query('provider')?.trim() || null;
+    const refresh = c.req.query('refresh') === '1';
+    const includeOfficial = c.req.query('official') !== '0';
+    const now = Date.now();
+    const since = now - days * 86_400_000;
+    if (refresh && !usageRefreshProcess) {
+      startUsageRefresh(days, includeOfficial);
+    }
+    const records = store.getUsageRecords(since, now);
+    const filtered = provider ? records.filter((record) => record.provider === provider) : records;
+    return c.json({
+      ...buildUsageReport(filtered, { since, until: now, generatedAt: now }),
+      scanStatus: usageRefreshProcess
+        ? { state: 'running', startedAt: usageRefreshStartedAt }
+        : usageRefreshError
+          ? { state: 'error', startedAt: null, error: usageRefreshError }
+          : { state: 'idle', startedAt: null },
+    });
   });
 
   app.post('/api/plans/:slug/refresh', async (c) => {

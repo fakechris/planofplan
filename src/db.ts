@@ -1,5 +1,6 @@
 import { Database } from 'bun:sqlite';
-import type { PlanConfig, PlanStateRow, QuotaWindow } from './types.ts';
+import type { PlanConfig, PlanStateRow, QuotaWindow, UsageRecord, UsageReport } from './types.ts';
+import { buildUsageReport } from './usage.ts';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS plans (
@@ -36,6 +37,29 @@ CREATE TABLE IF NOT EXISTS plan_state (
   paused_until INTEGER,
   auth_status TEXT NOT NULL DEFAULT 'unknown'
 );
+CREATE TABLE IF NOT EXISTS usage_records (
+  id TEXT PRIMARY KEY,
+  day TEXT NOT NULL,
+  timestamp INTEGER NOT NULL,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  session_id TEXT,
+  project TEXT,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  reasoning_output_tokens INTEGER NOT NULL DEFAULT 0,
+  total_tokens INTEGER NOT NULL DEFAULT 0,
+  billable_tokens INTEGER,
+  estimated_cost_usd REAL,
+  source TEXT NOT NULL,
+  confidence TEXT NOT NULL,
+  fetched_at INTEGER,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_usage_records_time ON usage_records(timestamp);
+CREATE INDEX IF NOT EXISTS idx_usage_records_provider_model ON usage_records(provider, model, timestamp);
 `;
 
 interface SnapshotRow {
@@ -69,6 +93,11 @@ function rowToWindow(r: SnapshotRow): QuotaWindow {
 export class Store {
   constructor(private db: Database) {
     db.exec(SCHEMA);
+    try {
+      db.exec('ALTER TABLE usage_records ADD COLUMN fetched_at INTEGER');
+    } catch {
+      // Existing databases already have the column, or were created by the current schema.
+    }
   }
 
   /** 配置 → db plans 表（INSERT OR IGNORE；已存在时只更新非运行时字段） */
@@ -391,7 +420,136 @@ export class Store {
     const r = this.db
       .query(`DELETE FROM snapshots WHERE fetched_at < ?`)
       .run(cutoff);
+    this.db.query(`DELETE FROM usage_records WHERE timestamp < ?`).run(cutoff);
     return Number(r.changes);
+  }
+
+  upsertUsageRecords(records: UsageRecord[]): void {
+    if (records.length === 0) return;
+    const stmt = this.db.query(
+      `INSERT INTO usage_records (
+         id, day, timestamp, provider, model, session_id, project,
+         input_tokens, cached_input_tokens, cache_creation_input_tokens,
+         output_tokens, reasoning_output_tokens, total_tokens,
+         billable_tokens, estimated_cost_usd, source, confidence, fetched_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         day = excluded.day,
+         timestamp = excluded.timestamp,
+         provider = excluded.provider,
+         model = excluded.model,
+         session_id = excluded.session_id,
+         project = excluded.project,
+         input_tokens = excluded.input_tokens,
+         cached_input_tokens = excluded.cached_input_tokens,
+         cache_creation_input_tokens = excluded.cache_creation_input_tokens,
+         output_tokens = excluded.output_tokens,
+         reasoning_output_tokens = excluded.reasoning_output_tokens,
+         total_tokens = excluded.total_tokens,
+         billable_tokens = excluded.billable_tokens,
+         estimated_cost_usd = excluded.estimated_cost_usd,
+         source = excluded.source,
+         confidence = excluded.confidence,
+         fetched_at = excluded.fetched_at,
+         updated_at = excluded.updated_at`,
+    );
+    const updatedAt = Date.now();
+    this.db.exec('BEGIN');
+    try {
+      for (const record of records) {
+        stmt.run(
+          record.id,
+          record.day,
+          record.timestamp,
+          record.provider,
+          record.model,
+          record.sessionId ?? null,
+          record.project ?? null,
+          record.inputTokens,
+          record.cachedInputTokens,
+          record.cacheCreationInputTokens,
+          record.outputTokens,
+          record.reasoningOutputTokens,
+          record.totalTokens,
+          record.billableTokens,
+          record.estimatedCostUsd,
+          record.source,
+          record.confidence,
+          record.fetchedAt ?? null,
+          updatedAt,
+        );
+      }
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  close(): void {
+    this.db.close();
+  }
+
+  getUsageRecords(since: number, until: number): UsageRecord[] {
+    const rows = this.db
+      .query(
+        `SELECT id, day, timestamp, provider, model, session_id, project,
+                input_tokens, cached_input_tokens, cache_creation_input_tokens,
+                output_tokens, reasoning_output_tokens, total_tokens,
+                billable_tokens, estimated_cost_usd, source, confidence
+                , fetched_at
+         FROM usage_records
+         WHERE timestamp >= ? AND timestamp < ?
+         ORDER BY timestamp ASC, id ASC`,
+      )
+      .all(since, until) as Array<{
+      id: string;
+      day: string;
+      timestamp: number;
+      provider: string;
+      model: string;
+      session_id: string | null;
+      project: string | null;
+      input_tokens: number;
+      cached_input_tokens: number;
+      cache_creation_input_tokens: number;
+      output_tokens: number;
+      reasoning_output_tokens: number;
+      total_tokens: number;
+      billable_tokens: number | null;
+      estimated_cost_usd: number | null;
+      source: UsageRecord['source'];
+      confidence: UsageRecord['confidence'];
+      fetched_at: number | null;
+    }>;
+    return rows.map((row) => ({
+      id: row.id,
+      day: row.day,
+      timestamp: row.timestamp,
+      provider: row.provider,
+      model: row.model,
+      sessionId: row.session_id,
+      project: row.project,
+      inputTokens: row.input_tokens,
+      cachedInputTokens: row.cached_input_tokens,
+      cacheCreationInputTokens: row.cache_creation_input_tokens,
+      outputTokens: row.output_tokens,
+      reasoningOutputTokens: row.reasoning_output_tokens,
+      totalTokens: row.total_tokens,
+      billableTokens: row.billable_tokens,
+      estimatedCostUsd: row.estimated_cost_usd,
+      source: row.source,
+      confidence: row.confidence,
+      fetchedAt: row.fetched_at ?? undefined,
+    }));
+  }
+
+  getUsageReport(since: number, until: number): UsageReport {
+    return buildUsageReport(this.getUsageRecords(since, until), {
+      since,
+      until,
+      generatedAt: Date.now(),
+    });
   }
 }
 

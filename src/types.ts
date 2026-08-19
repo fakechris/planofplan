@@ -76,6 +76,71 @@ export interface PlanAdapter {
   credentialHint?: string;
 }
 
+export type UsageSource = 'local' | 'official';
+export type UsageConfidence = 'measured' | 'official';
+
+/** Normalized token-consumption row. QuotaWindow intentionally does not use this model. */
+export interface UsageRecord {
+  id: string;
+  day: string;
+  timestamp: number;
+  provider: string;
+  model: string;
+  sessionId?: string | null;
+  project?: string | null;
+  inputTokens: number;
+  cachedInputTokens: number;
+  cacheCreationInputTokens: number;
+  outputTokens: number;
+  reasoningOutputTokens: number;
+  totalTokens: number;
+  billableTokens: number | null;
+  estimatedCostUsd: number | null;
+  source: UsageSource;
+  confidence: UsageConfidence;
+  fetchedAt?: number;
+}
+
+export interface UsageAggregate {
+  key: string;
+  day?: string;
+  provider: string;
+  model: string;
+  recordCount: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  cacheCreationInputTokens: number;
+  outputTokens: number;
+  reasoningOutputTokens: number;
+  totalTokens: number;
+  billableTokens: number | null;
+  estimatedCostUsd: number | null;
+  source?: UsageSource;
+  confidence?: UsageConfidence;
+  lastFetchedAt?: number | null;
+}
+
+export interface UsageReport {
+  generatedAt: number;
+  since: number;
+  until: number;
+  recordCount: number;
+  totals: Omit<UsageAggregate, 'key' | 'day' | 'provider' | 'model' | 'source' | 'confidence' | 'recordCount'> & {
+    recordCount: number;
+  };
+  daily: UsageAggregate[];
+  models: UsageAggregate[];
+  providers: UsageAggregate[];
+  sources: Array<{
+    source: UsageSource;
+    confidence: UsageConfidence;
+    recordCount: number;
+    totalTokens: number;
+    estimatedCostUsd: number | null;
+    fetchedAt: number | null;
+  }>;
+}
+
 /** 带错误分类的 adapter 异常，供 scheduler 判定 auth/network/api/parse */
 export class AdapterError extends Error {
   constructor(
