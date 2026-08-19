@@ -109,3 +109,50 @@ describe('buildOverview current snapshot batch', () => {
     expect(overview.plans[0]!.windows.map((window) => window.window)).toEqual(['weekly']);
   });
 });
+
+describe('buildOverview tier 注解', () => {
+  test('peakPricing=true 的 plan 在高峰时刻返回 tier.label=DeepSeek 高峰', () => {
+    const store = openMemoryDb();
+    const plan = DEFAULT_PLANS.find((item) => item.slug === 'deepseek')!;
+    store.syncPlan(plan);
+    store.insertWindows(plan.slug, [{
+      window: 'credits_period',
+      label: 'Balance',
+      used: 0,
+      total: 0,
+      unit: 'usd',
+      percentage: 0,
+      resetAt: null,
+      note: 'CNY',
+    }], 100);
+    store.setState(plan.slug, { last_success_at: 100 });
+
+    // 2026-08-19 (Wed) 10:30 Shanghai = UTC 02:30
+    const duringPeak = Date.UTC(2026, 7, 19, 2, 30, 0);
+    const overview = buildOverview(store, [plan], duringPeak);
+    expect(overview.plans[0]!.tier).not.toBeNull();
+    expect(overview.plans[0]!.tier?.tier).toBe('peak');
+    expect(overview.plans[0]!.tier?.label).toBe('DeepSeek 高峰');
+  });
+
+  test('未启用 peakPricing 的 plan tier 为 null', () => {
+    const store = openMemoryDb();
+    const plan = DEFAULT_PLANS.find((item) => item.slug === 'codex')!;
+    store.syncPlan(plan);
+    store.insertWindows(plan.slug, [{
+      window: 'rolling_5h',
+      label: '5小时',
+      used: 1,
+      total: 100,
+      unit: 'percent',
+      percentage: 1,
+      resetAt: 1_800_000_000_000,
+      note: null,
+    }], 100);
+    store.setState(plan.slug, { last_success_at: 100 });
+
+    const overview = buildOverview(store, [plan], Date.UTC(2026, 7, 19, 2, 30, 0));
+    expect(overview.plans[0]!.tier).toBeNull();
+    expect(overview.plans[0]!.windows[0]?.tier).toBeUndefined();
+  });
+});

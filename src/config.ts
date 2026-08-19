@@ -81,6 +81,15 @@ const DEFAULT_PLANS: PlanConfig[] = [
     credRef: null,
     extra: { browser: 'safari' },
   },
+  {
+    slug: 'deepseek',
+    name: 'DeepSeek',
+    adapter: 'deepseek',
+    enabled: true,
+    pollIntervalSec: 300,
+    credRef: null,
+    extra: { peakPricing: 'true' },
+  },
 ];
 
 export function homeDir(): string {

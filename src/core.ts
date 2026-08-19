@@ -3,6 +3,7 @@ import type { Store } from './db.ts';
 import { getAdapter } from './adapters/index.ts';
 import type { AdapterContext, PlanConfig, QuotaWindow } from './types.ts';
 import { AdapterError, AUTH_STATUS } from './types.ts';
+import { annotateWindowsWithTier, getTier, isTierPricingEnabled, planWantsTierPricing, type TierState } from './tier.ts';
 
 /** 指数退避：1min 起步，封顶 30min */
 function backoffSec(failures: number): number {
@@ -45,6 +46,8 @@ export interface OverviewPlan {
   browser: string | null;
   browserSupported: boolean;
   credentialHint: string | null;
+  /** 高峰/低谷注解：仅当 plan 启用 peakPricing 时存在；UI 用来渲染轻量 pill。 */
+  tier?: TierState | null;
 }
 
 export interface Overview {
@@ -76,12 +79,12 @@ export function buildOverview(store: Store, configPlans: PlanConfig[], now: numb
         credRef: plan.credRef,
         extra: plan.extra,
       };
-      return buildPlanOverview(store, effective);
+      return buildPlanOverview(store, effective, now);
     });
   return { generatedAt: now, plans };
 }
 
-function buildPlanOverview(store: Store, plan: PlanConfig): OverviewPlan {
+function buildPlanOverview(store: Store, plan: PlanConfig, now: number): OverviewPlan {
   const adapter = getAdapter(plan.adapter);
   const state = store.getState(plan.slug);
   // A successful provider poll is one snapshot batch. Do not merge a new
@@ -118,6 +121,14 @@ function buildPlanOverview(store: Store, plan: PlanConfig): OverviewPlan {
   // not be presented as current usage. They remain available through history.
   const visibleWindows = status === 'auth_error' ? [] : windows;
 
+  // 高峰/低谷注解：仅在「全局开关 + per-plan 开关」都打开时打。
+  // tier 是「当前时间」的属性，db 不持久化，每次 buildOverview 重算。
+  const tierEnabled = isTierPricingEnabled() && planWantsTierPricing(plan.extra);
+  const tier = tierEnabled ? getTier(plan.adapter, now) : null;
+  const annotated = tierEnabled
+    ? annotateWindowsWithTier(plan.adapter, visibleWindows, now)
+    : visibleWindows;
+
   return {
     slug: plan.slug,
     name: plan.name,
@@ -125,13 +136,14 @@ function buildPlanOverview(store: Store, plan: PlanConfig): OverviewPlan {
     enabled: plan.enabled,
     status,
     authStatus,
-    windows: visibleWindows,
+    windows: annotated,
     lastFetchedAt: state?.last_success_at ?? null,
     lastAttemptAt: state?.last_attempt_at ?? null,
     lastError: state?.last_error ?? null,
     browser: plan.extra.browser ?? null,
     browserSupported: plan.adapter === 'kimi' || plan.adapter === 'factory',
     credentialHint: adapter?.credentialHint ?? null,
+    tier,
   };
 }
 

@@ -74,6 +74,46 @@ function authLabel(status) {
   }[status] ?? status;
 }
 
+function tierGlyph(tier) {
+  return tier === 'peak' ? '☀' : '🌙';
+}
+
+function tierLabel(tier) {
+  return tier === 'peak' ? '高峰' : '空闲';
+}
+
+function tierMultiplierText(multiplier) {
+  if (multiplier == null) return '';
+  const rounded = Math.round(multiplier * 100) / 100;
+  return `${rounded}×`;
+}
+
+function tierCountdownText(nextChangeAt, now) {
+  if (nextChangeAt == null) return '';
+  const diff = nextChangeAt - now;
+  if (diff <= 0) return '即将切换';
+  const totalMinutes = Math.max(1, Math.ceil(diff / 60_000));
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (hours === 0) return `${minutes} 分后切换`;
+  return `${hours} 小时${minutes > 0 ? ` ${minutes} 分` : ''}后切换`;
+}
+
+function renderTierPill(plan, now) {
+  const tier = plan.tier;
+  if (!tier || !tier.tier) return '';
+  const countdown = tierCountdownText(tier.nextChangeAt, now);
+  const tooltipParts = [
+    tier.label,
+    tier.timezone ? `（${tier.timezone}）` : '',
+    tier.multiplier != null ? `  费率 ${tierMultiplierText(tier.multiplier)}` : '',
+    countdown ? `\n${countdown}` : '',
+  ].filter(Boolean);
+  return `<span class="badge tier tier-${escapeHtml(tier.tier)}" title="${escapeHtml(tooltipParts.join(''))}">
+    <i></i>${tierGlyph(tier.tier)} ${tierLabel(tier.tier)}${tier.multiplier != null ? ` ${tierMultiplierText(tier.multiplier)}` : ''}
+  </span>`;
+}
+
 function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, (ch) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
@@ -322,6 +362,7 @@ function renderPlan(p, now) {
       </div>
       ${hasSettings ? '<button type="button" class="settings-trigger" data-open-settings>设置</button>' : ''}
       <div class="badges">
+        ${renderTierPill(p, now)}
         <span class="badge st-${p.status}"><i></i>${STATUS_TEXT[p.status] ?? p.status}</span>
         <span class="badge auth ${p.authStatus}">${authLabel(p.authStatus)}</span>
       </div>

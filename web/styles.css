@@ -198,6 +198,11 @@ td { font-variant-numeric: tabular-nums; }
 .badge.auth { padding: 2px 6px; border: 1px solid var(--border); border-radius: 4px; color: var(--faint); }
 .badge.auth.manual { color: var(--cyan); border-color: rgba(98, 217, 232, .35); }
 .badge.auth.missing, .badge.auth.invalid { color: var(--warn); border-color: rgba(240, 189, 91, .35); }
+.badge.tier { padding: 2px 6px; border: 1px solid var(--border); border-radius: 4px; color: var(--muted); font-size: 10px; }
+.badge.tier-peak { color: var(--warn); border-color: rgba(240, 189, 91, .4); }
+.badge.tier-peak i { background: var(--warn); }
+.badge.tier-offpeak { color: var(--cyan); border-color: rgba(98, 217, 232, .35); }
+.badge.tier-offpeak i { background: var(--cyan); }
 
 .card-body { display: flex; flex-direction: column; gap: 13px; margin-top: 23px; }
 .wins { display: flex; flex-direction: column; gap: 15px; }

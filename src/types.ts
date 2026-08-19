@@ -18,6 +18,16 @@ export interface QuotaWindow {
   note: string | null;
   /** 抓取时间（由写入方填充） */
   fetchedAt?: number;
+  /** 高峰/低谷标记；由 tier engine 在 server 端按当前时间注解，非持久化字段。 */
+  tier?: 'peak' | 'offpeak' | null;
+  /** 当前时段费率倍率：offpeak=0.5，peak=1.0；规则不覆盖为 null。 */
+  tierMultiplier?: number | null;
+  /** 当前时段人类可读标签（例：'DeepSeek 高峰'）。 */
+  tierLabel?: string | null;
+  /** 距离下次切换的 epoch 毫秒；切换时间未知时为 null。 */
+  tierNextChangeAt?: number | null;
+  /** tier 规则使用的 IANA 时区，用于 tooltip 显示。 */
+  tierTimezone?: string | null;
 }
 
 /** 每 plan 的静态配置（config.json / db plans 表） */
