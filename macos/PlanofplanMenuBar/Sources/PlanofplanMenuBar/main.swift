@@ -725,6 +725,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 "authjs.session-token",
                 "session",
                 "access-token",
+                "__recent_auth",
             ].contains(name)
         default:
             return name == "kimi-auth"
