@@ -191,8 +191,126 @@ async function readCometOrDiaCookie(app: ChromiumApp): Promise<BrowserCookieResu
   return { token: null, source: null, warnings };
 }
 
-export async function readBrowserKimiAuth(browser: KimiBrowser = 'safari'): Promise<BrowserCookieResult> {
-  const cached = browserResultCache.get(browser);
+export interface KimiWebTokens {
+  accessToken: string | null;
+  refreshToken: string | null;
+}
+
+/**
+ * 读取 Safari 里 www.kimi.com 的 localStorage 凭据（access_token / refresh_token）。
+ *
+ * 2026-08 实测：kimi.com 前端的 apiv2 请求使用 localStorage 的 access_token 做
+ * Bearer（token 由页面经 auth.kimi.com account.gateway.v1.AuthService/RefreshToken
+ * 自行刷新）；kimi-auth cookie 已不参与 API 鉴权，过期后网页仍正常。
+ *
+ * 这里只读不写、也不主动刷新：refresh_token 与网页共享且会轮换，daemon 兑换会把
+ * 页面踢下线。页面打开时自己刷新 token，本函数下个轮询周期自然读到新值。
+ */
+export async function readSafariKimiWebTokens(): Promise<KimiWebTokens> {
+  // 测试/高级覆盖：直接指向一个含 localstorage.sqlite3 的目录。
+  const override = process.env.KIMI_SAFARI_LOCALSTORAGE_DIR?.trim();
+  if (override) {
+    const tokens = await readKimiTokensFromDb(join(override, 'localstorage.sqlite3'));
+    if (tokens.accessToken || tokens.refreshToken) return tokens;
+    return tokens;
+  }
+  const container = join(homedir(), 'Library', 'Containers', 'com.apple.Safari', 'Data', 'Library');
+  const websiteData = join(container, 'WebKit', 'WebsiteData');
+  // 旧布局：WebsiteData/LocalStorage/https_www.kimi.com.localstorage
+  const legacyRoot = join(websiteData, 'LocalStorage');
+  if (existsSync(legacyRoot)) {
+    let entries: string[] = [];
+    try {
+      entries = readdirSync(legacyRoot);
+    } catch {
+      entries = [];
+    }
+    for (const name of entries) {
+      if (!/^https_www\.kimi\.com(_\d+)?\.localstorage$/.test(name)) continue;
+      const tokens = await readKimiTokensFromDb(join(legacyRoot, name));
+      if (tokens.accessToken || tokens.refreshToken) return tokens;
+    }
+  }
+  // 新布局（Safari 17+）：WebsiteData/Default/<hash>/<hash>/LocalStorage/localstorage.sqlite3。
+  // hash 预映像含设备相关盐，无法离线推导；遍历时只读键名，仅取键匹配且值形如 JWT 的库。
+  const defaultRoot = join(websiteData, 'Default');
+  let hashDirs: string[] = [];
+  try {
+    hashDirs = readdirSync(defaultRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name);
+  } catch {
+    hashDirs = [];
+  }
+  for (const hash of hashDirs) {
+    let innerDirs: string[] = [];
+    try {
+      innerDirs = readdirSync(join(defaultRoot, hash), { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name);
+    } catch {
+      continue;
+    }
+    for (const inner of innerDirs) {
+      const dbPath = join(defaultRoot, hash, inner, 'LocalStorage', 'localstorage.sqlite3');
+      if (!existsSync(dbPath)) continue;
+      const tokens = await readKimiTokensFromDb(dbPath);
+      if (tokens.accessToken || tokens.refreshToken) return tokens;
+    }
+  }
+  return { accessToken: null, refreshToken: null };
+}
+
+async function readKimiTokensFromDb(dbPath: string): Promise<KimiWebTokens> {
+  const empty: KimiWebTokens = { accessToken: null, refreshToken: null };
+  const copied = copyCookieDb(dbPath);
+  if (!copied) return empty;
+  try {
+    const { Database } = await import('bun:sqlite');
+    const db = new Database(copied.dbPath, { readonly: true });
+    const rows = db
+      .query('SELECT key, value FROM ItemTable WHERE key IN (?, ?)')
+      .all('access_token', 'refresh_token') as Array<{ key?: unknown; value?: unknown }>;
+    db.close();
+    const tokens: KimiWebTokens = { accessToken: null, refreshToken: null };
+    for (const row of rows) {
+      const value =
+        row.value instanceof Uint8Array
+          ? decodeItemValue(row.value)
+          : typeof row.value === 'string'
+            ? row.value
+            : null;
+      if (!value) continue;
+      if (row.key === 'access_token' && value.split('.').length === 3) tokens.accessToken = value.trim() || null;
+      if (row.key === 'refresh_token') tokens.refreshToken = value.trim() || null;
+    }
+    // 只认同时形如 kimi web 凭据的库：access_token 必须是 JWT，避免误读其他站点。
+    if (!tokens.accessToken) return { accessToken: null, refreshToken: null };
+    return tokens;
+  } catch {
+    return empty;
+  } finally {
+    rmSync(copied.directory, { recursive: true, force: true });
+  }
+}
+
+/** WebKit 的 ItemTable value 可能是 UTF-16LE BLOB（token 本身不含 NUL，用 NUL 嗅探编码）。 */
+function decodeItemValue(value: Uint8Array): string | null {
+  try {
+    if (value.includes(0)) {
+      let out = '';
+      for (let i = 0; i + 1 < value.length; i += 2) {
+        out += String.fromCharCode(value[i]! | (value[i + 1]! << 8));
+      }
+      return out.replace(/\u0000+/g, '') || null;
+    }
+    return new TextDecoder('utf-8', { fatal: true }).decode(value);
+  } catch {
+    return null;
+  }
+}
+
+export async function readBrowserKimiAuth(browser: KimiBrowser = 'safari'): Promise<BrowserCookieResult> {  const cached = browserResultCache.get(browser);
   if (cached && Date.now() - cached.at < BROWSER_RESULT_CACHE_TTL_MS) return cached.result;
 
   const save = (result: BrowserCookieResult): BrowserCookieResult => {

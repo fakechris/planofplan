@@ -28,11 +28,13 @@ import {
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
+import { ensureHome } from '../config.ts';
 import { Database } from 'bun:sqlite';
 import type { AdapterContext, Credential, PlanAdapter, QuotaWindow } from '../types.ts';
 import { AdapterError } from '../types.ts';
 import {
   readBrowserKimiAuth,
+  readSafariKimiWebTokens,
   type BrowserCookieResult,
   type KimiBrowser,
 } from '../browser-cookies.ts';
@@ -449,10 +451,165 @@ export function readKimiAuthToken(
   return null;
 }
 
+/**
+ * 网页会话统一入口（2026-08 起 kimi.com 的 API 凭据在 Safari localStorage）：
+ * 1. env；
+ * 2. Safari localStorage access_token（读取穿透；页面打开时自己刷新，天然最新）；
+ * 3. daemon 自持刷新链（~/.planofplan/kimi-web-session.json，0600）：access 仍新鲜直接用，
+ *    否则用 refresh_token 兑换；候选顺序为 localStorage refresh_token 优先、持久化链兜底
+ *    （仅当 JWT sub 锚点确认同账号，防止换号后沿用旧链）。RefreshToken 会轮换
+ *    refresh_token，daemon 不回写 Safari 存储；页面下次需要刷新时会重新登录，
+ *    两链分叉后各自独立，localStorage 出现新鲜 access 时自动回到路径 2。
+ * 4. kimi-auth cookie 兜底（旧契约，服务端已改为只认 Bearer）。
+ */
+export async function readKimiWebSession(
+  planSlug = 'kimi',
+  allowCookieFallback = true,
+  allowDesktopFallback = true,
+): Promise<{ token: string; source: string } | null> {
+  const env = process.env.KIMI_AUTH_TOKEN;
+  if (env && env.trim()) return { token: env.trim(), source: 'env' };
+
+  let lsRefreshToken: string | null = null;
+  let lsSub: string | null = null;
+  try {
+    const tokens = await readSafariKimiWebTokens();
+    lsRefreshToken = tokens.refreshToken;
+    const claims = tokens.accessToken ? jwtClaims(tokens.accessToken) : {};
+    if (typeof claims.exp !== 'number' || claims.exp * 1000 >= Date.now() + 60_000) {
+      if (tokens.accessToken) return { token: tokens.accessToken, source: 'safari-localstorage' };
+    }
+    if (typeof claims.sub === 'string' && claims.sub) lsSub = claims.sub;
+  } catch {
+    // localStorage 不可读时继续走刷新链/既有路径
+  }
+
+  const persisted = readPersistedWebSession();
+  if (persisted?.accessToken) {
+    const claims = jwtClaims(persisted.accessToken);
+    const persistedSub = typeof claims.sub === 'string' && claims.sub ? claims.sub : persisted.userSub;
+    const sameAccount = persistedSub == null || lsSub == null || persistedSub === lsSub;
+    const fresh = typeof claims.exp !== 'number' || claims.exp * 1000 >= Date.now() + 60_000;
+    if (fresh && sameAccount) {
+      return { token: persisted.accessToken, source: 'kimi-web-session' };
+    }
+  }
+
+  const anchorMatches = persisted == null
+    || persisted.userSub == null
+    || lsSub == null
+    || persisted.userSub === lsSub;
+  const candidates = [lsRefreshToken, anchorMatches ? persisted?.refreshToken ?? null : null]
+    .filter((token): token is string => !!token?.trim())
+    .filter((token, index, all) => all.indexOf(token) === index);
+  for (const candidate of candidates) {
+    const refreshed = await refreshKimiWebAccessToken(candidate);
+    if (!refreshed) continue;
+    const claims = jwtClaims(refreshed.accessToken);
+    const userSub = (typeof claims.sub === 'string' && claims.sub) || lsSub;
+    persistWebSession({
+      accessToken: refreshed.accessToken,
+      refreshToken: refreshed.refreshToken ?? candidate,
+      userSub,
+    });
+    return { token: refreshed.accessToken, source: 'kimi-web-session' };
+  }
+
+  return readKimiAuthToken(planSlug, allowCookieFallback, allowDesktopFallback);
+}
+
 const GET_USAGES_URL =
   'https://www.kimi.com/apiv2/kimi.gateway.billing.v1.BillingService/GetUsages';
 const SUBSCRIPTION_STATS_URL =
   'https://www.kimi.com/apiv2/kimi.gateway.membership.v2.MembershipService/GetSubscriptionStats';
+// kimi.com 前端（request-*.js）的刷新端点：AUTH_API_HOST=https://auth.kimi.com，
+// Connect-JSON 服务 account.gateway.v1.AuthService/RefreshToken，字段 refresh_token。
+const KIMI_AUTH_REFRESH_URL =
+  'https://auth.kimi.com/api/account.gateway.v1.AuthService/RefreshToken';
+
+interface KimiWebSessionFile {
+  accessToken: string;
+  refreshToken: string;
+  userSub: string | null;
+}
+
+function kimiWebSessionPath(): string {
+  return join(ensureHome(), 'kimi-web-session.json');
+}
+
+function readPersistedWebSession(): KimiWebSessionFile | null {
+  try {
+    const raw = JSON.parse(readFileSync(kimiWebSessionPath(), 'utf8')) as Partial<KimiWebSessionFile>;
+    if (typeof raw.refreshToken !== 'string' || !raw.refreshToken.trim()) return null;
+    return {
+      accessToken: typeof raw.accessToken === 'string' ? raw.accessToken : '',
+      refreshToken: raw.refreshToken.trim(),
+      userSub: typeof raw.userSub === 'string' ? raw.userSub : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function persistWebSession(session: KimiWebSessionFile): void {
+  const file = kimiWebSessionPath();
+  mkdirSync(dirname(file), { recursive: true });
+  const temporary = `${file}.${process.pid}.tmp`;
+  writeFileSync(temporary, JSON.stringify(session) + '\n', { mode: 0o600 });
+  chmodSync(temporary, 0o600);
+  renameSync(temporary, file);
+}
+
+/**
+ * 用 refresh_token 换新 access_token（网页前端的 RefreshToken 端点）。
+ * 返回 null 表示刷新失败（网络/invalid_grant/响应异常），调用方继续尝试下一候选。
+ */
+export async function refreshKimiWebAccessToken(
+  refreshToken: string,
+): Promise<{ accessToken: string; refreshToken: string | null } | null> {
+  let res: Response;
+  try {
+    res = await fetch(KIMI_AUTH_REFRESH_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'connect-protocol-version': '1',
+        Origin: 'https://www.kimi.com',
+        Referer: 'https://www.kimi.com/',
+        Accept: 'application/json',
+        'User-Agent':
+          'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36',
+        'x-msh-platform': 'web',
+        'x-language': 'en-US',
+        'r-timezone': timezoneName(),
+      },
+      body: JSON.stringify({ refresh_token: refreshToken }),
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch {
+    return null;
+  }
+  if (!res.ok) return null;
+  try {
+    const json = (await res.json()) as { access_token?: unknown; accessToken?: unknown; refresh_token?: unknown; refreshToken?: unknown };
+    const accessToken =
+      typeof json.access_token === 'string' && json.access_token
+        ? json.access_token
+        : typeof json.accessToken === 'string' && json.accessToken
+          ? json.accessToken
+          : null;
+    if (!accessToken) return null;
+    const rotated =
+      typeof json.refresh_token === 'string' && json.refresh_token
+        ? json.refresh_token
+        : typeof json.refreshToken === 'string' && json.refreshToken
+          ? json.refreshToken
+          : null;
+    return { accessToken, refreshToken: rotated };
+  } catch {
+    return null;
+  }
+}
 
 /** 用户主动点击“读取浏览器会话”时调用；token 只保存在当前 Bun 进程内存。 */
 export async function refreshKimiBrowserSession(
@@ -516,13 +673,30 @@ function timezoneName(): string {
   }
 }
 
+/** 401 时若能从 JWT 解出 exp，给出"过期多久"的可操作提示；解析失败返回 null。 */
+export function kimiTokenExpiredHint(token: string, nowMs = Date.now()): string | null {
+  const claims = jwtClaims(token);
+  if (typeof claims.exp !== 'number') return null;
+  const expiredForMs = nowMs - claims.exp * 1000;
+  if (expiredForMs <= 0) return null;
+  const hours = expiredForMs / 3_600_000;
+  const age = hours >= 48
+    ? `${Math.round(hours / 24)} 天`
+    : hours >= 1
+      ? `${Math.round(hours * 10) / 10} 小时`
+      : `${Math.max(1, Math.round(expiredForMs / 60_000))} 分钟`;
+  return `（token 已于约 ${age} 前过期，请在 Safari 重新登录 kimi.com 后再读取会话）`;
+}
+
 /** 网页会话请求头（对齐 CodexBar webRequest：cookie + Bearer + 平台/设备头） */
 function webHeaders(token: string, cookieHeader?: string | null): Record<string, string> {
   const claims = jwtClaims(token);
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     Authorization: `Bearer ${token}`,
-    Cookie: cookieHeader?.includes('=') ? cookieHeader : `kimi-auth=${token}`,
+    // 2026-08 实测：apiv2 鉴权只看 Authorization Bearer（localStorage access_token），
+    // 纯 Cookie 请求返回 REASON_INVALID_AUTH_TOKEN；没有真实浏览器 Cookie 时不再伪造。
+    ...(cookieHeader?.includes('=') ? { Cookie: cookieHeader } : {}),
     Origin: 'https://www.kimi.com',
     Referer: 'https://www.kimi.com/code/console',
     Accept: '*/*',
@@ -563,7 +737,10 @@ async function fetchWebUsage(
     );
   }
   if (res.status === 401 || res.status === 403) {
-    throw new AdapterError('auth', `Kimi 网页会话过期(HTTP ${res.status})：请重新登录 kimi.com`);
+    throw new AdapterError(
+      'auth',
+      `Kimi 网页会话过期(HTTP ${res.status})：请重新登录 kimi.com${kimiTokenExpiredHint(token) ?? ''}`,
+    );
   }
   if (!res.ok) throw new AdapterError('api', `Kimi GetUsages 错误(HTTP ${res.status})`);
   let json: unknown;
@@ -667,13 +844,15 @@ export const kimiAdapter: PlanAdapter = {
     if (configuredBrowser && !browserSessions.has(ctx.plan.slug)) {
       await refreshKimiBrowserSession(configuredBrowser, ctx.log, ctx.plan.slug);
     }
-    const web = readKimiAuthToken(ctx.plan.slug, !configuredBrowser, !configuredBrowser);
+    const web = await readKimiWebSession(ctx.plan.slug, !configuredBrowser, !configuredBrowser);
     if (web && web.token) {
       return {
         kind: 'bearer',
         value: web.token,
         source: 'web',
-        cookie: browserCookieHeaders.get(ctx.plan.slug) ?? web.token,
+        cookie: web.source === 'safari-localstorage'
+          ? null
+          : browserCookieHeaders.get(ctx.plan.slug) ?? web.token,
       };
     }
 
@@ -754,7 +933,7 @@ export const kimiAdapter: PlanAdapter = {
     const windows = normalizeKimi(json);
 
     // 月限额为第三档：仅网页会话可读；失败只记日志，不影响 周/5h 主数据
-    const auth = readKimiAuthToken(ctx.plan.slug, !ctx.plan.extra.browser, !ctx.plan.extra.browser);
+    const auth = await readKimiWebSession(ctx.plan.slug, !ctx.plan.extra.browser, !ctx.plan.extra.browser);
     if (!auth) {
       ctx.log(
         '月限额跳过：未找到有效的 kimi.com 网页会话（重新登录 kimi.com 后自动读取 kimi-auth cookie）',
