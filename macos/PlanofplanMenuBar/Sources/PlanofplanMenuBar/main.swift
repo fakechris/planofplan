@@ -110,7 +110,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for (slug, name) in browserProviders() {
             let provider = NSMenuItem(title: "\(name) · \(selectedBrowser(for: slug))", action: nil, keyEquivalent: "")
             let providerMenu = NSMenu()
-            for (id, label) in browserChoices() {
+            for (id, label) in browserChoices(for: slug) {
                 let item = NSMenuItem(title: label, action: #selector(readBrowserSession(_:)), keyEquivalent: "")
                 item.target = self
                 item.representedObject = BrowserSelection(planSlug: slug, browser: id)
@@ -281,8 +281,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return providers.isEmpty ? [("kimi", "Kimi Code")] : providers
     }
 
-    private func browserChoices() -> [(String, String)] {
-        [
+    private func browserChoices(for planSlug: String) -> [(String, String)] {
+        if planSlug == "kimi" {
+            return [("safari", "Safari（Full Disk Access）")]
+        }
+        return [
             ("firefox", "Firefox（不需要 Keychain）"),
             ("chrome", "Chrome（Keychain）"),
             ("comet", "Comet（Keychain）"),
@@ -295,6 +298,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func selectedBrowser(for planSlug: String) -> String {
+        if planSlug == "kimi" {
+            return "safari"
+        }
         let stored = UserDefaults.standard.string(forKey: "\(selectedBrowserKey).\(planSlug)")
         let explicitlySelected = UserDefaults.standard.bool(forKey: "\(explicitBrowserKey).\(planSlug)")
         if planSlug == "factory",

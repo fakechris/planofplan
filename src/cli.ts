@@ -33,7 +33,7 @@ function help(): void {
   planofplan usage [--json] [--provider sl] 全 plan 用量输出
   planofplan status                         各 plan 调度/凭据/最近抓取状态
   planofplan refresh [slug]                 手动刷新一个/全部 plan
-  planofplan browser-auth [--browser name] 读取指定浏览器 kimi-auth（触发一次 Keychain 授权）并刷新 Kimi
+  planofplan browser-auth                  读取 Safari kimi-auth 并刷新 Kimi
   planofplan auth set <slug> --key <v>     存手动 API Key（~/.planofplan/credentials.json, 0600）
   planofplan auth set <slug> --auto         改回自动检测（env / CLI 凭据）
   planofplan auth clear <slug>              清掉手动 key
@@ -156,8 +156,7 @@ async function refresh(): Promise<void> {
 }
 
 async function browserAuth(): Promise<void> {
-  const f = flags();
-  const result = await refreshKimiBrowserSession(f.browser ?? 'safari');
+  const result = await refreshKimiBrowserSession('safari');
   if (!result.token) {
     console.error('未找到有效 kimi-auth 浏览器会话');
     for (const warning of result.warnings) console.error(`  ${warning}`);

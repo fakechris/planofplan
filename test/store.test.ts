@@ -41,6 +41,27 @@ describe('Store', () => {
     expect(weekly.total).toBe(4000);
   });
 
+  test('稳定窗口改名后不会保留旧标签的重复行', () => {
+    const store = openMemoryDb();
+    store.syncPlan({ ...plan, slug: 'codex', adapter: 'codex', name: 'OpenAI Codex' });
+    const t0 = 1_770_000_000_000;
+    store.insertWindows(
+      'codex',
+      [{ ...win(10, t0), label: '5H' }],
+      t0,
+    );
+    store.insertWindows(
+      'codex',
+      [{ ...win(20, t0 + 60_000), label: '5小时限额' }],
+      t0 + 60_000,
+    );
+
+    const latest = store.latestByPlan('codex');
+    expect(latest).toHaveLength(1);
+    expect(latest[0]!.label).toBe('5小时限额');
+    expect(latest[0]!.used).toBe(20);
+  });
+
   test('history 只返回窗口内、since 之后的数据', () => {
     const store = openMemoryDb();
     store.syncPlan(plan);

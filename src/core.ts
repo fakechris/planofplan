@@ -108,6 +108,10 @@ function buildPlanOverview(store: Store, plan: PlanConfig): OverviewPlan {
     status = 'ok';
   }
 
+  // An auth failure invalidates the credential, so cached quota values must
+  // not be presented as current usage. They remain available through history.
+  const visibleWindows = status === 'auth_error' ? [] : windows;
+
   return {
     slug: plan.slug,
     name: plan.name,
@@ -115,7 +119,7 @@ function buildPlanOverview(store: Store, plan: PlanConfig): OverviewPlan {
     enabled: plan.enabled,
     status,
     authStatus,
-    windows,
+    windows: visibleWindows,
     lastFetchedAt: state?.last_success_at ?? null,
     lastAttemptAt: state?.last_attempt_at ?? null,
     lastError: state?.last_error ?? null,

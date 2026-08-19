@@ -17,6 +17,7 @@ export interface BrowserCookieResult {
 }
 
 export type KimiBrowser = 'chrome' | 'brave' | 'arc' | 'chromium' | 'comet' | 'dia' | 'firefox' | 'safari';
+export const KIMI_BROWSER: KimiBrowser = 'safari';
 export const KIMI_BROWSERS: readonly KimiBrowser[] = [
   'chrome',
   'brave',

@@ -254,12 +254,19 @@ export class Store {
     }
   }
 
-  /** 每 (plan, 车道) 的最新一条；车道 = (window, label)，同一 window 的多模型车道互不覆盖 */
+  /** 每个稳定窗口（或额外模型车道）的最新一条；标签变化不应制造重复窗口。 */
   latestByPlan(planId: string): QuotaWindow[] {
     const rows = this.db
       .query(
         `SELECT * FROM (
-           SELECT s.*, ROW_NUMBER() OVER (PARTITION BY plan_id, window, label ORDER BY fetched_at DESC, id DESC) rn
+           SELECT s.*, ROW_NUMBER() OVER (
+             PARTITION BY plan_id,
+               CASE
+                 WHEN window IN ('rolling_5h', 'weekly', 'monthly', 'requests', 'credits_period') THEN window
+                 ELSE window || '|' || COALESCE(label, '')
+               END
+             ORDER BY fetched_at DESC, id DESC
+           ) rn
            FROM snapshots s WHERE plan_id = ?
          ) WHERE rn = 1 ORDER BY window, label`,
       )
@@ -271,7 +278,14 @@ export class Store {
     const rows = this.db
       .query(
         `SELECT * FROM (
-           SELECT s.*, ROW_NUMBER() OVER (PARTITION BY plan_id, window, label ORDER BY fetched_at DESC, id DESC) rn
+           SELECT s.*, ROW_NUMBER() OVER (
+             PARTITION BY plan_id,
+               CASE
+                 WHEN window IN ('rolling_5h', 'weekly', 'monthly', 'requests', 'credits_period') THEN window
+                 ELSE window || '|' || COALESCE(label, '')
+               END
+             ORDER BY fetched_at DESC, id DESC
+           ) rn
            FROM snapshots s
          ) WHERE rn = 1 ORDER BY plan_id, window, label`,
       )

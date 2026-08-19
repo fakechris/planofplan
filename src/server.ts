@@ -6,7 +6,7 @@ import type { Scheduler } from './core.ts';
 import { buildOverview } from './core.ts';
 import { writeCredential, deleteCredential } from './auth.ts';
 import { acceptKimiBrowserCookies, refreshKimiBrowserSession } from './adapters/kimi.ts';
-import { KIMI_BROWSERS, type KimiBrowser } from './browser-cookies.ts';
+import { KIMI_BROWSER, KIMI_BROWSERS, type KimiBrowser } from './browser-cookies.ts';
 import { acceptFactoryBrowserCookies } from './factory-session.ts';
 import { getBuildInfo } from './build-info.ts';
 
@@ -57,8 +57,7 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
 
   // 仅由用户主动点击触发。浏览器 Cookie/Keychain token 不写入磁盘。
   app.post('/api/browser-auth', async (c) => {
-    const requested = c.req.query('browser') ?? 'safari';
-    const browser = (KIMI_BROWSERS.includes(requested as KimiBrowser) ? requested : 'safari') as KimiBrowser;
+    const browser = KIMI_BROWSER;
     store.updatePlanExtra('kimi', { browser });
     const browserResult = await refreshKimiBrowserSession(browser, (message) => console.log(`[kimi] ${message}`), 'kimi');
     if (!browserResult.token) {
@@ -100,6 +99,9 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     if (!body.browser || !KIMI_BROWSERS.includes(body.browser as KimiBrowser)) {
       return c.json({ ok: false, error: '请选择受支持的浏览器' }, 400);
     }
+    if (slug === 'kimi' && body.browser !== KIMI_BROWSER) {
+      return c.json({ ok: false, error: 'Kimi 仅支持 Safari 浏览器会话' }, 400);
+    }
     store.updatePlanExtra(slug, { browser: body.browser });
     return c.json({ ok: true, slug, browser: body.browser });
   });
@@ -123,6 +125,9 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     const browser = body.browser as KimiBrowser;
     if (!KIMI_BROWSERS.includes(browser)) {
       return c.json({ ok: false, error: '请选择受支持的浏览器' }, 400);
+    }
+    if (browser !== KIMI_BROWSER) {
+      return c.json({ ok: false, slug, error: 'Kimi 仅支持 Safari 浏览器会话' }, 400);
     }
     store.updatePlanExtra(slug, { browser });
     const browserResult = await refreshKimiBrowserSession(
@@ -161,6 +166,9 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     const cookies = Array.isArray(body?.cookies) ? body.cookies : [];
     let kimiResult: unknown = null;
     const planSlug = body.planSlug ?? 'kimi';
+    if (planSlug === 'kimi' && body.browser !== KIMI_BROWSER) {
+      return c.json({ ok: false, planSlug, error: 'Kimi 仅支持 Safari 浏览器会话' }, 400);
+    }
     const source = `${body?.browser ?? 'browser'} (native)`;
     const accepted = planSlug === 'factory'
       ? acceptFactoryBrowserCookies(
