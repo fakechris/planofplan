@@ -1,5 +1,6 @@
 node_modules/
 dist/
+macos/PlanofplanMenuBar/.build/
 *.db
 *.db-wal
 *.db-shm
