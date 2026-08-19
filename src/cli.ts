@@ -226,7 +226,9 @@ async function factoryCliAuth(): Promise<void> {
   const accepted = acceptFactoryBrowserCookies(
     [],
     `${auth.source} (local)`,
-    { accessToken: auth.accessToken, refreshToken: auth.refreshToken },
+    // 不带 access token：强制走 refresh 兑换，确保轮换出来的新链落盘。
+    // 带着（可能仍有效的）access token 会直接用完丢弃，daemon 重启后又是死链。
+    { accessToken: null, refreshToken: auth.refreshToken },
     auth.organizationId,
   );
   if (!accepted) {
@@ -236,7 +238,10 @@ async function factoryCliAuth(): Promise<void> {
   }
   const scheduler = new Scheduler(store, cfg);
   const refreshed = await scheduler.refreshPlan('factory');
-  console.log(`factory droid CLI 导入: ${refreshed.ok ? 'ok' : refreshed.error} (${auth.source})`);
+  console.log(`factory droid CLI 导入: ${refreshed.ok ? 'ok（已分岔为 daemon 独立链并落盘）' : refreshed.error} (${auth.source})`);
+  if (refreshed.ok) {
+    console.log('正在运行的 daemon 会在下一次轮询失败后自动改用新链；想立即生效可在 Dashboard 再点一次「刷新 provider」。');
+  }
   console.log('注意：WorkOS refresh token 一次性轮换，本次兑换会消耗 droid CLI 的 token，CLI 下次需要时会要求重新登录。');
 }
 

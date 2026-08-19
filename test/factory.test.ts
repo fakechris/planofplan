@@ -98,14 +98,12 @@ describe('Factory usage', () => {
   });
 
   test('uses a browser WorkOS refresh token before Factory billing calls', async () => {
-    clearFactoryBrowserSession();
-    expect(acceptFactoryBrowserCookies(
-      [{ name: 'session', value: 'browser-session' }],
-      'Comet',
-      { refreshToken: 'workos-refresh-token' },
-      'org_123',
-    )).toBe(true);
-
+    // 轮换持久化会写 factory-session.json，必须隔离 PLANOFPPLAN_HOME，
+    // 否则测试夹具会覆盖真实 daemon 的会话链。
+    const home = await Bun.$`mktemp -d`.text();
+    const previousHome = process.env.PLANOFPPLAN_HOME;
+    process.env.PLANOFPPLAN_HOME = home.trim();
+    const originalFetch = globalThis.fetch;
     const requests: Array<{
       url: string;
       method: string;
@@ -113,7 +111,6 @@ describe('Factory usage', () => {
       cookie: string | null;
       body: string;
     }> = [];
-    const originalFetch = globalThis.fetch;
     globalThis.fetch = (async (input, init) => {
       const url = String(input);
       requests.push({
@@ -138,8 +135,14 @@ describe('Factory usage', () => {
         },
       }), { status: 200 });
     }) as typeof fetch;
-
     try {
+      clearFactoryBrowserSession();
+      expect(acceptFactoryBrowserCookies(
+        [{ name: 'session', value: 'browser-session' }],
+        'Comet',
+        { refreshToken: 'workos-refresh-token' },
+        'org_123',
+      )).toBe(true);
       const windows = await factoryAdapter.fetchUsage({} as never, {
         kind: 'bearer',
         value: '',
@@ -165,27 +168,22 @@ describe('Factory usage', () => {
     } finally {
       globalThis.fetch = originalFetch;
       clearFactoryBrowserSession();
+      if (previousHome == null) delete process.env.PLANOFPPLAN_HOME;
+      else process.env.PLANOFPPLAN_HOME = previousHome;
+      await Bun.$`rm -rf ${home}`.quiet();
     }
   });
 
   test('falls back to Factory cookies when the browser WorkOS refresh token is rejected', async () => {
-    clearFactoryBrowserSession();
-    expect(acceptFactoryBrowserCookies(
-      [{ name: 'session', value: 'browser-session' }],
-      'Comet',
-      { refreshToken: 'stale-workos-refresh-token' },
-    )).toBe(true);
-
-    const requests: Array<{ url: string; authorization: string | null; cookie: string | null }> = [];
+    const home = await Bun.$`mktemp -d`.text();
+    const previousHome = process.env.PLANOFPPLAN_HOME;
+    process.env.PLANOFPPLAN_HOME = home.trim();
     const originalFetch = globalThis.fetch;
+    const requests: Array<{ url: string; authorization: string | null; cookie: string | null }> = [];
     globalThis.fetch = (async (input, init) => {
       const url = String(input);
       const headers = new Headers(init?.headers);
-      requests.push({
-        url,
-        authorization: headers.get('authorization'),
-        cookie: headers.get('cookie'),
-      });
+      requests.push({ url, authorization: headers.get('authorization'), cookie: headers.get('cookie') });
       if (url === 'https://api.workos.com/user_management/authenticate') {
         return new Response('invalid_grant', { status: 401 });
       }
@@ -200,8 +198,13 @@ describe('Factory usage', () => {
       }
       return new Response('not found', { status: 404 });
     }) as typeof fetch;
-
     try {
+      clearFactoryBrowserSession();
+      expect(acceptFactoryBrowserCookies(
+        [{ name: 'session', value: 'browser-session' }],
+        'Comet',
+        { refreshToken: 'stale-workos-refresh-token' },
+      )).toBe(true);
       const windows = await factoryAdapter.fetchUsage({} as never, {
         kind: 'bearer',
         value: '',
@@ -215,6 +218,9 @@ describe('Factory usage', () => {
     } finally {
       globalThis.fetch = originalFetch;
       clearFactoryBrowserSession();
+      if (previousHome == null) delete process.env.PLANOFPPLAN_HOME;
+      else process.env.PLANOFPPLAN_HOME = previousHome;
+      await Bun.$`rm -rf ${home}`.quiet();
     }
   });
 
@@ -324,6 +330,48 @@ describe('Factory usage', () => {
         workosRefreshToken: 'second-rotated-token',
       });
     } finally {
+      clearFactoryBrowserSession();
+      if (previousHome == null) delete process.env.PLANOFPPLAN_HOME;
+      else process.env.PLANOFPPLAN_HOME = previousHome;
+      await Bun.$`rm -rf ${home}`.quiet();
+    }
+  });
+
+  test('clears the in-memory browser session when the whole chain is rejected', async () => {
+    const home = await Bun.$`mktemp -d`.text();
+    const previousHome = process.env.PLANOFPPLAN_HOME;
+    process.env.PLANOFPPLAN_HOME = home.trim();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input) => {
+      const url = String(input);
+      if (url === 'https://api.workos.com/user_management/authenticate') {
+        return new Response('invalid_grant', { status: 400 });
+      }
+      if (url === 'https://api.factory.ai/api/billing/limits') {
+        return new Response('expired', { status: 401 });
+      }
+      return new Response('not found', { status: 404 });
+    }) as typeof fetch;
+    try {
+      clearFactoryBrowserSession();
+      acceptFactoryBrowserCookies(
+        [{ name: 'session', value: 'dead-session' }],
+        'Comet (native)',
+        { refreshToken: 'dead-refresh-token' },
+      );
+      expect(getFactoryBrowserSession()).not.toBeNull();
+      await expect(factoryAdapter.fetchUsage({} as never, {
+        kind: 'bearer',
+        value: '',
+        cookie: 'session=dead-session',
+        refreshToken: 'dead-refresh-token',
+        source: 'browser:Comet (native)',
+      })).rejects.toThrow();
+      // 整链被拒后内存副本必须丢弃，下次 detectCredentials 重新读磁盘上的
+      // factory-session.json（外部导入的新链无需重启 daemon 即可生效）。
+      expect(getFactoryBrowserSession()).toBeNull();
+    } finally {
+      globalThis.fetch = originalFetch;
       clearFactoryBrowserSession();
       if (previousHome == null) delete process.env.PLANOFPPLAN_HOME;
       else process.env.PLANOFPPLAN_HOME = previousHome;

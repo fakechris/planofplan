@@ -3,7 +3,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { AdapterContext, Credential, PlanAdapter, QuotaWindow } from '../types.ts';
 import { AdapterError } from '../types.ts';
-import { getFactoryBrowserSession, updateFactoryWorkOSSession } from '../factory-session.ts';
+import { getFactoryBrowserSession, updateFactoryWorkOSSession, clearFactoryBrowserSession } from '../factory-session.ts';
 
 const API_BASE = 'https://api.factory.ai';
 const APP_BASES = ['https://api.factory.ai', 'https://app.factory.ai', 'https://auth.factory.ai'];
@@ -12,6 +12,9 @@ const WORKOS_AUTH_PATH = '/user_management/authenticate';
 const WORKOS_CLIENT_IDS = [
   'client_01HXRMBQ9BJ3E7QSTQ9X2PHVB7',
   'client_01HNM792M5G5G1A2THWPXKFMXB',
+  // droid CLI 的 WorkOS client（从 droid 二进制字符串确认）：CLI 发行的
+  // refresh token 只能用对应 client 兑换，拿 web client 会 400。
+  'client_01HNM7927XNSKCJ4982Z5J3FFZ',
 ];
 const AUTH_PATH = '/api/app/auth/me';
 const BILLING_LIMITS_PATH = '/api/billing/limits';
@@ -405,6 +408,17 @@ async function refreshFactoryCredential(credential: Credential): Promise<Credent
   throw lastError instanceof Error ? lastError : new AdapterError('auth', 'WorkOS 鉴权失败');
 }
 
+/**
+ * 浏览器会话链整体被拒（refresh token 已消耗、cookie 也 401）时丢弃内存副本，
+ * 下次 detectCredentials 重新读 factory-session.json——外部导入（menubar /
+ * planofplan factory-auth）写入的新链无需重启 daemon 即可生效。
+ */
+function clearSessionOnAuthFailure(error: unknown, credential: Credential): void {
+  if (error instanceof AdapterError && error.kind === 'auth' && credential.source.startsWith('browser:')) {
+    clearFactoryBrowserSession();
+  }
+}
+
 export const factoryAdapter: PlanAdapter = {
   slug: 'factory',
   credentialHint:
@@ -448,6 +462,7 @@ export const factoryAdapter: PlanAdapter = {
           !(error instanceof AdapterError) ||
           error.kind !== 'auth'
         ) {
+          clearSessionOnAuthFailure(error, activeCredential);
           throw error;
         }
         activeCredential = { ...activeCredential, value: '' };
@@ -464,6 +479,7 @@ export const factoryAdapter: PlanAdapter = {
           return fetchFactoryUsage(activeCredential);
         } catch (refreshError) {
           if (!activeCredential.cookie || !(refreshError instanceof AdapterError) || refreshError.kind !== 'auth') {
+            clearSessionOnAuthFailure(refreshError, activeCredential);
             throw refreshError;
           }
         }
@@ -472,6 +488,7 @@ export const factoryAdapter: PlanAdapter = {
       if (activeCredential.cookie && activeCredential.value.trim()) {
         return fetchFactoryUsage({ ...activeCredential, value: '' });
       }
+      clearSessionOnAuthFailure(error, activeCredential);
       throw error;
     }
   },
