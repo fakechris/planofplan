@@ -49,6 +49,37 @@ describe('normalizeClaude', () => {
     expect(month.unit).toBe('usd');
   });
 
+  test('renders model-scoped weekly Fable limits as a separate window', () => {
+    const windows = normalizeClaude({
+      five_hour: { utilization: 4 },
+      seven_day: { utilization: 20 },
+      seven_day_fable: {
+        utilization: 38,
+        resets_at: '2026-08-25T00:00:00.000Z',
+      },
+    });
+
+    const fable = windows.find((window) => window.window === 'weekly_fable');
+    expect(fable).toMatchObject({
+      label: 'Fable Week',
+      percentage: 38,
+      resetAt: Date.parse('2026-08-25T00:00:00.000Z'),
+      note: null,
+    });
+  });
+
+  test('renders grouped model-scoped weekly limits', () => {
+    const windows = normalizeClaude({
+      five_hour: { utilization: 4 },
+      seven_day: { utilization: 20 },
+      weekly_scoped: {
+        fable: { utilization: 38, resets_at: '2026-08-25T00:00:00.000Z' },
+      },
+    });
+
+    expect(windows.find((window) => window.window === 'weekly_fable')?.percentage).toBe(38);
+  });
+
   test('空响应 → parse 错误', () => {
     expect(() => normalizeClaude({})).toThrow(AdapterError);
     expect(() => normalizeClaude(null)).toThrow(AdapterError);

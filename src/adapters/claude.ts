@@ -41,6 +41,7 @@ interface ClaudeUsageResponse {
   five_hour?: OauthWindow | null;
   seven_day?: OauthWindow | null;
   extra_usage?: ExtraUsage;
+  [key: string]: unknown;
 }
 
 function num(v: unknown): number | null {
@@ -82,6 +83,48 @@ export function normalizeClaude(raw: unknown): QuotaWindow[] {
 
   pushPctWindow('rolling_5h', '5H', r.five_hour);
   pushPctWindow('weekly', 'Week', r.seven_day);
+
+  // Anthropic has added model-scoped weekly fields over time
+  // (for example seven_day_sonnet and promotional seven_day_fable).
+  // Keep the parser forward-compatible so a new model gets its own bar
+  // instead of disappearing when the common seven_day window is present.
+  const scopedKeys = Object.keys(r).filter((key) =>
+    /^(?:seven_day|weekly)_(?:[a-z0-9]+(?:_[a-z0-9]+)*)$/i.test(key),
+  );
+  for (const key of scopedKeys) {
+    const value = r[key];
+    if (!value || typeof value !== 'object') continue;
+    const model = key.replace(/^(?:seven_day|weekly)_/i, '');
+    const modelLabel = model
+      .split('_')
+      .filter(Boolean)
+      .map((part) => part[0]!.toUpperCase() + part.slice(1))
+      .join(' ');
+    pushPctWindow(
+      `weekly_${model.toLowerCase()}`,
+      `${modelLabel} Week`,
+      value as OauthWindow,
+    );
+  }
+
+  // Web/CLI variants may group the same rows under a scoped collection
+  // instead of emitting seven_day_<model> top-level fields.
+  const grouped = r.weekly_scoped ?? r.model_scoped_weekly ?? r.seven_day_scoped;
+  if (grouped && typeof grouped === 'object') {
+    const entries = Array.isArray(grouped)
+      ? grouped.map((entry, index) => [String(index), entry] as const)
+      : Object.entries(grouped);
+    for (const [key, value] of entries) {
+      if (!value || typeof value !== 'object') continue;
+      const record = value as OauthWindow & { model?: unknown; name?: unknown; label?: unknown };
+      const rawModel = [record.model, record.name, record.label, key]
+        .find((candidate): candidate is string => typeof candidate === 'string' && Boolean(candidate.trim()));
+      if (!rawModel) continue;
+      const model = rawModel.trim().replace(/[^a-z0-9]+/gi, '_').replace(/^_|_$/g, '').toLowerCase();
+      const modelLabel = rawModel.trim().replace(/[_-]+/g, ' ');
+      pushPctWindow(`weekly_${model}`, `${modelLabel} Week`, record);
+    }
+  }
 
   const extra = r.extra_usage;
   if (extra && extra.is_enabled) {

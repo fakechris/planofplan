@@ -84,10 +84,21 @@ export function normalizeCodex(raw: unknown): QuotaWindow[] {
   const root = raw as UsagePayload;
   const windows: QuotaWindow[] = [];
 
-  const pushWindow = (id: string, label: string, w: WindowPayload | undefined): void => {
+  const pushWindow = (
+    fallbackId: string,
+    fallbackLabel: string,
+    w: WindowPayload | undefined,
+    classifyDuration = true,
+  ): void => {
     if (!w || typeof w !== 'object') return;
     const usedPercent = num(w.used_percent);
     if (usedPercent == null) return;
+    const duration = num(w.limit_window_seconds);
+    const isFiveHour = classifyDuration && duration != null
+      ? duration <= 6 * 60 * 60
+      : fallbackId === 'rolling_5h';
+    const id = classifyDuration ? (isFiveHour ? 'rolling_5h' : 'weekly') : fallbackId;
+    const label = classifyDuration ? (isFiveHour ? '5小时限额' : '周限额') : fallbackLabel;
     const resetSec = num(w.reset_at);
     windows.push({
       window: id,
@@ -111,7 +122,7 @@ export function normalizeCodex(raw: unknown): QuotaWindow[] {
     const usedPercent = num(extra.used_percent);
     if (usedPercent == null) continue;
     extraIdx += 1;
-    pushWindow('extra', `Extra${extraIdx}`, extra);
+    pushWindow('extra', `Extra${extraIdx}`, extra, false);
   }
 
   // credits：余额信息（无窗口百分比）

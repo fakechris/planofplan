@@ -60,6 +60,25 @@ describe('normalizeCodex', () => {
     expect(extras.map((w) => w.label)).toEqual(['Extra1', 'Extra2']);
   });
 
+  test('uses the API window duration when primary is the weekly limit', () => {
+    const windows = normalizeCodex({
+      rate_limit: {
+        primary_window: {
+          used_percent: 37,
+          reset_at: 1_735_401_600,
+          limit_window_seconds: 604800,
+        },
+      },
+    });
+
+    expect(windows).toHaveLength(1);
+    expect(windows[0]).toMatchObject({
+      window: 'weekly',
+      label: '周限额',
+      percentage: 37,
+    });
+  });
+
   test('空响应 → parse 错误', () => {
     expect(() => normalizeCodex({})).toThrow(AdapterError);
     expect(() => normalizeCodex(null)).toThrow(AdapterError);

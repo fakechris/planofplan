@@ -62,6 +62,29 @@ describe('Store', () => {
     expect(latest[0]!.used).toBe(20);
   });
 
+  test('Factory Standard/Core windows render in 5H, week, month order', () => {
+    const store = openMemoryDb();
+    store.syncPlan({ ...plan, slug: 'factory', adapter: 'factory', name: 'Factory Droid' });
+    const t0 = 1_770_000_000_000;
+    store.insertWindows('factory', [
+      { ...win(10, t0), window: 'core_monthly', label: 'Core Month' },
+      { ...win(20, t0), window: 'standard_weekly', label: 'Standard Week' },
+      { ...win(30, t0), window: 'core_5h', label: 'Core 5H' },
+      { ...win(40, t0), window: 'standard_5h', label: 'Standard 5H' },
+      { ...win(50, t0), window: 'standard_monthly', label: 'Standard Month' },
+      { ...win(60, t0), window: 'core_weekly', label: 'Core Week' },
+    ], t0);
+
+    expect(store.latestByPlan('factory').map((window) => window.label)).toEqual([
+      'Standard 5H',
+      'Standard Week',
+      'Standard Month',
+      'Core 5H',
+      'Core Week',
+      'Core Month',
+    ]);
+  });
+
   test('history 只返回窗口内、since 之后的数据', () => {
     const store = openMemoryDb();
     store.syncPlan(plan);

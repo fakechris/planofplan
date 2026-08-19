@@ -268,7 +268,22 @@ export class Store {
              ORDER BY fetched_at DESC, id DESC
            ) rn
            FROM snapshots s WHERE plan_id = ?
-         ) WHERE rn = 1 ORDER BY window, label`,
+         ) WHERE rn = 1 ORDER BY
+           CASE
+             WHEN window = 'rolling_5h' OR window LIKE 'standard_%' THEN 10
+             WHEN window LIKE 'core_%' OR window = 'weekly' THEN 20
+             WHEN window = 'monthly' THEN 30
+             WHEN window = 'requests' THEN 40
+             WHEN window = 'credits_period' THEN 50
+             ELSE 100
+           END,
+           CASE
+             WHEN window = 'rolling_5h' OR window LIKE '%_5h' THEN 10
+             WHEN window = 'weekly' OR window LIKE '%_weekly' THEN 20
+             WHEN window = 'monthly' OR window LIKE '%_monthly' THEN 30
+             ELSE 100
+           END,
+           window, label`,
       )
       .all(planId) as SnapshotRow[];
     return rows.map(rowToWindow);
@@ -287,7 +302,23 @@ export class Store {
              ORDER BY fetched_at DESC, id DESC
            ) rn
            FROM snapshots s
-         ) WHERE rn = 1 ORDER BY plan_id, window, label`,
+         ) WHERE rn = 1 ORDER BY
+           plan_id,
+           CASE
+             WHEN window = 'rolling_5h' OR window LIKE 'standard_%' THEN 10
+             WHEN window LIKE 'core_%' OR window = 'weekly' THEN 20
+             WHEN window = 'monthly' THEN 30
+             WHEN window = 'requests' THEN 40
+             WHEN window = 'credits_period' THEN 50
+             ELSE 100
+           END,
+           CASE
+             WHEN window = 'rolling_5h' OR window LIKE '%_5h' THEN 10
+             WHEN window = 'weekly' OR window LIKE '%_weekly' THEN 20
+             WHEN window = 'monthly' OR window LIKE '%_monthly' THEN 30
+             ELSE 100
+           END,
+           window, label`,
       )
       .all() as SnapshotRow[];
     const map = new Map<string, QuotaWindow[]>();
