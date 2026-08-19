@@ -155,6 +155,19 @@ function renderCredentialSettings(card, p) {
       </div>
     `;
   }
+  if (p.adapter === 'minimax') {
+    return `
+      <div class="settings-section">
+        <div class="settings-title">MiniMax API key</div>
+        <p class="settings-copy">支持环境变量 <code>MINIMAX_CODING_API_KEY</code>（coding plan 的 <code>sk-cp-*</code> key），但环境变量只对启动 menubar app 的那个 shell 生效，重启 app 后可能丢失；保存在这里则永久生效。</p>
+        <form class="key-form" data-auth-form>
+          <input type="password" name="apiKey" autocomplete="new-password" placeholder="粘贴 sk-cp-* API key" aria-label="MiniMax API key" />
+          <button type="submit" class="button-primary">保存并验证</button>
+          <button type="button" class="button-quiet" data-auth-auto>使用环境变量</button>
+        </form>
+      </div>
+    `;
+  }
   if (p.adapter !== 'glm') {
     if (!p.credentialHint) return '';
     return `<div class="credential-hint">${escapeHtml(p.credentialHint)}</div>`;
