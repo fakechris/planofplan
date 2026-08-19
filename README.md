@@ -28,7 +28,7 @@ planofplan serve [--demo] [--port N]    启动守护进程 + Web dashboard
 planofplan usage [--json] [--provider sl] 全 plan 用量输出（CodexBar usage 风格）
 planofplan status                        各 plan 调度/凭据/最近抓取状态
 planofplan refresh [slug]                手动刷新一个/全部 plan
-planofplan browser-auth --browser name   读取指定浏览器 kimi-auth（仅该浏览器，按需触发 Keychain）
+planofplan browser-auth                  只读取 Safari kimi-auth 并刷新 Kimi
 planofplan auth set <slug> --key <v>     存手动 key（credentials.json, 0600）
 planofplan auth set <slug> --auto        改回自动检测（env / CLI 凭据）
 planofplan auth clear <slug>             清掉手动 key

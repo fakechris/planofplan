@@ -73,6 +73,7 @@ describe('Factory usage', () => {
       bearerToken: 'bearer-value',
       workosAccessToken: null,
       workosRefreshToken: null,
+      organizationId: null,
       source: 'Safari',
     });
     clearFactoryBrowserSession();
@@ -85,6 +86,7 @@ describe('Factory usage', () => {
       [{ name: 'session', value: 'browser-session' }],
       'Comet',
       { refreshToken: 'workos-refresh-token' },
+      'org_123',
     )).toBe(true);
 
     const requests: Array<{ url: string; method: string; authorization: string | null; body: string }> = [];
@@ -119,6 +121,7 @@ describe('Factory usage', () => {
         value: '',
         cookie: 'session=browser-session',
         refreshToken: 'workos-refresh-token',
+        organizationId: 'org_123',
         source: 'browser:Comet',
       });
       expect(windows[0]?.percentage).toBe(12);
@@ -129,11 +132,101 @@ describe('Factory usage', () => {
       expect(JSON.parse(requests[0]!.body)).toMatchObject({
         grant_type: 'refresh_token',
         refresh_token: 'workos-refresh-token',
+        organization_id: 'org_123',
       });
       expect(requests[1]!.authorization).toBe('Bearer workos-access-token');
     } finally {
       globalThis.fetch = originalFetch;
       clearFactoryBrowserSession();
+    }
+  });
+
+  test('falls back to Factory cookies when the browser WorkOS refresh token is rejected', async () => {
+    clearFactoryBrowserSession();
+    expect(acceptFactoryBrowserCookies(
+      [{ name: 'session', value: 'browser-session' }],
+      'Comet',
+      { refreshToken: 'stale-workos-refresh-token' },
+    )).toBe(true);
+
+    const requests: Array<{ url: string; authorization: string | null; cookie: string | null }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input, init) => {
+      const url = String(input);
+      const headers = new Headers(init?.headers);
+      requests.push({
+        url,
+        authorization: headers.get('authorization'),
+        cookie: headers.get('cookie'),
+      });
+      if (url === 'https://api.workos.com/user_management/authenticate') {
+        return new Response('invalid_grant', { status: 401 });
+      }
+      if (url === 'https://api.factory.ai/api/billing/limits') {
+        if (headers.get('cookie') !== 'session=browser-session') {
+          return new Response('missing browser session', { status: 401 });
+        }
+        return Response.json({
+          usesTokenRateLimitsBilling: true,
+          limits: { standard: { fiveHour: { usedPercent: 12, secondsRemaining: 3600 } } },
+        });
+      }
+      return new Response('not found', { status: 404 });
+    }) as typeof fetch;
+
+    try {
+      const windows = await factoryAdapter.fetchUsage({} as never, {
+        kind: 'bearer',
+        value: '',
+        cookie: 'session=browser-session',
+        refreshToken: 'stale-workos-refresh-token',
+        source: 'browser:Comet',
+      });
+      expect(windows[0]?.percentage).toBe(12);
+      expect(requests.at(-1)?.cookie).toBe('session=browser-session');
+      expect(requests.at(-1)?.authorization).toBeNull();
+    } finally {
+      globalThis.fetch = originalFetch;
+      clearFactoryBrowserSession();
+    }
+  });
+
+  test('drops a rejected stale access-token and retries Factory with cookies', async () => {
+    const originalFetch = globalThis.fetch;
+    const requests: Array<{ authorization: string | null; cookie: string | null }> = [];
+    globalThis.fetch = (async (input, init) => {
+      const url = String(input);
+      const headers = new Headers(init?.headers);
+      if (url === 'https://api.factory.ai/api/billing/limits') {
+        requests.push({
+          authorization: headers.get('authorization'),
+          cookie: headers.get('cookie'),
+        });
+        if (headers.get('authorization') === 'Bearer stale-access-token') {
+          return new Response('expired bearer', { status: 401 });
+        }
+        return Response.json({
+          usesTokenRateLimitsBilling: true,
+          limits: { standard: { fiveHour: { usedPercent: 8, secondsRemaining: 3600 } } },
+        });
+      }
+      return new Response('not found', { status: 404 });
+    }) as typeof fetch;
+
+    try {
+      const windows = await factoryAdapter.fetchUsage({} as never, {
+        kind: 'bearer',
+        value: 'stale-access-token',
+        cookie: 'session=browser-session; access-token=stale-access-token',
+        source: 'browser:Comet',
+      });
+      expect(windows[0]?.percentage).toBe(8);
+      expect(requests).toEqual([
+        { authorization: 'Bearer stale-access-token', cookie: 'session=browser-session; access-token=stale-access-token' },
+        { authorization: null, cookie: 'session=browser-session; access-token=stale-access-token' },
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
     }
   });
 

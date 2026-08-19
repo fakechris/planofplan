@@ -311,7 +311,10 @@ async function getJSONFromBases(path: string, credential: Credential): Promise<u
   throw lastError instanceof Error ? lastError : new AdapterError('network', `Factory 请求失败：${path}`);
 }
 
-async function exchangeWorkOSRefreshToken(refreshToken: string): Promise<WorkOSAuthResponse> {
+async function exchangeWorkOSRefreshToken(
+  refreshToken: string,
+  organizationId?: string | null,
+): Promise<WorkOSAuthResponse> {
   let lastError: unknown = null;
   for (const clientId of WORKOS_CLIENT_IDS) {
     try {
@@ -325,6 +328,7 @@ async function exchangeWorkOSRefreshToken(refreshToken: string): Promise<WorkOSA
           client_id: clientId,
           grant_type: 'refresh_token',
           refresh_token: refreshToken,
+          ...(organizationId ? { organization_id: organizationId } : {}),
         }),
         signal: AbortSignal.timeout(12_000),
       });
@@ -355,17 +359,19 @@ async function exchangeWorkOSRefreshToken(refreshToken: string): Promise<WorkOSA
 
 async function credentialWithWorkOSAccessToken(credential: Credential): Promise<Credential> {
   if (!credential.refreshToken || credential.value.trim()) return credential;
-  const tokens = await exchangeWorkOSRefreshToken(credential.refreshToken);
+  const tokens = await exchangeWorkOSRefreshToken(credential.refreshToken, credential.organizationId);
   const accessToken = stringValue(tokens.access_token);
   if (!accessToken) throw new AdapterError('auth', 'WorkOS 鉴权响应缺少 access_token');
   updateFactoryWorkOSSession({
     accessToken,
     refreshToken: stringValue(tokens.refresh_token),
+    organizationId: credential.organizationId,
   });
   return {
     ...credential,
     value: accessToken,
     refreshToken: stringValue(tokens.refresh_token) ?? credential.refreshToken,
+    organizationId: credential.organizationId,
   };
 }
 
@@ -390,6 +396,7 @@ export const factoryAdapter: PlanAdapter = {
           ?? (session.workosRefreshToken ? '' : session.bearerToken ?? ''),
         cookie: session.cookieHeader,
         refreshToken: session.workosRefreshToken,
+        organizationId: session.organizationId,
         source: `browser:${session.source}`,
       };
     }
@@ -397,21 +404,44 @@ export const factoryAdapter: PlanAdapter = {
   },
 
   async fetchUsage(_ctx: AdapterContext, credential: Credential): Promise<QuotaWindow[]> {
-    let activeCredential = await credentialWithWorkOSAccessToken(credential);
+    let activeCredential = credential;
+    if (!activeCredential.value.trim() && activeCredential.refreshToken) {
+      try {
+        activeCredential = await credentialWithWorkOSAccessToken(activeCredential);
+      } catch (error) {
+        // WorkOS refresh tokens rotate. If a previous process redeemed the
+        // browser token, the browser cookie remains an independent auth path.
+        if (
+          !activeCredential.cookie ||
+          !(error instanceof AdapterError) ||
+          error.kind !== 'auth'
+        ) {
+          throw error;
+        }
+        activeCredential = { ...activeCredential, value: '' };
+      }
+    }
     try {
       return await fetchFactoryUsage(activeCredential);
     } catch (error) {
-      if (
-        activeCredential.refreshToken &&
-        activeCredential.value.trim() &&
-        error instanceof AdapterError &&
-        error.kind === 'auth'
-      ) {
-        activeCredential = await credentialWithWorkOSAccessToken({
-          ...activeCredential,
-          value: '',
-        });
-        return fetchFactoryUsage(activeCredential);
+      if (!(error instanceof AdapterError) || error.kind !== 'auth') throw error;
+
+      if (activeCredential.refreshToken && activeCredential.value.trim()) {
+        try {
+          activeCredential = await credentialWithWorkOSAccessToken({
+            ...activeCredential,
+            value: '',
+          });
+          return fetchFactoryUsage(activeCredential);
+        } catch (refreshError) {
+          if (!activeCredential.cookie || !(refreshError instanceof AdapterError) || refreshError.kind !== 'auth') {
+            throw refreshError;
+          }
+        }
+      }
+
+      if (activeCredential.cookie && activeCredential.value.trim()) {
+        return fetchFactoryUsage({ ...activeCredential, value: '' });
       }
       throw error;
     }
@@ -428,6 +458,7 @@ async function fetchFactoryUsage(credential: Credential): Promise<QuotaWindow[]>
       }
     } catch (error) {
       // Older accounts do not expose billing limits. Continue to the legacy endpoint.
+      if (error instanceof AdapterError && error.kind === 'auth') throw error;
     }
 
     const auth = await getJSONFromBases(AUTH_PATH, credential) as FactoryAuthResponse;

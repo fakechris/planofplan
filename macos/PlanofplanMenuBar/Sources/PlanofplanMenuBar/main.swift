@@ -38,6 +38,7 @@ struct BrowserSessionPayload: Encodable {
 struct BrowserWorkOSPayload: Encodable {
     let accessToken: String?
     let refreshToken: String?
+    let organizationId: String?
 }
 
 struct BuildMetadata {
@@ -499,12 +500,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let workos = preferWorkOS && selection.planSlug == "factory"
                     ? self.workOSCredentials(in: nativeBrowser)
                     : nil
+                let cookiePayloads = if workos != nil {
+                    (try? self.browserCookiePayloads(
+                        client: client,
+                        query: query,
+                        nativeBrowser: nativeBrowser,
+                        planSlug: selection.planSlug
+                    )) ?? []
+                } else {
+                    try self.browserCookiePayloads(
+                        client: client,
+                        query: query,
+                        nativeBrowser: nativeBrowser,
+                        planSlug: selection.planSlug
+                    )
+                }
                 if let workos {
                     NSLog("planofplan browser \(browser) factory: submitting WorkOS session")
                     let payload = BrowserSessionPayload(
                         planSlug: selection.planSlug,
                         browser: browser,
-                        cookies: [],
+                        cookies: cookiePayloads,
                         workos: workos
                     )
                     let body = try JSONEncoder().encode(payload)
@@ -524,38 +540,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                     return
                 }
-                let sources = try client.records(matching: query, in: nativeBrowser)
-                NSLog(
-                    "planofplan browser \(browser) \(selection.planSlug): found \(sources.reduce(0) { $0 + $1.records.count }) cookie records"
-                )
-                let grouped = Dictionary(grouping: sources, by: { $0.store.profile.id })
-                let sortedGroups = grouped.values.sorted {
-                    self.mergedBrowserLabel(for: $0) < self.mergedBrowserLabel(for: $1)
-                }
-                var selectedCookies: [BrowserCookiePayload]?
-                for group in sortedGroups where !group.isEmpty {
-                    let mergedRecords = self.mergeBrowserRecords(group)
-                    let cookies = BrowserCookieClient.makeHTTPCookies(mergedRecords, origin: query.origin)
-                    guard cookies.contains(where: {
-                        self.isSessionCookie($0.name, for: selection.planSlug)
-                    }) else { continue }
-                    selectedCookies = cookies.map {
-                        BrowserCookiePayload(
-                            domain: $0.domain,
-                            name: $0.name,
-                            value: $0.value,
-                            path: $0.path
-                        )
-                    }
-                    break
-                }
-                guard let cookies = selectedCookies else {
-                    throw BrowserSessionError.noSessionCookie
-                }
                 let payload = BrowserSessionPayload(
                     planSlug: selection.planSlug,
                     browser: browser,
-                    cookies: cookies,
+                    cookies: cookiePayloads,
                     workos: workos
                 )
                 let body = try JSONEncoder().encode(payload)
@@ -576,6 +564,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.refreshOverview()
             }
         }
+    }
+
+    private func browserCookiePayloads(
+        client: BrowserCookieClient,
+        query: BrowserCookieQuery,
+        nativeBrowser: Browser,
+        planSlug: String
+    ) throws -> [BrowserCookiePayload] {
+        let sources = try client.records(matching: query, in: nativeBrowser)
+        NSLog(
+            "planofplan browser \(nativeBrowser.displayName) \(planSlug): found "
+                + "\(sources.reduce(0) { $0 + $1.records.count }) cookie records"
+        )
+        let grouped = Dictionary(grouping: sources, by: { $0.store.profile.id })
+        let sortedGroups = grouped.values.sorted {
+            self.mergedBrowserLabel(for: $0) < self.mergedBrowserLabel(for: $1)
+        }
+        for group in sortedGroups where !group.isEmpty {
+            let mergedRecords = self.mergeBrowserRecords(group)
+            let cookies = BrowserCookieClient.makeHTTPCookies(mergedRecords, origin: query.origin)
+            guard cookies.contains(where: {
+                self.isSessionCookie($0.name, for: planSlug)
+            }) else { continue }
+            return cookies.map {
+                BrowserCookiePayload(
+                    domain: $0.domain,
+                    name: $0.name,
+                    value: $0.value,
+                    path: $0.path
+                )
+            }
+        }
+        throw BrowserSessionError.noSessionCookie
     }
 
     private func workOSCredentials(in browser: Browser) -> BrowserWorkOSPayload? {
@@ -615,7 +636,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             "planofplan browser \(browser.displayName) factory: found WorkOS tokens "
                 + "access=\(accessToken?.count ?? 0) refresh=\(refreshToken?.count ?? 0)"
         )
-        return BrowserWorkOSPayload(accessToken: accessToken, refreshToken: refreshToken)
+        return BrowserWorkOSPayload(
+            accessToken: accessToken,
+            refreshToken: refreshToken,
+            organizationId: organizationID(in: accessToken)
+        )
+    }
+
+    private func organizationID(in token: String?) -> String? {
+        guard let token else { return nil }
+        let parts = token.split(separator: ".")
+        guard parts.count == 3 else { return nil }
+        var payload = String(parts[1])
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        while payload.count % 4 != 0 {
+            payload.append("=")
+        }
+        guard let data = Data(base64Encoded: payload),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let organizationID = json["org_id"] as? String,
+              !organizationID.isEmpty
+        else {
+            return nil
+        }
+        return organizationID
     }
 
     private func cookieDomains(for planSlug: String) -> [String] {

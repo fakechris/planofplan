@@ -155,7 +155,11 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
       browser?: string;
       planSlug?: string;
       cookies?: Array<{ domain?: string; name?: string; value?: string }>;
-      workos?: { accessToken?: string | null; refreshToken?: string | null };
+      workos?: {
+        accessToken?: string | null;
+        refreshToken?: string | null;
+        organizationId?: string | null;
+      };
     };
     let body: BrowserSessionRequest;
     try {
@@ -170,20 +174,40 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
       return c.json({ ok: false, planSlug, error: 'Kimi 仅支持 Safari 浏览器会话' }, 400);
     }
     const source = `${body?.browser ?? 'browser'} (native)`;
-    const accepted = planSlug === 'factory'
-      ? acceptFactoryBrowserCookies(
-          cookies.flatMap((cookie) =>
-            typeof cookie.name === 'string' && typeof cookie.value === 'string'
-              ? [{ ...cookie, name: cookie.name, value: cookie.value }]
-              : []
-          ),
-          source,
-          body.workos,
-        )
-      : acceptKimiBrowserCookies(cookies, source, planSlug);
+    const normalizedCookies = cookies.flatMap((cookie) =>
+      typeof cookie.name === 'string' && typeof cookie.value === 'string'
+        ? [{ ...cookie, name: cookie.name, value: cookie.value }]
+        : []
+    );
+    let accepted = false;
+    if (planSlug === 'factory') {
+      accepted = acceptFactoryBrowserCookies(normalizedCookies, source, body.workos, body.workos?.organizationId);
+    } else if (planSlug === 'kimi') {
+      // Safari can retain more than one kimi-auth record while a session is
+      // rotated. Try them in native importer order instead of assuming the
+      // first record is the live session.
+      const candidates = normalizedCookies.filter((cookie) => cookie.name === 'kimi-auth');
+      for (const candidate of candidates) {
+        if (!acceptKimiBrowserCookies([candidate], source, planSlug)) continue;
+        accepted = true;
+        kimiResult = await scheduler.refreshPlan(planSlug);
+        if (
+          typeof kimiResult === 'object' &&
+          kimiResult != null &&
+          'ok' in kimiResult &&
+          (kimiResult as { ok?: unknown }).ok === true
+        ) {
+          break;
+        }
+      }
+    } else {
+      accepted = acceptKimiBrowserCookies(normalizedCookies, source, planSlug);
+    }
     if (accepted) {
       store.updatePlanExtra(planSlug, { browser: body.browser ?? null });
-      kimiResult = await scheduler.refreshPlan(planSlug);
+      if (planSlug !== 'kimi') {
+        kimiResult = await scheduler.refreshPlan(planSlug);
+      }
     }
     const ok = typeof kimiResult === 'object'
       && kimiResult != null

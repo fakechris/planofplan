@@ -46,6 +46,8 @@ export interface Credential {
   source: string;
   /** OAuth refresh token supplied by a provider-owned credential store. */
   refreshToken?: string | null;
+  /** WorkOS organization selected by the browser session, when present. */
+  organizationId?: string | null;
   /** OAuth access-token expiry, in epoch milliseconds when known. */
   expiresAt?: number | null;
   /** Persist a provider-owned rotated OAuth credential without exposing its storage format to the scheduler. */

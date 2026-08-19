@@ -46,4 +46,37 @@ describe('Kimi browser policy', () => {
       error: 'Kimi 仅支持 Safari 浏览器会话',
     });
   });
+
+  test('tries each Safari kimi-auth cookie until usage succeeds', async () => {
+    const store = openMemoryDb();
+    const kimi = DEFAULT_PLANS.find((plan) => plan.slug === 'kimi')!;
+    store.syncPlan(kimi);
+    let calls = 0;
+    const scheduler = {
+      refreshPlan: async () => {
+        calls += 1;
+        return calls === 1
+          ? { ok: false, slug: 'kimi', error: '旧 Safari 会话' }
+          : { ok: true, slug: 'kimi', windows: [] };
+      },
+    };
+    const server = createServer(store, scheduler as never, { port: 9291, plans: [kimi] });
+
+    const response = await server.request('http://localhost/api/browser-session', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        planSlug: 'kimi',
+        browser: 'safari',
+        cookies: [
+          { domain: '.kimi.com', name: 'kimi-auth', value: 'old-session' },
+          { domain: 'www.kimi.com', name: 'kimi-auth', value: 'current-session' },
+        ],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(calls).toBe(2);
+    expect((await response.json() as { ok?: boolean }).ok).toBe(true);
+  });
 });

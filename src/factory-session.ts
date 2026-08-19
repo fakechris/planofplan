@@ -7,6 +7,7 @@ const FACTORY_SESSION_COOKIE_NAMES = new Set([
   'authjs.session-token',
   'session',
   'access-token',
+  '__recent_auth',
 ]);
 
 export interface FactoryBrowserCookie {
@@ -21,6 +22,7 @@ export interface FactoryBrowserSession {
   bearerToken: string | null;
   workosAccessToken: string | null;
   workosRefreshToken: string | null;
+  organizationId: string | null;
   source: string;
 }
 
@@ -30,11 +32,13 @@ export function acceptFactoryBrowserCookies(
   cookies: FactoryBrowserCookie[],
   source: string,
   workos?: { accessToken?: string | null; refreshToken?: string | null },
+  organizationId?: string | null,
 ): boolean {
   const selected = cookies.filter((cookie) =>
     FACTORY_SESSION_COOKIE_NAMES.has(cookie.name) && cookie.value.trim());
   const workosAccessToken = workos?.accessToken?.trim() || null;
   const workosRefreshToken = workos?.refreshToken?.trim() || null;
+  const selectedOrganizationId = organizationId?.trim() || null;
   if (selected.length === 0 && !workosAccessToken && !workosRefreshToken) return false;
 
   currentSession = {
@@ -42,6 +46,7 @@ export function acceptFactoryBrowserCookies(
     bearerToken: selected.find((cookie) => cookie.name === 'access-token')?.value ?? null,
     workosAccessToken,
     workosRefreshToken,
+    organizationId: selectedOrganizationId,
     source,
   };
   return true;
@@ -50,12 +55,14 @@ export function acceptFactoryBrowserCookies(
 export function updateFactoryWorkOSSession(tokens: {
   accessToken?: string | null;
   refreshToken?: string | null;
+  organizationId?: string | null;
 }): void {
   if (!currentSession) return;
   currentSession = {
     ...currentSession,
     workosAccessToken: tokens.accessToken?.trim() || currentSession.workosAccessToken,
     workosRefreshToken: tokens.refreshToken?.trim() || currentSession.workosRefreshToken,
+    organizationId: tokens.organizationId?.trim() || currentSession.organizationId,
   };
 }
 
