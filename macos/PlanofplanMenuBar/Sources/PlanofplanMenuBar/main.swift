@@ -589,10 +589,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard seenLevelDB.insert(levelDBURL.path).inserted else { continue }
 
             let entries = ChromiumLocalStorageReader.readTextEntries(in: levelDBURL)
-            for entry in entries where entry.key.hasSuffix("workos:refresh-token") {
+            for entry in entries where
+                refreshToken == nil && entry.key.hasSuffix("workos:refresh-token")
+            {
                 refreshToken = entry.value
             }
-            for entry in entries where entry.key.hasSuffix("workos:access-token") {
+            for entry in entries where
+                accessToken == nil && entry.key.hasSuffix("workos:access-token")
+            {
                 accessToken = entry.value
             }
         }
