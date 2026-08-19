@@ -70,7 +70,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         port = configuredPort()
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.title = "PF"
+        updateMenuBarIcon()
         rebuildMenu()
 
         ensureDaemon()
@@ -174,6 +174,74 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case "stale": return "◐"
         case "error", "auth_error": return "!"
         default: return "○"
+        }
+    }
+
+    // CodexBar 风格的 menubar 用量表：全 plan 最紧张的两个配额窗口画成
+    // 迷你分段条，填充比例 = 已用百分比，颜色按余量分级；无数据时灰化。
+    private func updateMenuBarIcon() {
+        statusItem.button?.image = renderUsageMeterIcon(for: overview)
+        statusItem.button?.imagePosition = .imageOnly
+    }
+
+    private func renderUsageMeterIcon(for overview: Overview?) -> NSImage {
+        let meters = tightUsageMeters(from: overview)
+        let size = NSSize(width: 20, height: meters.isEmpty ? 8 : 11)
+        let icon = NSImage(size: size)
+        icon.lockFocus()
+        let trackColor = NSColor.systemGray.withAlphaComponent(0.32)
+        NSColor.clear.setFill()
+
+        func color(level: Int) -> NSColor {
+            switch level {
+            case 0: return NSColor(srgbRed: 0.31, green: 0.80, blue: 0.57, alpha: 1)
+            case 1: return NSColor(srgbRed: 0.91, green: 0.71, blue: 0.32, alpha: 1)
+            default: return NSColor(srgbRed: 0.94, green: 0.44, blue: 0.44, alpha: 1)
+            }
+        }
+        func drawRoundedRect(_ rect: NSRect) {
+            NSBezierPath(roundedRect: rect, xRadius: rect.height / 2, yRadius: rect.height / 2).fill()
+        }
+
+        if meters.isEmpty {
+            // 无数据：两条空轨道
+            for row in 0..<2 {
+                trackColor.setFill()
+                drawRoundedRect(NSRect(x: 1, y: CGFloat(3 - row * 4), width: 18, height: 3))
+            }
+        } else {
+            let barHeight: CGFloat = 3
+            let gap: CGFloat = 2
+            let width: CGFloat = 18
+            for (index, meter) in meters.prefix(2).enumerated() {
+                let y = size.height - barHeight - CGFloat(index) * (barHeight + gap)
+                trackColor.setFill()
+                drawRoundedRect(NSRect(x: 1, y: y - 1, width: width, height: barHeight))
+                color(level: meter.level).setFill()
+                drawRoundedRect(NSRect(x: 1, y: y - 1, width: max(barHeight, width * meter.fraction), height: barHeight))
+            }
+        }
+        icon.unlockFocus()
+        icon.isTemplate = false
+        return icon
+    }
+
+    /// 余量最紧张的两个窗口（已用百分比最高），按 (fraction, level) 返回。
+    private func tightUsageMeters(from overview: Overview?) -> [(fraction: CGFloat, level: Int)] {
+        guard let overview else { return [] }
+        let percentages = overview.plans
+            .filter { $0.status == "ok" || $0.status == "stale" }
+            .flatMap { plan in
+                plan.windows.compactMap { window -> Double? in
+                    guard let percentage = window.percentage else { return nil }
+                    return min(max(percentage, 0), 100)
+                }
+            }
+            .sorted(by: >)
+        return percentages.prefix(2).map { percentage in
+            let remaining = 100 - percentage
+            let level = remaining > 50 ? 0 : (remaining > 10 ? 1 : 2)
+            return (fraction: CGFloat(percentage / 100), level: level)
         }
     }
 
@@ -349,6 +417,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 NSLog("planofplan: invalid overview response: \(error)")
             }
             self.rebuildMenu()
+            self.updateMenuBarIcon()
             self.startSafariPermissionOnboardingIfNeeded()
             self.bootstrapBrowserSessions()
         }
