@@ -99,9 +99,7 @@ async function load() {
     request('/api/build-info'),
     request(`/api/usage?days=${encodeURIComponent(days)}`),
   ]);
-  latestBuildInfo = buildInfo;
-  latestUsage = usage;
-  return overview;
+  return { overview, buildInfo, usage };
 }
 
 function fmtTokens(value) {
@@ -515,9 +513,16 @@ function tickClock() {
   }
 }
 
+let renderGeneration = 0;
+
 async function render() {
+  const generation = ++renderGeneration;
   try {
-    latestOverview = await load();
+    const result = await load();
+    if (generation !== renderGeneration) return;
+    latestOverview = result.overview;
+    latestBuildInfo = result.buildInfo;
+    latestUsage = result.usage;
     const now = Date.now();
     document.getElementById('connectionState').className = 'connection connected';
     document.getElementById('connectionState').innerHTML = '<i></i> live';
@@ -530,9 +535,11 @@ async function render() {
     renderSummary(latestOverview);
     renderUsage(latestUsage);
     const grid = document.getElementById('grid');
-    grid.innerHTML = '';
-    for (const p of latestOverview.plans) grid.appendChild(renderPlan(p, now));
+    const nextGrid = document.createDocumentFragment();
+    for (const p of latestOverview.plans) nextGrid.appendChild(renderPlan(p, now));
+    grid.replaceChildren(nextGrid);
   } catch (error) {
+    if (generation !== renderGeneration) return;
     document.getElementById('connectionState').className = 'connection disconnected';
     document.getElementById('connectionState').innerHTML = '<i></i> offline';
     document.getElementById('generatedAt').textContent = '无法连接本地 daemon';
