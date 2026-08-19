@@ -48,6 +48,8 @@ export interface Credential {
   refreshToken?: string | null;
   /** WorkOS organization selected by the browser session, when present. */
   organizationId?: string | null;
+  /** Browser cookies used by WorkOS when redeeming a browser refresh session. */
+  workosCookie?: string | null;
   /** OAuth access-token expiry, in epoch milliseconds when known. */
   expiresAt?: number | null;
   /** Persist a provider-owned rotated OAuth credential without exposing its storage format to the scheduler. */

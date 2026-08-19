@@ -314,6 +314,7 @@ async function getJSONFromBases(path: string, credential: Credential): Promise<u
 async function exchangeWorkOSRefreshToken(
   refreshToken: string,
   organizationId?: string | null,
+  workosCookie?: string | null,
 ): Promise<WorkOSAuthResponse> {
   let lastError: unknown = null;
   for (const clientId of WORKOS_CLIENT_IDS) {
@@ -323,12 +324,14 @@ async function exchangeWorkOSRefreshToken(
         headers: {
           accept: 'application/json',
           'content-type': 'application/json',
+          ...(workosCookie ? { Cookie: workosCookie } : {}),
         },
         body: JSON.stringify({
           client_id: clientId,
           grant_type: 'refresh_token',
           refresh_token: refreshToken,
           ...(organizationId ? { organization_id: organizationId } : {}),
+          ...(workosCookie ? { useCookie: true } : {}),
         }),
         signal: AbortSignal.timeout(12_000),
       });
@@ -359,19 +362,25 @@ async function exchangeWorkOSRefreshToken(
 
 async function credentialWithWorkOSAccessToken(credential: Credential): Promise<Credential> {
   if (!credential.refreshToken || credential.value.trim()) return credential;
-  const tokens = await exchangeWorkOSRefreshToken(credential.refreshToken, credential.organizationId);
+  const tokens = await exchangeWorkOSRefreshToken(
+    credential.refreshToken,
+    credential.organizationId,
+    credential.workosCookie,
+  );
   const accessToken = stringValue(tokens.access_token);
   if (!accessToken) throw new AdapterError('auth', 'WorkOS 鉴权响应缺少 access_token');
   updateFactoryWorkOSSession({
     accessToken,
     refreshToken: stringValue(tokens.refresh_token),
     organizationId: credential.organizationId,
+    workosCookie: credential.workosCookie,
   });
   return {
     ...credential,
     value: accessToken,
     refreshToken: stringValue(tokens.refresh_token) ?? credential.refreshToken,
     organizationId: credential.organizationId,
+    workosCookie: credential.workosCookie,
   };
 }
 
@@ -397,6 +406,7 @@ export const factoryAdapter: PlanAdapter = {
         cookie: session.cookieHeader,
         refreshToken: session.workosRefreshToken,
         organizationId: session.organizationId,
+        workosCookie: session.workosCookieHeader,
         source: `browser:${session.source}`,
       };
     }

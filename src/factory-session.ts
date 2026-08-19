@@ -23,6 +23,7 @@ export interface FactoryBrowserSession {
   workosAccessToken: string | null;
   workosRefreshToken: string | null;
   organizationId: string | null;
+  workosCookieHeader: string | null;
   source: string;
 }
 
@@ -33,12 +34,16 @@ export function acceptFactoryBrowserCookies(
   source: string,
   workos?: { accessToken?: string | null; refreshToken?: string | null },
   organizationId?: string | null,
+  workosCookies?: FactoryBrowserCookie[],
 ): boolean {
   const selected = cookies.filter((cookie) =>
     FACTORY_SESSION_COOKIE_NAMES.has(cookie.name) && cookie.value.trim());
   const workosAccessToken = workos?.accessToken?.trim() || null;
   const workosRefreshToken = workos?.refreshToken?.trim() || null;
   const selectedOrganizationId = organizationId?.trim() || null;
+  const workosCookieHeader = workosCookies?.filter((cookie) => cookie.value.trim())
+    .map((cookie) => `${cookie.name}=${cookie.value}`)
+    .join('; ') || null;
   if (selected.length === 0 && !workosAccessToken && !workosRefreshToken) return false;
 
   currentSession = {
@@ -47,6 +52,7 @@ export function acceptFactoryBrowserCookies(
     workosAccessToken,
     workosRefreshToken,
     organizationId: selectedOrganizationId,
+    workosCookieHeader,
     source,
   };
   return true;
@@ -56,6 +62,7 @@ export function updateFactoryWorkOSSession(tokens: {
   accessToken?: string | null;
   refreshToken?: string | null;
   organizationId?: string | null;
+  workosCookie?: string | null;
 }): void {
   if (!currentSession) return;
   currentSession = {
@@ -63,6 +70,7 @@ export function updateFactoryWorkOSSession(tokens: {
     workosAccessToken: tokens.accessToken?.trim() || currentSession.workosAccessToken,
     workosRefreshToken: tokens.refreshToken?.trim() || currentSession.workosRefreshToken,
     organizationId: tokens.organizationId?.trim() || currentSession.organizationId,
+    workosCookieHeader: tokens.workosCookie?.trim() || currentSession.workosCookieHeader,
   };
 }
 

@@ -74,6 +74,7 @@ describe('Factory usage', () => {
       workosAccessToken: null,
       workosRefreshToken: null,
       organizationId: null,
+      workosCookieHeader: null,
       source: 'Safari',
     });
     clearFactoryBrowserSession();
@@ -89,7 +90,13 @@ describe('Factory usage', () => {
       'org_123',
     )).toBe(true);
 
-    const requests: Array<{ url: string; method: string; authorization: string | null; body: string }> = [];
+    const requests: Array<{
+      url: string;
+      method: string;
+      authorization: string | null;
+      cookie: string | null;
+      body: string;
+    }> = [];
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async (input, init) => {
       const url = String(input);
@@ -97,6 +104,7 @@ describe('Factory usage', () => {
         url,
         method: init?.method ?? 'GET',
         authorization: new Headers(init?.headers).get('authorization'),
+        cookie: new Headers(init?.headers).get('cookie'),
         body: typeof init?.body === 'string' ? init.body : '',
       });
       if (url === 'https://api.workos.com/user_management/authenticate') {
@@ -122,6 +130,7 @@ describe('Factory usage', () => {
         cookie: 'session=browser-session',
         refreshToken: 'workos-refresh-token',
         organizationId: 'org_123',
+        workosCookie: 'wos-session=workos-browser-session',
         source: 'browser:Comet',
       });
       expect(windows[0]?.percentage).toBe(12);
@@ -133,7 +142,9 @@ describe('Factory usage', () => {
         grant_type: 'refresh_token',
         refresh_token: 'workos-refresh-token',
         organization_id: 'org_123',
+        useCookie: true,
       });
+      expect(requests[0]!.cookie).toBe('wos-session=workos-browser-session');
       expect(requests[1]!.authorization).toBe('Bearer workos-access-token');
     } finally {
       globalThis.fetch = originalFetch;

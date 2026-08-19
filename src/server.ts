@@ -159,6 +159,7 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
         accessToken?: string | null;
         refreshToken?: string | null;
         organizationId?: string | null;
+        cookies?: Array<{ domain?: string; name?: string; value?: string }>;
       };
     };
     let body: BrowserSessionRequest;
@@ -181,7 +182,18 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     );
     let accepted = false;
     if (planSlug === 'factory') {
-      accepted = acceptFactoryBrowserCookies(normalizedCookies, source, body.workos, body.workos?.organizationId);
+      const workosCookies = (body.workos?.cookies ?? []).flatMap((cookie) =>
+        typeof cookie.name === 'string' && typeof cookie.value === 'string'
+          ? [{ ...cookie, name: cookie.name, value: cookie.value }]
+          : []
+      );
+      accepted = acceptFactoryBrowserCookies(
+        normalizedCookies,
+        source,
+        body.workos,
+        body.workos?.organizationId,
+        workosCookies,
+      );
     } else if (planSlug === 'kimi') {
       // Safari can retain more than one kimi-auth record while a session is
       // rotated. Try them in native importer order instead of assuming the

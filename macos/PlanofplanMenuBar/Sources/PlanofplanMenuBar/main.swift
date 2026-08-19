@@ -39,6 +39,7 @@ struct BrowserWorkOSPayload: Encodable {
     let accessToken: String?
     let refreshToken: String?
     let organizationId: String?
+    let cookies: [BrowserCookiePayload]
 }
 
 struct BuildMetadata {
@@ -500,6 +501,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let workos = preferWorkOS && selection.planSlug == "factory"
                     ? self.workOSCredentials(in: nativeBrowser)
                     : nil
+                let workosCookiePayloads: [BrowserCookiePayload] = if workos != nil {
+                    (try? self.browserCookiePayloads(
+                        client: client,
+                        query: BrowserCookieQuery(
+                            domains: ["workos.com"],
+                            domainMatch: .suffix,
+                            includeExpired: false
+                        ),
+                        nativeBrowser: nativeBrowser,
+                        planSlug: selection.planSlug,
+                        requireSessionCookie: false
+                    )) ?? []
+                } else {
+                    []
+                }
                 let cookiePayloads = if workos != nil {
                     (try? self.browserCookiePayloads(
                         client: client,
@@ -521,7 +537,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         planSlug: selection.planSlug,
                         browser: browser,
                         cookies: cookiePayloads,
-                        workos: workos
+                        workos: BrowserWorkOSPayload(
+                            accessToken: workos.accessToken,
+                            refreshToken: workos.refreshToken,
+                            organizationId: workos.organizationId,
+                            cookies: workosCookiePayloads
+                        )
                     )
                     let body = try JSONEncoder().encode(payload)
                     self.request(path: "/api/browser-session", method: "POST", body: body) { [weak self] data, status in
@@ -582,7 +603,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         client: BrowserCookieClient,
         query: BrowserCookieQuery,
         nativeBrowser: Browser,
-        planSlug: String
+        planSlug: String,
+        requireSessionCookie: Bool = true
     ) throws -> [BrowserCookiePayload] {
         let sources = try client.records(matching: query, in: nativeBrowser)
         let recordNames = sources
@@ -600,9 +622,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for group in sortedGroups where !group.isEmpty {
             let mergedRecords = self.mergeBrowserRecords(group)
             let cookies = BrowserCookieClient.makeHTTPCookies(mergedRecords, origin: query.origin)
-            guard cookies.contains(where: {
-                self.isSessionCookie($0.name, for: planSlug)
-            }) else { continue }
+            if requireSessionCookie {
+                guard cookies.contains(where: {
+                    self.isSessionCookie($0.name, for: planSlug)
+                }) else { continue }
+            }
             return cookies.map {
                 BrowserCookiePayload(
                     domain: $0.domain,
@@ -655,7 +679,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return BrowserWorkOSPayload(
             accessToken: accessToken,
             refreshToken: refreshToken,
-            organizationId: organizationID(in: accessToken)
+            organizationId: organizationID(in: accessToken),
+            cookies: []
         )
     }
 
