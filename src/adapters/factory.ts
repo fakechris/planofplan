@@ -408,7 +408,7 @@ async function refreshFactoryCredential(credential: Credential): Promise<Credent
 export const factoryAdapter: PlanAdapter = {
   slug: 'factory',
   credentialHint:
-    '缺少凭据：设置 FACTORY_API_KEY、运行 `planofplan auth set factory --key <Factory API key>`，或在 app.factory.ai 登录后从 menubar 读取浏览器会话',
+    '缺少凭据：设置 FACTORY_API_KEY、运行 `planofplan auth set factory --key <Factory API key>`、在 app.factory.ai 登录后从 menubar 读取浏览器会话，或运行 `planofplan factory-auth` 导入 droid CLI 登录态',
 
   async detectCredentials(ctx: AdapterContext): Promise<Credential | null> {
     if (ctx.plan.credRef) {

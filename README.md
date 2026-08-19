@@ -215,6 +215,7 @@ adapter 接口见 `src/types.ts`。MiniMax 的端点/解析规格出处：CodexB
 
 - GLM 待 API key：在 Dashboard 的 GLM 设置弹窗填写，或运行 `planofplan auth set glm --key <key>`；也可设置 `Z_AI_API_KEY` / `ZAI_API_KEY` / `BIGMODEL_API_KEY`
 - Factory 可设置 `FACTORY_API_KEY`、`~/.factory/.env` 或运行 `planofplan auth set factory --key <key>`；也可在 `app.factory.ai` 登录后通过 menubar 读取 Safari/Chromium/Firefox 的 Factory session cookie。接口与窗口语义对齐 CodexBar `docs/factory.md`，onWatch 当前没有 Factory adapter
+- Factory WorkOS refresh token 一次性轮换：daemon 维护自己的轮换链并写入 `~/.planofplan/factory-session.json`（跨重启存活），浏览器/CLI 各持独立链互不影响；只有 menubar 重读或 `planofplan factory-auth` 导入 droid CLI 登录态（`~/.factory/auth.v2.*`，AES-256-GCM，key 在 Keychain `Factory CLI`）才会切换/消耗对应来源的 token——导入 droid CLI 的链会让 CLI 下次要求重新登录，因此只作手动恢复入口，不做自动凭据源
 - Bun fetch 不读取 HTTP(S)_PROXY；Grok 等需要代理的端点建议用系统级 TUN/全局代理（M3 可加 CONNECT 隧道）
 - Kimi 月限额仅网页会话可取：menubar 会按 provider 自动读取所选浏览器；遵循 CodexBar 的 `desktopAuthToken()`/`importSession().authToken` 会话导入，不以 JWT `exp` 单独判断网页是否登出。Keychain 结果与 token 只在内存缓存，不遍历、不重复授权
 - Kimi CLI access_token 只有 15 分钟有效期：按 onWatch 规则在过期时自动调用 `auth.kimi.com/api/oauth/token`，并把轮换后的 access/refresh token 安全写回原 `kimi-code.json`；设 `KIMI_USE_REFRESH=0` 可关闭

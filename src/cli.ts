@@ -7,6 +7,8 @@ import { createServer } from './server.ts';
 import { readCredential, writeCredential, deleteCredential } from './auth.ts';
 import { refreshKimiBrowserSession } from './adapters/kimi.ts';
 import { KIMI_BROWSERS, type KimiBrowser } from './browser-cookies.ts';
+import { acceptFactoryBrowserCookies } from './factory-session.ts';
+import { readFactoryCliAuth } from './factory-cli-auth.ts';
 import type { Store } from './db.ts';
 import type { QuotaWindow } from './types.ts';
 import { buildUsageReport, collectUsageReport } from './usage.ts';
@@ -36,6 +38,7 @@ function help(): void {
   planofplan status                         各 plan 调度/凭据/最近抓取状态
   planofplan refresh [slug]                 手动刷新一个/全部 plan
   planofplan browser-auth                  读取 Safari kimi-auth 并刷新 Kimi
+  planofplan factory-auth                  从 droid CLI 登录态导入 Factory 会话（会消耗 CLI 的 refresh token）
   planofplan auth set <slug> --key <v>     存手动 API Key（~/.planofplan/credentials.json, 0600）
   planofplan auth set <slug> --auto         改回自动检测（env / CLI 凭据）
   planofplan auth clear <slug>              清掉手动 key
@@ -210,6 +213,33 @@ async function browserAuth(): Promise<void> {
   console.log(`kimi browser auth: ${refreshed.ok ? 'ok' : refreshed.error} (${result.source})`);
 }
 
+async function factoryCliAuth(): Promise<void> {
+  const auth = await readFactoryCliAuth();
+  if (!auth) {
+    console.error('未找到 droid CLI 登录态（~/.factory/auth.v2.*）；请先运行 droid 登录');
+    process.exitCode = 1;
+    return;
+  }
+  const cfg = loadConfig();
+  const store = openDb(join(ensureHome(), 'planofplan.db'));
+  syncStore(store, cfg);
+  const accepted = acceptFactoryBrowserCookies(
+    [],
+    `${auth.source} (local)`,
+    { accessToken: auth.accessToken, refreshToken: auth.refreshToken },
+    auth.organizationId,
+  );
+  if (!accepted) {
+    console.error('droid CLI 凭据无法导入');
+    process.exitCode = 1;
+    return;
+  }
+  const scheduler = new Scheduler(store, cfg);
+  const refreshed = await scheduler.refreshPlan('factory');
+  console.log(`factory droid CLI 导入: ${refreshed.ok ? 'ok' : refreshed.error} (${auth.source})`);
+  console.log('注意：WorkOS refresh token 一次性轮换，本次兑换会消耗 droid CLI 的 token，CLI 下次需要时会要求重新登录。');
+}
+
 // ── auth ────────────────────────────────────────────────────────────
 function auth(): void {
   const sub = argv[2];
@@ -283,6 +313,9 @@ switch (cmd) {
     break;
   case 'browser-auth':
     await browserAuth();
+    break;
+  case 'factory-auth':
+    await factoryCliAuth();
     break;
   case 'auth':
     auth();
