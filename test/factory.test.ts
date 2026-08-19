@@ -174,6 +174,64 @@ describe('Factory usage', () => {
     }
   });
 
+  test('retries WorkOS refresh with droid CLI form encoding after JSON 400', async () => {
+    const home = await Bun.$`mktemp -d`.text();
+    const previousHome = process.env.PLANOFPPLAN_HOME;
+    process.env.PLANOFPPLAN_HOME = home.trim();
+    const originalFetch = globalThis.fetch;
+    const calls: Array<{ contentType: string; body: string }> = [];
+    globalThis.fetch = (async (input, init) => {
+      const url = String(input);
+      const headers = new Headers(init?.headers);
+      if (url === 'https://api.workos.com/user_management/authenticate') {
+        const body = typeof init?.body === 'string' ? init.body : '';
+        calls.push({ contentType: headers.get('content-type') ?? '', body });
+        if (headers.get('content-type')?.includes('json')) {
+          return new Response('{"error":"invalid_grant"}', { status: 400 });
+        }
+        return Response.json({ access_token: 'form-access-token', refresh_token: 'form-rotated-token' });
+      }
+      if (url === 'https://api.factory.ai/api/billing/limits') {
+        if (headers.get('authorization') !== 'Bearer form-access-token') {
+          return new Response('expired bearer', { status: 401 });
+        }
+        return Response.json({
+          usesTokenRateLimitsBilling: true,
+          limits: { standard: { fiveHour: { usedPercent: 20, secondsRemaining: 3600 } } },
+        });
+      }
+      return new Response('not found', { status: 404 });
+    }) as typeof fetch;
+    try {
+      clearFactoryBrowserSession();
+      acceptFactoryBrowserCookies(
+        [{ name: 'session', value: 'cli-session' }],
+        'droid CLI keychain (local)',
+        { refreshToken: 'cli-refresh-token' },
+      );
+      const windows = await factoryAdapter.fetchUsage({} as never, {
+        kind: 'bearer',
+        value: '',
+        cookie: 'session=cli-session',
+        refreshToken: 'cli-refresh-token',
+        source: 'browser:droid CLI keychain (local)',
+      });
+      expect(windows[0]?.percentage).toBe(20);
+      // JSON 先试，400 后按 droid CLI 的原始 form 表单格式重试同一 client。
+      expect(calls[0]!.contentType).toContain('application/json');
+      const formCall = calls.find((call) => call.contentType.includes('x-www-form-urlencoded'));
+      expect(formCall).toBeDefined();
+      expect(formCall!.body).toContain('grant_type=refresh_token');
+      expect(formCall!.body).toContain('refresh_token=cli-refresh-token');
+    } finally {
+      globalThis.fetch = originalFetch;
+      clearFactoryBrowserSession();
+      if (previousHome == null) delete process.env.PLANOFPPLAN_HOME;
+      else process.env.PLANOFPPLAN_HOME = previousHome;
+      await Bun.$`rm -rf ${home}`.quiet();
+    }
+  });
+
   test('falls back to Factory cookies when the browser WorkOS refresh token is rejected', async () => {
     const home = await Bun.$`mktemp -d`.text();
     const previousHome = process.env.PLANOFPPLAN_HOME;

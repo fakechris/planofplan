@@ -321,28 +321,50 @@ async function exchangeWorkOSRefreshToken(
 ): Promise<WorkOSAuthResponse> {
   let lastError: unknown = null;
   for (const clientId of WORKOS_CLIENT_IDS) {
+    // droid CLI 的刷新调用是 form 表单编码（二进制逆向确认）；浏览器链走
+    // JSON 也可用。同一 client 先试 JSON，400 时按 droid 的原始格式重试。
+    const attempts = [
+      (): string => JSON.stringify({
+        client_id: clientId,
+        grant_type: 'refresh_token',
+        refresh_token: refreshToken,
+        ...(organizationId ? { organization_id: organizationId } : {}),
+        ...(workosCookie ? { useCookie: true } : {}),
+      }),
+      (): string => new URLSearchParams({
+        client_id: clientId,
+        grant_type: 'refresh_token',
+        refresh_token: refreshToken,
+        ...(organizationId ? { organization_id: organizationId } : {}),
+      }).toString(),
+    ];
     try {
-      const response = await fetch(`${WORKOS_AUTH_BASE}${WORKOS_AUTH_PATH}`, {
-        method: 'POST',
-        headers: {
-          accept: 'application/json',
-          'content-type': 'application/json',
-          ...(workosCookie ? { Cookie: workosCookie } : {}),
-        },
-        body: JSON.stringify({
-          client_id: clientId,
-          grant_type: 'refresh_token',
-          refresh_token: refreshToken,
-          ...(organizationId ? { organization_id: organizationId } : {}),
-          ...(workosCookie ? { useCookie: true } : {}),
-        }),
-        signal: AbortSignal.timeout(12_000),
-      });
-      if (!response.ok) {
-        const body = await response.text().catch(() => '');
+      let response: Response | null = null;
+      let lastBody = '';
+      for (let i = 0; i < attempts.length; i++) {
+        const isForm = i > 0;
+        response = await fetch(`${WORKOS_AUTH_BASE}${WORKOS_AUTH_PATH}`, {
+          method: 'POST',
+          headers: {
+            accept: 'application/json',
+            'content-type': isForm
+              ? 'application/x-www-form-urlencoded'
+              : 'application/json',
+            ...(workosCookie ? { Cookie: workosCookie } : {}),
+          },
+          body: attempts[i]!(),
+          signal: AbortSignal.timeout(12_000),
+        });
+        if (response.ok) break;
+        lastBody = await response.text().catch(() => '');
+        if (response.status !== 400) break;
+      }
+      if (!response || !response.ok) {
+        const status = response?.status ?? 0;
+        const body = lastBody ?? '';
         lastError = new AdapterError(
-          response.status === 400 || response.status === 401 ? 'auth' : 'api',
-          `WorkOS 鉴权失败(HTTP ${response.status})${body.includes('invalid_grant') ? '：refresh token 已失效' : ''}`,
+          status === 400 || status === 401 ? 'auth' : 'api',
+          `WorkOS 鉴权失败(HTTP ${status})${body.includes('invalid_grant') ? '：refresh token 已失效' : ''}`,
         );
         continue;
       }
