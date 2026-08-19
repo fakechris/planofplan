@@ -288,15 +288,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func selectedBrowser(for planSlug: String) -> String {
-        if let stored = UserDefaults.standard.string(forKey: "\(selectedBrowserKey).\(planSlug)") {
-            return stored
-        }
+        let stored = UserDefaults.standard.string(forKey: "\(selectedBrowserKey).\(planSlug)")
         if planSlug == "factory",
+           (stored == nil || stored == "safari"),
            let factoryBrowser = preferredFactoryBrowser()
         {
             return factoryBrowser
         }
-        return overview?.plans.first(where: { $0.slug == planSlug })?.browser ?? "safari"
+        return stored ?? overview?.plans.first(where: { $0.slug == planSlug })?.browser ?? "safari"
     }
 
     private func preferredFactoryBrowser() -> String? {
