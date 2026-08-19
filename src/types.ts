@@ -84,6 +84,13 @@ export interface PlanAdapter {
   fetchUsage(ctx: AdapterContext, cred: Credential): Promise<QuotaWindow[]>;
   /** 缺少凭据时的引导文案 */
   credentialHint?: string;
+  /**
+   * 是否支持手动 API key/token（auth set / dashboard 设置弹窗）。
+   * 默认支持（detectCredentials 都先读 credRef），只有确实无法使用静态
+   * 凭据的 adapter 才显式置 false。新 adapter 无需改 UI 即自动获得
+   * key 配置入口——避免再出现「后端支持、前端漏掉入口」的缺口。
+   */
+  manualKey?: boolean;
 }
 
 export type UsageSource = 'local' | 'official';

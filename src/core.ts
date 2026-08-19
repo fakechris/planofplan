@@ -45,6 +45,8 @@ export interface OverviewPlan {
   lastError: string | null;
   browser: string | null;
   browserSupported: boolean;
+  /** 是否提供手动 API key/token 配置入口（adapter 能力，默认支持）。 */
+  manualKey: boolean;
   credentialHint: string | null;
   /** 高峰/低谷注解：仅当 plan 启用 peakPricing 时存在；UI 用来渲染轻量 pill。 */
   tier?: TierState | null;
@@ -142,6 +144,7 @@ function buildPlanOverview(store: Store, plan: PlanConfig, now: number): Overvie
     lastError: state?.last_error ?? null,
     browser: plan.extra.browser ?? null,
     browserSupported: plan.adapter === 'kimi' || plan.adapter === 'factory',
+    manualKey: adapter != null && adapter.manualKey !== false,
     credentialHint: adapter?.credentialHint ?? null,
     tier,
   };

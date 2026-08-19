@@ -156,3 +156,25 @@ describe('buildOverview tier 注解', () => {
     expect(overview.plans[0]!.windows[0]?.tier).toBeUndefined();
   });
 });
+
+describe('buildOverview manualKey 入口', () => {
+  test('所有默认 plan 都暴露手动 key 入口（防「后端支持、前端漏入口」回归）', () => {
+    const store = openMemoryDb();
+    for (const plan of DEFAULT_PLANS) store.syncPlan(plan);
+    const overview = buildOverview(store, DEFAULT_PLANS, Date.now());
+    // 默认支持：adapter 未显式 manualKey:false 时必须为 true，
+    // 否则 dashboard 设置弹窗不会渲染 key 表单。
+    for (const plan of overview.plans) {
+      expect(plan.manualKey).toBeTrue();
+    }
+    expect(overview.plans.length).toBe(DEFAULT_PLANS.length);
+  });
+
+  test('显式 manualKey:false 的 adapter 不给入口', () => {
+    const store = openMemoryDb();
+    const plan = { ...DEFAULT_PLANS[0]!, adapter: 'nokey-adapter' };
+    store.syncPlan(plan);
+    const overview = buildOverview(store, [plan], Date.now());
+    expect(overview.plans[0]!.manualKey).toBeFalse();
+  });
+});

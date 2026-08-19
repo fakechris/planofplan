@@ -307,8 +307,22 @@ function renderCredentialSettings(card, p) {
     `;
   }
   if (p.adapter !== 'glm') {
-    if (!p.credentialHint) return '';
-    return `<div class="credential-hint">${escapeHtml(p.credentialHint)}</div>`;
+    if (!p.manualKey) {
+      return p.credentialHint ? `<div class="credential-hint">${escapeHtml(p.credentialHint)}</div>` : '';
+    }
+    // 通用手动 key 入口：后端 PUT /api/plans/:slug/auth 对所有 adapter 生效，
+    // 文案直接用 adapter 的 credentialHint，新增 provider 不需要改这里。
+    return `
+      <div class="settings-section">
+        <div class="settings-title">${escapeHtml(p.name)} API key / token</div>
+        <p class="settings-copy">${p.credentialHint ? escapeHtml(p.credentialHint) : '粘贴凭据后保存并验证；也可回到自动检测。'}</p>
+        <form class="key-form" data-auth-form>
+          <input type="password" name="apiKey" autocomplete="new-password" placeholder="粘贴 API key / token" aria-label="${escapeHtml(p.name)} API key" />
+          <button type="submit" class="button-primary">保存并验证</button>
+          <button type="button" class="button-quiet" data-auth-auto>使用自动凭据</button>
+        </form>
+      </div>
+    `;
   }
   return `
     <div class="settings-section">
@@ -350,7 +364,7 @@ function renderPlan(p, now) {
   const card = document.createElement('article');
   card.className = `card status-${p.status}`;
   const browser = p.browser ? BROWSER_NAMES[p.browser] || p.browser : null;
-  const hasSettings = ['glm', 'minimax', 'factory'].includes(p.adapter) || p.browserSupported;
+  const hasSettings = Boolean(p.manualKey) || Boolean(p.browserSupported);
   card.innerHTML = `
     <div class="card-head">
       <div class="provider-title">
