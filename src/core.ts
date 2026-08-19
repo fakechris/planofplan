@@ -61,19 +61,23 @@ export interface RefreshResult {
 }
 
 export function buildOverview(store: Store, configPlans: PlanConfig[], now: number): Overview {
-  // plans 以 db 为准（启动时已 sync；运行时启停/授权写这里）
+  // plans 以 db 为准（启动时已 sync；运行时启停/授权写这里）。
+  // configPlans 同时是过滤器：/api/plans/:slug 只传单个 plan，不应返回全量列表。
   const dbPlans = store.listPlans();
+  const wanted = new Set(configPlans.map((p) => p.slug));
   const bySlug = new Map(configPlans.map((p) => [p.slug, p]));
-  const plans = dbPlans.map((plan) => {
-    const cfg = bySlug.get(plan.slug) ?? plan;
-    const effective: PlanConfig = {
-      ...cfg,
-      enabled: plan.enabled,
-      credRef: plan.credRef,
-      extra: plan.extra,
-    };
-    return buildPlanOverview(store, effective);
-  });
+  const plans = dbPlans
+    .filter((plan) => wanted.size === 0 || wanted.has(plan.slug))
+    .map((plan) => {
+      const cfg = bySlug.get(plan.slug) ?? plan;
+      const effective: PlanConfig = {
+        ...cfg,
+        enabled: plan.enabled,
+        credRef: plan.credRef,
+        extra: plan.extra,
+      };
+      return buildPlanOverview(store, effective);
+    });
   return { generatedAt: now, plans };
 }
 

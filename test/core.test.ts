@@ -62,3 +62,19 @@ describe('buildOverview auth state', () => {
     expect(overview.plans[0]!.lastFetchedAt).toBe(100);
   });
 });
+
+describe('buildOverview plan filtering', () => {
+  test('传入单个 plan 时只返回该 plan，不再泄漏全量列表', () => {
+    const store = openMemoryDb();
+    const kimi = DEFAULT_PLANS.find((item) => item.slug === 'kimi')!;
+    const grok = DEFAULT_PLANS.find((item) => item.slug === 'grok')!;
+    store.syncPlan(kimi);
+    store.syncPlan(grok);
+
+    const overview = buildOverview(store, [grok], Date.now());
+    expect(overview.plans.map((p) => p.slug)).toEqual(['grok']);
+
+    const all = buildOverview(store, DEFAULT_PLANS, Date.now());
+    expect(all.plans.length).toBeGreaterThanOrEqual(2);
+  });
+});

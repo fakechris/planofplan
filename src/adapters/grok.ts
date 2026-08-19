@@ -91,7 +91,7 @@ export function grokExpiryMs(entry: GrokAuthEntry): number | null {
   return Number.isFinite(t) ? t : null;
 }
 
-async function fetchGrokCliBilling(): Promise<QuotaWindow[] | null> {
+async function fetchGrokCliBillingOnce(): Promise<QuotaWindow[] | null> {
   const executable = grokCliPath();
   if (!executable) return null;
   const child = spawn(executable, ['agent', 'stdio'], {
@@ -156,8 +156,9 @@ async function fetchGrokCliBilling(): Promise<QuotaWindow[] | null> {
   };
 
   try {
-    await readResponse(send('initialize'), 8_000);
-    const billing = await readResponse(send('x.ai/billing'), 12_000);
+    // auth.json 过期时 CLI 启动要先走一次 token 刷新往返，冷启动可能明显变慢。
+    await readResponse(send('initialize'), 20_000);
+    const billing = await readResponse(send('x.ai/billing'), 20_000);
     const result = billing.result;
     return result && typeof result === 'object' ? normalizeGrok(result) : null;
   } catch {
@@ -167,6 +168,11 @@ async function fetchGrokCliBilling(): Promise<QuotaWindow[] | null> {
     child.stdin.end();
     child.kill();
   }
+}
+
+/** CLI 兜底偶发失败（冷启动刷新超时、stdio 竞态），重试一次全新 spawn。 */
+async function fetchGrokCliBilling(): Promise<QuotaWindow[] | null> {
+  return (await fetchGrokCliBillingOnce()) ?? (await fetchGrokCliBillingOnce());
 }
 
 interface GrokBillingConfig {
