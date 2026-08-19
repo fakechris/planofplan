@@ -14,6 +14,27 @@ function app() {
 }
 
 describe('Kimi browser policy', () => {
+  test('refresh all reports failed provider details despite HTTP 200', async () => {
+    const plans = [
+      { ...DEFAULT_PLANS.find((plan) => plan.slug === 'factory')!, enabled: true },
+      { ...DEFAULT_PLANS.find((plan) => plan.slug === 'kimi')!, enabled: true },
+    ];
+    const store = openMemoryDb();
+    for (const plan of plans) store.syncPlan(plan);
+    const server = createServer(store, {
+      refreshPlan: async (slug: string) =>
+        slug === 'factory'
+          ? { ok: false, slug, error: 'Factory 鉴权失败(HTTP 401)', auth: true }
+          : { ok: true, slug, windows: [] },
+    } as never, { port: 9291, plans });
+
+    const response = await server.request('http://localhost/api/refresh', { method: 'POST' });
+    const body = await response.json() as { ok?: boolean; error?: string };
+    expect(response.status).toBe(200);
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain('factory: Factory 鉴权失败(HTTP 401)');
+  });
+
   test('Kimi browser selection rejects non-Safari', async () => {
     const response = await app().request('http://localhost/api/plans/kimi/browser', {
       method: 'PUT',

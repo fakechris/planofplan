@@ -52,7 +52,15 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     for (const plan of plans) {
       results.push(await scheduler.refreshPlan(plan.slug));
     }
-    return c.json({ ok: results.every((result) => result.ok), results });
+    const failed = results.filter((result) => !result.ok);
+    const error = failed.length > 0
+      ? failed.map((result) => `${result.slug}: ${result.error ?? '刷新失败'}`).join('；')
+      : undefined;
+    return c.json({
+      ok: failed.length === 0,
+      results,
+      ...(error ? { error } : {}),
+    });
   });
 
   // 仅由用户主动点击触发。浏览器 Cookie/Keychain token 不写入磁盘。
