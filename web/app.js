@@ -212,7 +212,7 @@ function renderPlan(p, now) {
   const card = document.createElement('article');
   card.className = `card status-${p.status}`;
   const browser = p.browser ? BROWSER_NAMES[p.browser] || p.browser : null;
-  const hasSettings = p.adapter === 'glm' || p.browserSupported;
+  const hasSettings = ['glm', 'minimax', 'factory'].includes(p.adapter) || p.browserSupported;
   card.innerHTML = `
     <div class="card-head">
       <div class="provider-title">
