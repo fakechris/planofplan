@@ -23,16 +23,62 @@ bun run demo
 ```
 
 ## CLI
-
 ```
 planofplan serve [--demo] [--port N]    启动守护进程 + Web dashboard
 planofplan usage [--json] [--provider sl] 全 plan 用量输出（CodexBar usage 风格）
 planofplan status                        各 plan 调度/凭据/最近抓取状态
 planofplan refresh [slug]                手动刷新一个/全部 plan
+planofplan browser-auth --browser name   读取指定浏览器 kimi-auth（仅该浏览器，按需触发 Keychain）
 planofplan auth set <slug> --key <v>     存手动 key（credentials.json, 0600）
 planofplan auth set <slug> --auto        改回自动检测（env / CLI 凭据）
 planofplan auth clear <slug>             清掉手动 key
 ```
+
+## macOS menubar app
+
+构建并安装到唯一运行位置 `/Applications/planofplan.app`：
+
+```bash
+bun run menubar:build
+open /Applications/planofplan.app
+```
+
+`menubar:build` 只允许在 Git 工作区干净且所有源代码已经 commit 后运行。构建会把当前
+commit 的完整 SHA、短 SHA、构建时间和版本写入 app，并原子替换
+`/Applications/planofplan.app`。不要从 `dist` 启动旧副本。
+
+menubar app 会启动本地 Bun daemon，并提供查看用量、刷新全部 plan、打开 Dashboard，以及**选择一个浏览器**读取 Kimi 网页会话。
+
+浏览器读取不会自动遍历所有浏览器。每个浏览器的 Keychain 结果和 Kimi token 只在当前进程内存缓存，后台轮询不会再次弹出密码：
+
+```bash
+bun src/cli.ts browser-auth --browser firefox
+bun src/cli.ts browser-auth --browser chrome
+bun src/cli.ts browser-auth --browser comet
+bun src/cli.ts browser-auth --browser dia
+bun src/cli.ts browser-auth --browser safari
+```
+
+`menubar:build` 使用证书身份 `Lumen Local Codesign` 对 app 签名，并拒绝
+ad-hoc 签名。这样 Full Disk Access 的 TCC 授权绑定稳定的 Bundle ID /
+designated requirement，而不是每次构建都会变化的 cdhash。
+
+首次使用时，确认本机存在这个证书身份：
+
+```bash
+security find-identity -v -p codesigning | grep 'Lumen Local Codesign'
+```
+
+如果不存在，在“钥匙串访问 → 证书助理 → 创建证书”中创建一个
+“Code Signing”自签名证书，名称使用 `Lumen Local Codesign`，并设为始终信任。
+然后只需把首次稳定签名生成的 `/Applications/planofplan.app` 加入 Full Disk Access；
+以后用同一身份重建不会重复要求授权。
+
+Chrome、Comet、Dia 等 Chromium 浏览器首次读取可能弹出对应的 macOS Safe Storage
+Keychain 授权；Safari Cookie 由原生 app 读取。首次检测到 Safari cookie 文件被系统保护时，
+app 会自动打开“完全磁盘访问权限”设置页并持续检测授权结果，授权后自动重试 Kimi，
+无需用户在 planofplan 内手动选择浏览器。macOS 仍要求用户在系统设置中确认开关。
+Cookie token 不写入数据库或凭据文件。
 
 `planofplan usage --json` 输出示例：
 
@@ -95,19 +141,19 @@ adapter 接口见 `src/types.ts`。MiniMax 的端点/解析规格出处：CodexB
 | plan | adapter | 真机验证 | 备注 |
 |---|---|---|---|
 | MiniMax legacy | minimax | ✅ | 5h 多车道（general/video）+ weekly 车道 |
-| GLM legacy / GLM current | glm | ⏳ | 三窗口(5h/week/MCP) 已对照 CodexBar zai.js + opencode-quota glm-coding-plan.ts（unit 3/6 + TIME_LIMIT）实现+单测；zcode 凭据加密(enc:v1)不可复用，需 bigmodel.cn 控制台 API key |
+| GLM Coding Plan | glm | ⏳ | 自动尝试 z.ai / BigModel quota host，支持 5h/week/MCP；只需在 Dashboard 的 GLM 设置弹窗填写 API key，不需要选择区域 |
 | Claude Code | claude | ✅ | 读 Keychain OAuth；5H 7% / Week 18%（实测） |
 | OpenAI Codex | codex | ✅ | 读 `~/.codex/auth.json`；5H 90%（实测） |
-| Kimi Code | kimi | ✅ | 读 `~/.kimi-code/credentials/kimi-code.json`；Week 97% + 5H 0%（实测 8/18，`KIMI_USE_REFRESH=1` 自动续期 CLI token）；月限额需 kimi.com 网页登录态（当前会话已过期，未显示） |
+| Kimi Code | kimi | ✅ | 读 `~/.kimi-code/credentials/kimi-code.json`；按 onWatch 规则自动刷新并写回轮换 token；月限额需 kimi.com 网页登录态 |
 | Grok | grok | ✅ | 读 `~/.grok/auth.json`；Credits 95%（实测，8/18 重登后；SuperGrok） |
 | Cursor legacy | cursor | ✅ | 读 `state.vscdb`；legacy 0/500（实测，本月已重置） |
 
 ## 已知限制（M2）
 
-- GLM（legacy/current）待 API key：去 bigmodel.cn 控制台生成，`planofplan auth set glm_legacy --key <key>` 或设 `BIGMODEL_API_KEY`（zcode CLI 的凭据为加密存储，无法复用）
+- GLM 待 API key：在 Dashboard 的 GLM 设置弹窗填写，或运行 `planofplan auth set glm --key <key>`；也可设置 `Z_AI_API_KEY` / `ZAI_API_KEY` / `BIGMODEL_API_KEY`
 - Bun fetch 不读取 HTTP(S)_PROXY；Grok 等需要代理的端点建议用系统级 TUN/全局代理（M3 可加 CONNECT 隧道）
-- Kimi 月限额仅网页会话可取：自动读本机 kimi-auth cookie（kimi-desktop / Chromium 系明文 / Firefox）调 GetSubscriptionStats → amountUsedRatio；加密 cookie（Chrome 默认）需 Keychain 解密（M3）；当前本机会话已过期，需重新登录 kimi.com
-- Kimi CLI access_token 只有 15 分钟有效期：默认只读不刷新（CodexBar 同策略）；持续轮询请设 `KIMI_USE_REFRESH=1`（用 refresh_token 静默续期，不写回凭据文件）
+- Kimi 月限额仅网页会话可取：menubar 会按 provider 自动读取所选浏览器；遵循 CodexBar 的 `desktopAuthToken()`/`importSession().authToken` 会话导入，不以 JWT `exp` 单独判断网页是否登出。Keychain 结果与 token 只在内存缓存，不遍历、不重复授权
+- Kimi CLI access_token 只有 15 分钟有效期：按 onWatch 规则在过期时自动调用 `auth.kimi.com/api/oauth/token`，并把轮换后的 access/refresh token 安全写回原 `kimi-code.json`；设 `KIMI_USE_REFRESH=0` 可关闭
 - Kimi 周额度接口按 100 计（97/100 = 剩余 3%）；5h 窗口接口无 used 字段，用 remaining 反推
 - 无 session 鉴权（仅监听 localhost；如部署到其他机器需自行加反向代理/密码）
 - UI 的启停/授权开关写 db，重启后以 config.json 为准（文档见设计 §8）

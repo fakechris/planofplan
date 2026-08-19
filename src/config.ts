@@ -19,22 +19,13 @@ const DEFAULT_PLANS: PlanConfig[] = [
     extra: { region: 'cn' },
   },
   {
-    slug: 'glm_legacy',
-    name: 'GLM legacy',
+    slug: 'glm',
+    name: 'GLM Coding Plan',
     adapter: 'glm',
     enabled: true,
     pollIntervalSec: 60,
     credRef: null,
-    extra: { region: 'cn' },
-  },
-  {
-    slug: 'glm_current',
-    name: 'GLM current',
-    adapter: 'glm',
-    enabled: true,
-    pollIntervalSec: 60,
-    credRef: null,
-    extra: { region: 'cn' },
+    extra: {},
   },
   {
     slug: 'codex',
@@ -52,7 +43,7 @@ const DEFAULT_PLANS: PlanConfig[] = [
     enabled: true,
     pollIntervalSec: 60,
     credRef: null,
-    extra: {},
+    extra: { browser: 'safari' },
   },
   {
     slug: 'grok',
@@ -111,12 +102,47 @@ export function loadConfig(): AppConfig {
       user = {};
     }
   }
-  const plans: PlanConfig[] =
-    Array.isArray(user.plans) && user.plans.length > 0 ? user.plans : DEFAULT_PLANS;
+  const plans: PlanConfig[] = normalizePlanSet(
+    Array.isArray(user.plans) && user.plans.length > 0 ? user.plans : DEFAULT_PLANS,
+  );
   return {
     port: envPort() ?? user.port ?? 9288,
     plans,
   };
+}
+
+/** 将历史上的 GLM legacy/current 双 plan 收敛为一个 provider。 */
+export function normalizePlanSet(input: PlanConfig[]): PlanConfig[] {
+  const glm = input.filter((plan) => plan.adapter === 'glm');
+  if (glm.length === 0) {
+    return input;
+  }
+  if (glm.length === 1 && glm[0]!.slug === 'glm') {
+    return input.map((plan) => ({
+      ...plan,
+      extra: withoutGlmRegion(plan.extra),
+    }));
+  }
+
+  const selected = glm.find((plan) => plan.slug === 'glm_current')
+    ?? glm.find((plan) => plan.slug === 'glm_legacy')
+    ?? glm[0]!;
+  const { region: _region, ...extra } = selected.extra ?? {};
+  const canonical: PlanConfig = {
+    ...selected,
+    slug: 'glm',
+    name: 'GLM Coding Plan',
+    extra,
+  };
+  const firstGlmIndex = input.findIndex((plan) => plan.adapter === 'glm');
+  return input
+    .filter((plan) => plan.adapter !== 'glm')
+    .toSpliced(firstGlmIndex, 0, canonical);
+}
+
+function withoutGlmRegion(extra: Record<string, string>): Record<string, string> {
+  const { region: _region, ...rest } = extra ?? {};
+  return rest;
 }
 
 function envPort(): number | null {

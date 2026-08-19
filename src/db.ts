@@ -94,7 +94,11 @@ export class Store {
         );
       return;
     }
-    // 运行时字段（enabled/cred_ref）不在启动同步时覆盖，以 db 为准
+    // 运行时字段（enabled/cred_ref/extra）不在启动同步时覆盖，以 db 为准。
+    // extra 里可能包含 UI 保存的 provider 级 browser 选择。
+    const extra = cfg.adapter === 'glm'
+      ? stripGlmRegion({ ...cfg.extra, ...existing.extra })
+      : { ...cfg.extra, ...existing.extra };
     this.db
       .query(
         `UPDATE plans SET name = ?, adapter = ?, poll_interval_sec = ?, extra = ?, updated_at = ? WHERE slug = ?`,
@@ -103,10 +107,65 @@ export class Store {
         cfg.name,
         cfg.adapter,
         cfg.pollIntervalSec,
-        JSON.stringify(cfg.extra ?? {}),
+        JSON.stringify(extra),
         now,
         cfg.slug,
       );
+  }
+
+  /** 将旧版 glm_legacy/glm_current 的本地快照与状态迁移到 canonical glm。 */
+  migrateLegacyGlmPlans(): { credentialRefs: string[]; sourceCredentialRef: string | null } {
+    const canonical = this.getPlan('glm');
+    if (canonical) {
+      const credentialRefs: string[] = [];
+      for (const oldSlug of ['glm_current', 'glm_legacy']) {
+        const old = this.getPlan(oldSlug);
+        if (!old) continue;
+        if (old.credRef && old.credRef !== canonical.credRef) credentialRefs.push(old.credRef);
+        this.db.query(`UPDATE snapshots SET plan_id = 'glm' WHERE plan_id = ?`).run(oldSlug);
+        this.db.query(`DELETE FROM plan_state WHERE plan_id = ?`).run(oldSlug);
+        this.db.query(`DELETE FROM plans WHERE slug = ?`).run(oldSlug);
+      }
+      return { credentialRefs, sourceCredentialRef: null };
+    }
+    const current = this.getPlan('glm_current');
+    const legacy = this.getPlan('glm_legacy');
+    const source = current ?? legacy;
+    if (!source) return { credentialRefs: [], sourceCredentialRef: null };
+
+    this.db
+      .query(
+        `INSERT INTO plans (slug, name, adapter, enabled, poll_interval_sec, cred_ref, extra, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'glm',
+        'GLM Coding Plan',
+        'glm',
+        source.enabled ? 1 : 0,
+        source.pollIntervalSec,
+        source.credRef ?? null,
+        JSON.stringify(stripGlmRegion(source.extra)),
+        Date.now(),
+        Date.now(),
+      );
+
+    for (const oldSlug of ['glm_current', 'glm_legacy']) {
+      if (!this.getPlan(oldSlug)) continue;
+      this.db.query(`UPDATE snapshots SET plan_id = 'glm' WHERE plan_id = ?`).run(oldSlug);
+      if (oldSlug === source.slug) {
+        this.db.query(`UPDATE plan_state SET plan_id = 'glm' WHERE plan_id = ?`).run(oldSlug);
+      } else {
+        this.db.query(`DELETE FROM plan_state WHERE plan_id = ?`).run(oldSlug);
+      }
+      this.db.query(`DELETE FROM plans WHERE slug = ?`).run(oldSlug);
+    }
+    return {
+      credentialRefs: [current?.credRef, legacy?.credRef].filter(
+        (ref): ref is string => !!ref,
+      ),
+      sourceCredentialRef: source.credRef ?? null,
+    };
   }
 
   getPlan(slug: string): PlanConfig | null {
@@ -158,6 +217,19 @@ export class Store {
     values.push(Date.now());
     values.push(slug);
     this.db.query(`UPDATE plans SET ${fields.join(', ')} WHERE slug = ?`).run(...values);
+  }
+
+  updatePlanExtra(slug: string, patch: Record<string, string | null>): void {
+    const plan = this.getPlan(slug);
+    if (!plan) return;
+    const extra = { ...plan.extra };
+    for (const [key, value] of Object.entries(patch)) {
+      if (value == null || value === '') delete extra[key];
+      else extra[key] = value;
+    }
+    this.db
+      .query(`UPDATE plans SET extra = ?, updated_at = ? WHERE slug = ?`)
+      .run(JSON.stringify(extra), Date.now(), slug);
   }
 
   /** 写入一批新窗口快照（每窗口一行） */
@@ -273,6 +345,11 @@ export class Store {
       .run(cutoff);
     return Number(r.changes);
   }
+}
+
+function stripGlmRegion(extra: Record<string, string>): Record<string, string> {
+  const { region: _region, ...rest } = extra ?? {};
+  return rest;
 }
 
 function planFromRow(row: {

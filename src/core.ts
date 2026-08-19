@@ -42,6 +42,9 @@ export interface OverviewPlan {
   lastFetchedAt: number | null;
   lastAttemptAt: number | null;
   lastError: string | null;
+  browser: string | null;
+  browserSupported: boolean;
+  credentialHint: string | null;
 }
 
 export interface Overview {
@@ -63,7 +66,13 @@ export function buildOverview(store: Store, configPlans: PlanConfig[], now: numb
   const bySlug = new Map(configPlans.map((p) => [p.slug, p]));
   const plans = dbPlans.map((plan) => {
     const cfg = bySlug.get(plan.slug) ?? plan;
-    return buildPlanOverview(store, cfg);
+    const effective: PlanConfig = {
+      ...cfg,
+      enabled: plan.enabled,
+      credRef: plan.credRef,
+      extra: plan.extra,
+    };
+    return buildPlanOverview(store, effective);
   });
   return { generatedAt: now, plans };
 }
@@ -80,6 +89,11 @@ function buildPlanOverview(store: Store, plan: PlanConfig): OverviewPlan {
     status = 'unavailable';
   } else if (state?.auth_status === AUTH_STATUS.INVALID) {
     status = 'auth_error';
+  } else if (
+    state?.auth_status === AUTH_STATUS.MISSING
+    && (state.last_attempt_at ?? 0) > (state.last_success_at ?? 0)
+  ) {
+    status = state.last_success_at == null ? 'not_configured' : 'stale';
   } else if (windows.length === 0) {
     // 从未成功抓取
     if (!state || state.last_error === null) {
@@ -105,6 +119,9 @@ function buildPlanOverview(store: Store, plan: PlanConfig): OverviewPlan {
     lastFetchedAt: state?.last_success_at ?? null,
     lastAttemptAt: state?.last_attempt_at ?? null,
     lastError: state?.last_error ?? null,
+    browser: plan.extra.browser ?? null,
+    browserSupported: plan.adapter === 'kimi',
+    credentialHint: adapter?.credentialHint ?? null,
   };
 }
 

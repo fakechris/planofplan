@@ -63,6 +63,38 @@ describe('Store', () => {
     expect(state.last_error).toBe('x');
   });
 
+  test('provider 级 extra 配置持久化且不会被启动同步覆盖', () => {
+    const store = openMemoryDb();
+    store.syncPlan(plan);
+    store.updatePlanExtra('minimax', { browser: 'safari' });
+    expect(store.getPlan('minimax')?.extra.browser).toBe('safari');
+
+    store.syncPlan({ ...plan, extra: { region: 'cn' } });
+    expect(store.getPlan('minimax')?.extra.browser).toBe('safari');
+
+    store.updatePlanExtra('minimax', { browser: null });
+    expect(store.getPlan('minimax')?.extra.browser).toBeUndefined();
+  });
+
+  test('同步新 GLM plan 时迁移并清理 legacy/current plan', () => {
+    const store = openMemoryDb();
+    const legacy = { ...plan, slug: 'glm_legacy', name: 'GLM legacy', adapter: 'glm', credRef: 'glm_legacy' };
+    const current = { ...plan, slug: 'glm_current', name: 'GLM current', adapter: 'glm', credRef: 'glm_current' };
+    store.syncPlan(legacy);
+    store.syncPlan(current);
+    store.insertWindows('glm_current', [win(42, Date.now())], Date.now());
+
+    const migrated = store.migrateLegacyGlmPlans();
+    store.syncPlan({ ...plan, slug: 'glm', name: 'GLM', adapter: 'glm', credRef: null, extra: {} });
+
+    expect(store.getPlan('glm')?.credRef).toBe('glm_current');
+    expect(migrated.credentialRefs).toEqual(['glm_current', 'glm_legacy']);
+    expect(migrated.sourceCredentialRef).toBe('glm_current');
+    expect(store.getPlan('glm_legacy')).toBeNull();
+    expect(store.getPlan('glm_current')).toBeNull();
+    expect(store.latestByPlan('glm')).toHaveLength(1);
+  });
+
   test('prune 删除早于保留期的快照', () => {
     const store = openMemoryDb();
     store.syncPlan(plan);

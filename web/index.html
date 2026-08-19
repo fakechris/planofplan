@@ -8,16 +8,34 @@
 </head>
 <body>
   <header>
-    <div class="brand">planofplan</div>
+    <div class="brand-lockup">
+      <span class="brand-mark">P</span>
+      <div>
+        <div class="brand">planofplan</div>
+        <div class="brand-caption">quota command center</div>
+      </div>
+    </div>
     <div class="header-meta">
+      <span id="buildIdentity" class="build-identity" title="当前运行构建"></span>
+      <span id="connectionState" class="connection"><i></i> live</span>
       <span id="generatedAt" class="muted"></span>
-      <button id="refreshBtn" type="button">刷新</button>
+      <button id="refreshBtn" class="button-primary" type="button">刷新全部</button>
     </div>
   </header>
+
+  <section class="hero">
+    <div>
+      <p class="eyebrow">SUBSCRIPTION TELEMETRY</p>
+      <h1>额度运行态</h1>
+      <p class="hero-copy">在一个视图里监控所有 coding plans 的消耗、凭据和恢复窗口。</p>
+    </div>
+    <div id="heroClock" class="hero-clock"></div>
+  </section>
 
   <section id="summary" class="summary"></section>
 
   <main id="grid" class="grid"></main>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
   <template id="winTpl">
     <div class="win">
@@ -26,7 +44,11 @@
         <span class="win-meta"></span>
       </div>
       <div class="track"><div class="fill"></div></div>
-      <div class="win-foot"><span class="win-reset"></span></div>
+      <div class="win-foot">
+        <span class="win-reset"></span>
+        <span class="win-countdown" data-reset-at></span>
+        <span class="win-note"></span>
+      </div>
     </div>
   </template>
 

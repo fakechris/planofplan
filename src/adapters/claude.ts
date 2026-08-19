@@ -18,6 +18,9 @@ import { AdapterError } from '../types.ts';
 
 const execFileAsync = promisify(execFile);
 const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
+const OAUTH_TOKEN_URL = 'https://platform.claude.com/v1/oauth/token';
+const CLAUDE_OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
+const KEYCHAIN_SERVICE = 'Claude Code-credentials';
 
 interface OauthWindow {
   utilization?: number | null;
@@ -95,14 +98,50 @@ export function normalizeClaude(raw: unknown): QuotaWindow[] {
   return windows;
 }
 
+interface ClaudeOAuthRecord {
+  accessToken: string;
+  refreshToken: string | null;
+  expiresAt: number | null;
+  scopes?: string[];
+}
+
+function parseClaudeOAuthRecord(value: string): ClaudeOAuthRecord | null {
+  for (const candidate of [value, atobSafe(value)]) {
+    if (!candidate) continue;
+    try {
+      const parsed = JSON.parse(candidate) as {
+        claudeAiOauth?: {
+          accessToken?: unknown;
+          refreshToken?: unknown;
+          expiresAt?: unknown;
+          scopes?: unknown;
+        };
+      };
+      const oauth = parsed.claudeAiOauth;
+      if (!oauth || typeof oauth.accessToken !== 'string' || !oauth.accessToken.trim()) continue;
+      return {
+        accessToken: oauth.accessToken.trim(),
+        refreshToken: typeof oauth.refreshToken === 'string' && oauth.refreshToken ? oauth.refreshToken : null,
+        expiresAt: typeof oauth.expiresAt === 'number' && Number.isFinite(oauth.expiresAt) ? oauth.expiresAt : null,
+        scopes: Array.isArray(oauth.scopes)
+          ? oauth.scopes.filter((scope): scope is string => typeof scope === 'string')
+          : undefined,
+      };
+    } catch {
+      /* try the next supported Keychain encoding */
+    }
+  }
+  return null;
+}
+
 /** macOS Keychain 读取（进程内，超时 8s；触发系统授权时抛错由上层降级） */
-async function readKeychainToken(): Promise<string | null> {
+async function readKeychainCredential(): Promise<Credential | null> {
   if (process.platform !== 'darwin') return null;
   let stdout: string;
   try {
     const r = await execFileAsync(
       'security',
-      ['find-generic-password', '-s', 'Claude Code-credentials', '-w'],
+      ['find-generic-password', '-s', KEYCHAIN_SERVICE, '-w'],
       { timeout: 8_000, maxBuffer: 512 * 1024 },
     );
     stdout = r.stdout;
@@ -111,17 +150,39 @@ async function readKeychainToken(): Promise<string | null> {
   }
   const blob = stdout.trim();
   if (!blob) return null;
-  for (const candidate of [blob, atobSafe(blob)]) {
-    if (!candidate) continue;
-    try {
-      const d = JSON.parse(candidate) as { claudeAiOauth?: { accessToken?: string } };
-      const tok = d.claudeAiOauth?.accessToken;
-      if (tok && tok.trim()) return tok.trim();
-    } catch {
-      /* try next */
-    }
-  }
-  return null;
+  const record = parseClaudeOAuthRecord(blob);
+  if (!record) return null;
+  return {
+    kind: 'bearer',
+    value: record.accessToken,
+    source: 'auto',
+    refreshToken: record.refreshToken,
+    expiresAt: record.expiresAt,
+    persist: async (next) => {
+      const payload = JSON.stringify({
+        claudeAiOauth: {
+          accessToken: next.accessToken,
+          refreshToken: next.refreshToken,
+          expiresAt: next.expiresAt ?? Date.now() + 8 * 60 * 60 * 1000,
+          ...(record.scopes ? { scopes: record.scopes } : {}),
+        },
+      });
+      await execFileAsync(
+        'security',
+        [
+          'add-generic-password',
+          '-U',
+          '-a',
+          process.env.USER ?? '',
+          '-s',
+          KEYCHAIN_SERVICE,
+          '-w',
+          payload,
+        ],
+        { timeout: 8_000, maxBuffer: 64 * 1024 },
+      );
+    },
+  };
 }
 
 function atobSafe(v: string): string {
@@ -148,42 +209,110 @@ export const claudeAdapter: PlanAdapter = {
       process.env.ANTHROPIC_AUTH_TOKEN ??
       process.env.CLAUDE_CODE_OAUTH_TOKEN;
     if (envToken && envToken.trim()) {
-      return { kind: 'bearer', value: envToken.trim(), source: 'env' };
+      return {
+        kind: 'bearer',
+        value: envToken.trim(),
+        source: 'env',
+        refreshToken: process.env.CLAUDE_CODE_OAUTH_REFRESH_TOKEN?.trim() || null,
+      };
     }
-    const keychain = await readKeychainToken();
-    if (keychain) return { kind: 'bearer', value: keychain, source: 'auto' };
-    return null;
+    return readKeychainCredential();
   },
 
   async fetchUsage(_ctx: AdapterContext, cred: Credential): Promise<QuotaWindow[]> {
-    let res: Response;
-    try {
-      res = await fetch(USAGE_URL, {
-        method: 'GET',
-        headers: {
-          Authorization: `Bearer ${cred.value}`,
-          'anthropic-beta': 'oauth-2025-04-20',
-          accept: 'application/json',
-        },
-        signal: AbortSignal.timeout(15_000),
-      });
-    } catch (e) {
-      if (e instanceof Error && e.name === 'TimeoutError') {
-        throw new AdapterError('network', `Claude 请求超时：${USAGE_URL}`);
+    let activeToken = cred.value;
+    const refresh = async (): Promise<boolean> => {
+      if (!cred.refreshToken) return false;
+      let res: Response;
+      try {
+        const endpoint = process.env.CLAUDE_OAUTH_TOKEN_URL?.trim() || OAUTH_TOKEN_URL;
+        res = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            accept: 'application/json',
+          },
+          body: new URLSearchParams({
+            grant_type: 'refresh_token',
+            refresh_token: cred.refreshToken,
+            client_id: process.env.CLAUDE_OAUTH_CLIENT_ID?.trim() || CLAUDE_OAUTH_CLIENT_ID,
+          }).toString(),
+          signal: AbortSignal.timeout(60_000),
+        });
+      } catch {
+        return false;
       }
-      throw new AdapterError('network', `Claude 网络错误：${String(e instanceof Error ? e.message : e)}`);
+      if (!res.ok) return false;
+      try {
+        const json = (await res.json()) as {
+          access_token?: unknown;
+          refresh_token?: unknown;
+          expires_in?: unknown;
+        };
+        if (typeof json.access_token !== 'string' || !json.access_token) return false;
+        activeToken = json.access_token;
+        const rotatedRefresh =
+          typeof json.refresh_token === 'string' && json.refresh_token ? json.refresh_token : cred.refreshToken;
+        const expiresIn =
+          typeof json.expires_in === 'number'
+            ? Number.isFinite(json.expires_in)
+              ? json.expires_in
+              : null
+            : typeof json.expires_in === 'string'
+              ? Number.isFinite(Number(json.expires_in))
+                ? Number(json.expires_in)
+                : null
+              : null;
+        const expiresAt = expiresIn == null ? null : Date.now() + expiresIn * 1000;
+        cred.value = activeToken;
+        cred.refreshToken = rotatedRefresh;
+        cred.expiresAt = expiresAt;
+        try {
+          await cred.persist?.({ accessToken: activeToken, refreshToken: rotatedRefresh, expiresAt });
+        } catch {
+          // A temporary Keychain lock must not discard a valid access token for this poll.
+        }
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    if (cred.expiresAt != null && cred.expiresAt <= Date.now() + 60_000) {
+      await refresh();
     }
 
+    const requestUsage = async (): Promise<Response> => {
+      try {
+        return await fetch(USAGE_URL, {
+          method: 'GET',
+          headers: {
+            Authorization: `Bearer ${activeToken}`,
+            'anthropic-beta': 'oauth-2025-04-20',
+            accept: 'application/json',
+          },
+          signal: AbortSignal.timeout(15_000),
+        });
+      } catch (e) {
+        if (e instanceof Error && e.name === 'TimeoutError') {
+          throw new AdapterError('network', `Claude 请求超时：${USAGE_URL}`);
+        }
+        throw new AdapterError('network', `Claude 网络错误：${String(e instanceof Error ? e.message : e)}`);
+      }
+    };
+
+    let res = await requestUsage();
+    if ((res.status === 401 || res.status === 403 || res.status === 429) && (await refresh())) {
+      res = await requestUsage();
+    }
     if (res.status === 401 || res.status === 403) {
-      throw new AdapterError('auth', `Claude 鉴权失败(HTTP ${res.status})：请运行 \`claude\` 重新登录`);
+      throw new AdapterError(
+        'auth',
+        `Claude OAuth token 被拒绝(HTTP ${res.status})：请运行 \`claude\` 触发凭据刷新后重试`,
+      );
     }
-    if (res.status === 429) {
-      // 限流：提示降频或手动刷新（token 刷新刷新权在 Claude Code，参照 onWatch 思路）
-      throw new AdapterError('api', 'Claude usage 端点限流(HTTP 429)，稍后重试');
-    }
-    if (!res.ok) {
-      throw new AdapterError('api', `Claude API 错误(HTTP ${res.status})`);
-    }
+    if (res.status === 429) throw new AdapterError('api', 'Claude usage 端点限流(HTTP 429)，稍后重试');
+    if (!res.ok) throw new AdapterError('api', `Claude API 错误(HTTP ${res.status})`);
 
     let json: unknown;
     try {

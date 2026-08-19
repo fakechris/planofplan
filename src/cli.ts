@@ -4,11 +4,26 @@ import { ensureHome, loadConfig } from './config.ts';
 import { openDb, openMemoryDb } from './db.ts';
 import { Scheduler, buildOverview, formatResetCountdown, type OverviewPlan } from './core.ts';
 import { createServer } from './server.ts';
-import { writeCredential, deleteCredential } from './auth.ts';
+import { readCredential, writeCredential, deleteCredential } from './auth.ts';
+import { refreshKimiBrowserSession } from './adapters/kimi.ts';
+import { KIMI_BROWSERS, type KimiBrowser } from './browser-cookies.ts';
 import type { Store } from './db.ts';
 import type { QuotaWindow } from './types.ts';
 
 const argv = process.argv.slice(2);
+
+function syncStore(store: Store, cfg: ReturnType<typeof loadConfig>): void {
+  const migrated = store.migrateLegacyGlmPlans();
+  const source = migrated.sourceCredentialRef ? readCredential(migrated.sourceCredentialRef) : null;
+  if (source) {
+    writeCredential('glm', source.value);
+    store.updatePlanRuntime('glm', { cred_ref: 'glm' });
+  } else if (migrated.sourceCredentialRef) {
+    store.updatePlanRuntime('glm', { cred_ref: null });
+  }
+  for (const ref of migrated.credentialRefs) deleteCredential(ref);
+  for (const plan of cfg.plans) store.syncPlan(plan);
+}
 
 function help(): void {
   console.log(`planofplan — AI Coding Plan 用量 dashboard
@@ -18,14 +33,15 @@ function help(): void {
   planofplan usage [--json] [--provider sl] 全 plan 用量输出
   planofplan status                         各 plan 调度/凭据/最近抓取状态
   planofplan refresh [slug]                 手动刷新一个/全部 plan
+  planofplan browser-auth [--browser name] 读取指定浏览器 kimi-auth（触发一次 Keychain 授权）并刷新 Kimi
   planofplan auth set <slug> --key <v>     存手动 API Key（~/.planofplan/credentials.json, 0600）
   planofplan auth set <slug> --auto         改回自动检测（env / CLI 凭据）
   planofplan auth clear <slug>              清掉手动 key
 `);
 }
 
-function flags(): { demo: boolean; port: number | null; json: boolean; provider: string | null; key: string | null; auto: boolean } {
-  const f = { demo: false, port: null as number | null, json: false, provider: null as string | null, key: null as string | null, auto: false };
+function flags(): { demo: boolean; port: number | null; json: boolean; provider: string | null; key: string | null; auto: boolean; browser: KimiBrowser | null } {
+  const f = { demo: false, port: null as number | null, json: false, provider: null as string | null, key: null as string | null, auto: false, browser: null as KimiBrowser | null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === '--demo') f.demo = true;
@@ -34,6 +50,10 @@ function flags(): { demo: boolean; port: number | null; json: boolean; provider:
     else if (a === '--port') f.port = Number(argv[++i]);
     else if (a === '--key') f.key = argv[++i] ?? null;
     else if (a === '--provider') f.provider = argv[++i] ?? null;
+    else if (a === '--browser') {
+      const browser = argv[++i];
+      if (browser && KIMI_BROWSERS.includes(browser as KimiBrowser)) f.browser = browser as KimiBrowser;
+    }
   }
   return f;
 }
@@ -45,7 +65,7 @@ async function serve(): Promise<void> {
   const port = f.port ?? cfg.port;
   const store = f.demo ? openMemoryDb() : openDb(join(ensureHome(), 'planofplan.db'));
 
-  for (const plan of cfg.plans) store.syncPlan(plan);
+  syncStore(store, cfg);
   if (f.demo) seedDemo(store);
 
   const scheduler = new Scheduler(store, cfg);
@@ -62,7 +82,7 @@ function usage(): void {
   const f = flags();
   const cfg = loadConfig();
   const store = openDb(join(ensureHome(), 'planofplan.db'));
-  for (const plan of cfg.plans) store.syncPlan(plan);
+  syncStore(store, cfg);
   const ov = buildOverview(store, cfg.plans, Date.now());
   const plans = f.provider ? ov.plans.filter((p) => p.slug === f.provider) : ov.plans;
 
@@ -105,7 +125,7 @@ function printPlanHuman(p: OverviewPlan): void {
 function status(): void {
   const cfg = loadConfig();
   const store = openDb(join(ensureHome(), 'planofplan.db'));
-  for (const plan of cfg.plans) store.syncPlan(plan);
+  syncStore(store, cfg);
   const ov = buildOverview(store, cfg.plans, Date.now());
   console.log('plan             adapter      enabled  auth       lastSuccess        lastError');
   for (const p of ov.plans) {
@@ -121,7 +141,7 @@ function status(): void {
 async function refresh(): Promise<void> {
   const cfg = loadConfig();
   const store = openDb(join(ensureHome(), 'planofplan.db'));
-  for (const plan of cfg.plans) store.syncPlan(plan);
+  syncStore(store, cfg);
   const scheduler = new Scheduler(store, cfg);
   const slug = argv.slice(1).find((a) => a && !a.startsWith('-'));
   const targets = slug ? [slug] : store.listPlans().filter((p) => p.enabled).map((p) => p.slug);
@@ -133,6 +153,23 @@ async function refresh(): Promise<void> {
       console.log(`${s}: ${r.error}`);
     }
   }
+}
+
+async function browserAuth(): Promise<void> {
+  const f = flags();
+  const result = await refreshKimiBrowserSession(f.browser ?? 'safari');
+  if (!result.token) {
+    console.error('未找到有效 kimi-auth 浏览器会话');
+    for (const warning of result.warnings) console.error(`  ${warning}`);
+    process.exitCode = 1;
+    return;
+  }
+  const cfg = loadConfig();
+  const store = openDb(join(ensureHome(), 'planofplan.db'));
+  syncStore(store, cfg);
+  const scheduler = new Scheduler(store, cfg);
+  const refreshed = await scheduler.refreshPlan('kimi');
+  console.log(`kimi browser auth: ${refreshed.ok ? 'ok' : refreshed.error} (${result.source})`);
 }
 
 // ── auth ────────────────────────────────────────────────────────────
@@ -201,6 +238,9 @@ switch (cmd) {
     break;
   case 'refresh':
     await refresh();
+    break;
+  case 'browser-auth':
+    await browserAuth();
     break;
   case 'auth':
     auth();

@@ -4,8 +4,8 @@
  * 规格出处：CodexBar docs/kimi.md + KimiUsageFetcher.swift + KimiUsageSnapshot.swift
  * - 凭据优先级（与 CodexBar 一致）：
  *   ① API Key（kimi.com/code/console 创建，KIMI_CODE_API_KEY）→ GET /coding/v1/usages
- *   ② Kimi Code CLI ~/.kimi-code/credentials/kimi-code.json 的 access_token（只读不刷新；
- *      过期提示重新登录；与 CodexBar 相同策略，不用 refresh_token）
+ *   ② Kimi Code CLI ~/.kimi-code/credentials/kimi-code.json 的 access_token；
+ *      access_token 过期时按 onWatch 规则用 refresh_token 刷新并写回同一文件
  *   ③ 网页会话 kimi-auth（KIMI_AUTH_TOKEN env / kimi-desktop / Chromium 系明文 / Firefox）：
  *      周/5h 走 POST GetUsages(FEATURE_CODING)，月走 GetSubscriptionStats
  * - 三档限额：
@@ -17,31 +17,72 @@
  *   x-msh-session-id（JWT ssid）、x-traffic-id（JWT sub）
  * - 值均为字符串需转数字
  */
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from 'node:fs';
+import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { Database } from 'bun:sqlite';
 import type { AdapterContext, Credential, PlanAdapter, QuotaWindow } from '../types.ts';
 import { AdapterError } from '../types.ts';
+import {
+  readBrowserKimiAuth,
+  type BrowserCookieResult,
+  type KimiBrowser,
+} from '../browser-cookies.ts';
 
 function kimiHome(): string {
-  return process.env.KIMI_CODE_HOME ?? join(homedir(), '.kimi-code');
+  return process.env.KIMI_CODE_HOME?.trim() || join(homedir(), '.kimi-code');
 }
 
 interface CliCredentialFile {
   access_token?: string;
   refresh_token?: string;
-  expires_at?: number;
+  token_type?: string;
+  scope?: string;
+  expires_at?: number | string;
+  expires_in?: number | string;
+  path?: string;
+}
+
+function expandHomePath(path: string): string {
+  if (path === '~') return homedir();
+  if (path.startsWith('~/')) return join(homedir(), path.slice(2));
+  return path;
+}
+
+function kimiCredentialCandidates(): string[] {
+  const candidates = [
+    process.env.KIMI_CODE_CREDENTIALS,
+    process.env.KIMI_CREDENTIALS,
+    join(kimiHome(), 'credentials', 'kimi-code.json'),
+    join(homedir(), '.kimi-code', 'credentials', 'kimi-code.json'),
+  ];
+  return [...new Set(candidates.filter((path): path is string => !!path?.trim()).map((path) => expandHomePath(path.trim())))];
+}
+
+function kimiCredentialPath(): string {
+  const candidates = kimiCredentialCandidates();
+  return candidates.find((path) => existsSync(path)) ?? candidates[0] ?? join(homedir(), '.kimi-code', 'credentials', 'kimi-code.json');
 }
 
 function readCliCredential(): CliCredentialFile | null {
-  const file = join(kimiHome(), 'credentials', 'kimi-code.json');
-  if (!existsSync(file)) return null;
-  try {
-    return JSON.parse(readFileSync(file, 'utf8')) as CliCredentialFile;
-  } catch {
-    return null;
+  for (const file of kimiCredentialCandidates()) {
+    if (!existsSync(file)) continue;
+    try {
+      const parsed = JSON.parse(readFileSync(file, 'utf8')) as CliCredentialFile;
+      if (parsed.access_token || parsed.refresh_token) return { ...parsed, path: file };
+    } catch {
+      // Try the next supported kimi-code candidate.
+    }
   }
+  return null;
 }
 
 interface JwtClaims {
@@ -62,11 +103,6 @@ function jwtClaims(token: string): JwtClaims {
   }
 }
 
-function jwtExpiresAtSec(token: string): number | null {
-  const claims = jwtClaims(token);
-  return typeof claims.exp === 'number' && Number.isFinite(claims.exp) ? claims.exp : null;
-}
-
 function deviceIdFile(): string | null {
   const f = join(kimiHome(), 'device_id');
   if (!existsSync(f)) return null;
@@ -78,32 +114,50 @@ function deviceIdFile(): string | null {
   }
 }
 
-// ── CLI OAuth 刷新（可选）─────────────────────────────────────────────
-// 官方 CLI（moonshotai/kimi-code packages/oauth）设备流端点与 clientId（开源硬编码）。
-// 默认不启用：与 CodexBar 一致，把 CLI 凭据当只读；设 KIMI_USE_REFRESH=1 后，
-// access_token 过期时用 refresh_token 静默换新（只在内存中使用，不写回凭据文件）。
+// ── CLI OAuth 刷新 ───────────────────────────────────────────────────
+// 与 onWatch 一致：只在 access_token 过期时静默刷新，并把 OAuth 轮换后的
+// access_token/refresh_token 写回同一个 kimi-code 凭据文件。
 
 const KIMI_OAUTH_HOST = 'https://auth.kimi.com';
 const KIMI_OAUTH_CLIENT_ID = '17e5f671-d194-4dfb-9706-5516cb48c098';
 
 function refreshEnabled(): boolean {
   const v = process.env.KIMI_USE_REFRESH;
-  return v === '1' || v === 'true';
+  return v !== '0' && v !== 'false';
 }
 
-/** 判定是否需要触发刷新：开启 && 有 refresh_token && access_token 已过期/临过期 */
+/** 判定是否需要触发刷新：已启用、有 refresh_token，且 access_token 缺失或已过期。 */
 export function shouldRefreshCliToken(
   cli: CliCredentialFile | null,
   nowMs: number,
   enabled: boolean,
 ): boolean {
-  if (!enabled || !cli?.refresh_token || !cli.access_token) return false;
+  if (!enabled || !cli?.refresh_token) return false;
   const expSec = toNum(cli.expires_at);
-  return expSec == null || expSec * 1000 < nowMs + 60_000;
+  return !cli.access_token || (expSec != null && expSec * 1000 < nowMs + 60_000);
 }
 
-/** POST {oauthHost}/api/oauth/token (grant_type=refresh_token) → 新 access_token；失败返回 null */
-async function refreshCliAccessToken(cli: CliCredentialFile): Promise<string | null> {
+interface KimiOAuthTokenResponse {
+  access_token?: unknown;
+  refresh_token?: unknown;
+  token_type?: unknown;
+  scope?: unknown;
+  expires_in?: unknown;
+}
+
+function persistCliCredential(cli: CliCredentialFile): void {
+  const file = cli.path ?? kimiCredentialPath();
+  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+  const temporary = `${file}.${process.pid}.${Date.now()}.tmp`;
+  const payload = { ...cli };
+  delete payload.path;
+  writeFileSync(temporary, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
+  chmodSync(temporary, 0o600);
+  renameSync(temporary, file);
+}
+
+/** POST {oauthHost}/api/oauth/token and persist the rotated credential file. */
+async function refreshCliAccessToken(cli: CliCredentialFile): Promise<CliCredentialFile | null> {
   const host = (process.env.KIMI_CODE_OAUTH_HOST ?? KIMI_OAUTH_HOST).replace(/\/+$/, '');
   const headers: Record<string, string> = {
     'Content-Type': 'application/x-www-form-urlencoded',
@@ -129,8 +183,33 @@ async function refreshCliAccessToken(cli: CliCredentialFile): Promise<string | n
   }
   if (!res.ok) return null;
   try {
-    const json = (await res.json()) as { access_token?: unknown };
-    return typeof json.access_token === 'string' && json.access_token ? json.access_token : null;
+    const json = (await res.json()) as KimiOAuthTokenResponse;
+    if (typeof json.access_token !== 'string' || !json.access_token) return null;
+    const refreshed: CliCredentialFile = {
+      ...cli,
+      access_token: json.access_token,
+      refresh_token:
+        typeof json.refresh_token === 'string' && json.refresh_token
+          ? json.refresh_token
+          : cli.refresh_token,
+      token_type:
+        typeof json.token_type === 'string' && json.token_type ? json.token_type : cli.token_type ?? 'Bearer',
+      scope: typeof json.scope === 'string' && json.scope ? json.scope : cli.scope ?? 'kimi-code',
+      expires_in:
+        typeof json.expires_in === 'number' || typeof json.expires_in === 'string'
+          ? json.expires_in
+          : cli.expires_in,
+    };
+    const expiresIn = toNum(refreshed.expires_in);
+    if (expiresIn != null && expiresIn > 0) {
+      refreshed.expires_at = Date.now() / 1000 + expiresIn;
+    }
+    try {
+      persistCliCredential(refreshed);
+    } catch {
+      // Keep using the fresh token for this poll if the CLI store is temporarily locked.
+    }
+    return refreshed;
   } catch {
     return null;
   }
@@ -327,24 +406,43 @@ function queryKimiAuthCookies(dbPath: string): string[] {
   }
 }
 
-/** 找未过期的 kimi-auth 网页会话（env 优先，其次本机 cookie 存储） */
-export function readKimiAuthToken(): { token: string; source: string } | null {
+const browserSessions = new Map<string, { token: string; source: string }>();
+
+function readKimiDesktopAuthToken(): { token: string; source: string } | null {
+  const desktopDb = kimiAuthCookieDbs().find((path) => path.includes('/kimi-desktop/'));
+  if (!desktopDb) return null;
+  const token = queryKimiAuthCookies(desktopDb)[0];
+  return token ? { token, source: 'kimi-desktop' } : null;
+}
+
+/** 找 kimi-auth 网页会话（指定 provider 的内存会话优先）。 */
+export function readKimiAuthToken(
+  planSlug = 'kimi',
+  allowCookieFallback = true,
+  allowDesktopFallback = true,
+): { token: string; source: string } | null {
   const env = process.env.KIMI_AUTH_TOKEN;
   if (env && env.trim()) {
     const token = env.trim();
-    const exp = jwtExpiresAtSec(token);
-    if (exp != null && exp * 1000 > Date.now() + 60_000) return { token, source: 'env' };
+    return { token, source: 'env' };
   }
+  const browserSession = browserSessions.get(planSlug);
+  if (browserSession) {
+    return browserSession;
+  }
+  // CodexBar checks Kimi Desktop before the generic browser importer.
+  if (allowDesktopFallback) {
+    const desktop = readKimiDesktopAuthToken();
+    if (desktop) return desktop;
+  }
+  if (!allowCookieFallback) return null;
   const seen = new Set<string>();
   for (const dbPath of kimiAuthCookieDbs()) {
     if (seen.has(dbPath)) continue;
     seen.add(dbPath);
     for (const token of queryKimiAuthCookies(dbPath)) {
-      const exp = jwtExpiresAtSec(token);
-      if (exp != null && exp * 1000 > Date.now() + 60_000) {
-        const appName = dbPath.split('/').at(-3) ?? 'cookie';
-        return { token, source: `cookie(${appName})` };
-      }
+      const appName = dbPath.split('/').at(-3) ?? 'cookie';
+      return { token, source: `cookie(${appName})` };
     }
   }
   return null;
@@ -354,6 +452,52 @@ const GET_USAGES_URL =
   'https://www.kimi.com/apiv2/kimi.gateway.billing.v1.BillingService/GetUsages';
 const SUBSCRIPTION_STATS_URL =
   'https://www.kimi.com/apiv2/kimi.gateway.membership.v2.MembershipService/GetSubscriptionStats';
+
+/** 用户主动点击“读取浏览器会话”时调用；token 只保存在当前 Bun 进程内存。 */
+export async function refreshKimiBrowserSession(
+  browser: KimiBrowser = 'safari',
+  log: (message: string) => void = console.log,
+  planSlug = 'kimi',
+): Promise<BrowserCookieResult> {
+  const result = await readBrowserKimiAuth(browser);
+  for (const warning of result.warnings.slice(0, 8)) log(`浏览器会话：${warning}`);
+  if (result.token && result.source) {
+    browserSessions.set(planSlug, { token: result.token, source: result.source });
+    log(`浏览器会话已读取：${result.source}（token 仅保存在内存）`);
+  } else {
+    // 读取另一个浏览器失败时，不要清掉已经成功的会话。
+    // 例如 Firefox 已成功，用户随后试点 Safari 但没有 Full Disk Access，
+    // 后台仍应继续使用 Firefox token，而不是退回 missing。
+    log('本次浏览器读取失败，保留当前已成功的网页会话');
+  }
+  return result;
+}
+
+/** 原生 menubar app 已经通过 SweetCookieKit 读取完浏览器后，把 kimi-auth 交给 Bun。 */
+export function acceptKimiBrowserToken(token: string, source: string, planSlug = 'kimi'): boolean {
+  const value = token.trim();
+  if (!value) return false;
+  browserSessions.set(planSlug, { token: value, source });
+  return true;
+}
+
+export function acceptKimiBrowserCookies(
+  cookies: Array<{ name?: string; value?: string }>,
+  source: string,
+  planSlug = 'kimi',
+): boolean {
+  for (const cookie of cookies) {
+    if (cookie.name !== 'kimi-auth' || !cookie.value) continue;
+    // CodexBar forwards HTTPCookie.value unchanged. Do not decode, strip
+    // prefixes, or otherwise reinterpret a browser cookie here.
+    const token = cookie.value.trim();
+    if (!token) continue;
+    // KimiCookieImporter.SessionInfo.authToken uses first(where:), so keep
+    // the native importer order instead of re-ranking cookies by JWT claims.
+    return acceptKimiBrowserToken(token, source, planSlug);
+  }
+  return false;
+}
 
 function timezoneName(): string {
   try {
@@ -381,8 +525,9 @@ function webHeaders(token: string): Record<string, string> {
     'x-msh-platform': 'web',
     'r-timezone': timezoneName(),
   };
-  const deviceId = claims.device_id ?? deviceIdFile();
-  if (deviceId) headers['x-msh-device-id'] = deviceId;
+  // CodexBar's webRequest only forwards browser JWT identity. Never reuse the
+  // kimi-code CLI device_id for a browser session.
+  if (claims.device_id) headers['x-msh-device-id'] = claims.device_id;
   if (claims.ssid) headers['x-msh-session-id'] = claims.ssid;
   if (claims.sub) headers['x-traffic-id'] = claims.sub;
   return headers;
@@ -420,7 +565,21 @@ async function fetchWebUsage(token: string, log: (msg: string) => void): Promise
         (u) => u?.scope === 'FEATURE_CODING',
       )
     : undefined;
-  if (!coding) throw new AdapterError('parse', 'Kimi GetUsages 缺少 FEATURE_CODING scope');
+  if (!coding) {
+    const totalQuota = (json as { totalQuota?: unknown })?.totalQuota;
+    if (totalQuota && typeof totalQuota === 'object') {
+      // 当前网页接口只返回 totalQuota 时，不猜测它对应周/5H；
+      // 继续请求 GetSubscriptionStats，保证月度窗口仍能更新。
+      log('Kimi GetUsages 当前只返回 totalQuota，周/5H 保留最近快照，继续读取月限额');
+      try {
+        return [await fetchSubscriptionStats(token)];
+      } catch (e) {
+        log(`月限额获取失败：${e instanceof Error ? e.message : String(e)}`);
+        return [];
+      }
+    }
+    throw new AdapterError('parse', 'Kimi GetUsages 缺少 FEATURE_CODING scope');
+  }
   const windows = normalizeKimi({ usage: coding.detail, limits: coding.limits });
 
   // 月限额：失败只记日志（CodexBar 同为 best-effort enrichment）
@@ -466,7 +625,7 @@ async function fetchSubscriptionStats(token: string): Promise<QuotaWindow> {
 export const kimiAdapter: PlanAdapter = {
   slug: 'kimi',
   credentialHint:
-    '缺少凭据：重新登录 Kimi Code CLI（kimi-code login）或 kimi.com 网页端（自动读 kimi-auth cookie），或设置 KIMI_CODE_API_KEY / KIMI_AUTH_TOKEN',
+    '没有有效 Kimi 会话：请在所选浏览器打开 kimi.com 刷新登录态，再从 menubar 读取浏览器会话；也可运行 kimi-code login 或设置 KIMI_CODE_API_KEY',
 
   async detectCredentials(ctx: AdapterContext): Promise<Credential | null> {
     if (ctx.plan.credRef) {
@@ -477,8 +636,9 @@ export const kimiAdapter: PlanAdapter = {
     const apiKey = process.env.KIMI_CODE_API_KEY;
     if (apiKey && apiKey.trim()) return { kind: 'bearer', value: apiKey.trim(), source: 'env' };
 
-    // CLI 凭据：15 分钟短 token，默认只读不刷新（CodexBar 同策略）；
-    // KIMI_USE_REFRESH=1 时用 refresh_token 静默换新（不写回凭据文件）
+    // 与 CodexBar 一致：auto 模式先 API key，再 kimi-code CLI OAuth，最后网页会话。
+    // CLI /coding/v1/usages 没有月度字段，但网页会话是最后兜底，不应抢走 CLI OAuth。
+    const configuredBrowser = ctx.plan.extra.browser as KimiBrowser | undefined;
     const cli = readCliCredential();
     const cliExpSec = cli?.access_token ? toNum(cli.expires_at) : null;
     const cliFresh =
@@ -486,16 +646,19 @@ export const kimiAdapter: PlanAdapter = {
     if (cliFresh) return { kind: 'bearer', value: cli.access_token!, source: 'auto' };
     if (shouldRefreshCliToken(cli, Date.now(), refreshEnabled()) && cli?.refresh_token) {
       const fresh = await refreshCliAccessToken(cli);
-      if (fresh) return { kind: 'bearer', value: fresh, source: 'auto' };
+      if (fresh?.access_token) return { kind: 'bearer', value: fresh.access_token, source: 'auto' };
       ctx.log('CLI access_token 过期且刷新失败（可能已登出），尝试网页会话兜底');
     }
 
-    // 网页会话兜底：有未过期的 kimi-auth cookie（或 KIMI_AUTH_TOKEN）时，
-    // 周/5h 走 GetUsages、月走 GetSubscriptionStats（CodexBar Auto-cookie 同路径）
-    const web = readKimiAuthToken();
+    // 配置过 provider 浏览器时，首次读取也只读取该浏览器，避免回退到另一浏览器的 cookie。
+    if (configuredBrowser && !browserSessions.has(ctx.plan.slug)) {
+      await refreshKimiBrowserSession(configuredBrowser, ctx.log, ctx.plan.slug);
+    }
+    const web = readKimiAuthToken(ctx.plan.slug, !configuredBrowser, !configuredBrowser);
     if (web && web.token) {
       return { kind: 'bearer', value: web.token, source: 'web', cookie: web.token };
     }
+
     return null;
   },
 
@@ -508,54 +671,72 @@ export const kimiAdapter: PlanAdapter = {
     const base = (process.env.KIMI_CODE_BASE_URL ?? ctx.plan.extra.baseUrl ?? 'https://api.kimi.com').replace(/\/+$/, '');
     const url = `${base}/coding/v1/usages`;
 
-    const headers: Record<string, string> = {
-      Authorization: `Bearer ${cred.value}`,
-      accept: 'application/json',
-    };
-    if (cred.source === 'auto') {
-      // CLI 凭据：带设备身份头（与官方 CLI 一致）
-      const claims = jwtClaims(cred.value);
-      const deviceId = claims.device_id ?? deviceIdFile();
-      if (deviceId) headers['x-msh-device-id'] = deviceId;
-      if (claims.ssid) headers['x-msh-session-id'] = claims.ssid;
-      if (claims.sub) headers['x-traffic-id'] = claims.sub;
-    }
-
-    let res: Response;
-    try {
-      res = await fetch(url, {
-        method: 'GET',
-        headers,
-        signal: AbortSignal.timeout(10_000),
-      });
-    } catch (e) {
-      if (e instanceof Error && e.name === 'TimeoutError') {
-        throw new AdapterError('network', `Kimi 请求超时：${url}`);
+    const requestCodeUsage = async (token: string): Promise<{ response: Response; json?: unknown }> => {
+      const headers: Record<string, string> = {
+        Authorization: `Bearer ${token}`,
+        accept: 'application/json',
+      };
+      if (cred.source === 'auto') {
+        // CLI 凭据：带设备身份头（与官方 CLI 一致）
+        const claims = jwtClaims(token);
+        const deviceId = claims.device_id ?? deviceIdFile();
+        if (deviceId) headers['x-msh-device-id'] = deviceId;
+        if (claims.ssid) headers['x-msh-session-id'] = claims.ssid;
+        if (claims.sub) headers['x-traffic-id'] = claims.sub;
       }
-      throw new AdapterError('network', `Kimi 网络错误：${String(e instanceof Error ? e.message : e)}`);
+
+      let response: Response;
+      try {
+        response = await fetch(url, {
+          method: 'GET',
+          headers,
+          signal: AbortSignal.timeout(10_000),
+        });
+      } catch (e) {
+        if (e instanceof Error && e.name === 'TimeoutError') {
+          throw new AdapterError('network', `Kimi 请求超时：${url}`);
+        }
+        throw new AdapterError('network', `Kimi 网络错误：${String(e instanceof Error ? e.message : e)}`);
+      }
+      if (!response.ok) return { response };
+      let json: unknown;
+      try {
+        json = await response.json();
+      } catch {
+        throw new AdapterError('parse', `Kimi 响应不是合法 JSON：${url}`);
+      }
+      return { response, json };
+    };
+
+    let result = await requestCodeUsage(cred.value);
+    if ((result.response.status === 401 || result.response.status === 403) && cred.source === 'auto') {
+      // onWatch/CodexBar 兼容：先重新读取 CLI 可能刚轮换的文件，再强制刷新一次。
+      const disk = readCliCredential();
+      if (disk?.access_token && disk.access_token !== cred.value) {
+        result = await requestCodeUsage(disk.access_token);
+      }
+      if ((result.response.status === 401 || result.response.status === 403) && disk?.refresh_token) {
+        const fresh = await refreshCliAccessToken(disk);
+        if (fresh?.access_token) result = await requestCodeUsage(fresh.access_token);
+      }
     }
 
-    if (res.status === 401 || res.status === 403) {
+    if (result.response.status === 401 || result.response.status === 403) {
       throw new AdapterError(
         'auth',
-        `Kimi 鉴权失败(HTTP ${res.status})：请重新登录 Kimi Code CLI 或换 KIMI_CODE_API_KEY`,
+        `Kimi 鉴权失败(HTTP ${result.response.status})：请重新登录 Kimi Code CLI 或换 KIMI_CODE_API_KEY`,
       );
     }
-    if (!res.ok) {
-      if (res.status === 429) throw new AdapterError('api', 'Kimi 请求被限流(HTTP 429)');
-      throw new AdapterError('api', `Kimi API 错误(HTTP ${res.status})`);
+    if (!result.response.ok) {
+      if (result.response.status === 429) throw new AdapterError('api', 'Kimi 请求被限流(HTTP 429)');
+      throw new AdapterError('api', `Kimi API 错误(HTTP ${result.response.status})`);
     }
 
-    let json: unknown;
-    try {
-      json = await res.json();
-    } catch {
-      throw new AdapterError('parse', `Kimi 响应不是合法 JSON：${url}`);
-    }
+    const json = result.json;
     const windows = normalizeKimi(json);
 
     // 月限额为第三档：仅网页会话可读；失败只记日志，不影响 周/5h 主数据
-    const auth = readKimiAuthToken();
+    const auth = readKimiAuthToken(ctx.plan.slug, !ctx.plan.extra.browser, !ctx.plan.extra.browser);
     if (!auth) {
       ctx.log(
         '月限额跳过：未找到有效的 kimi.com 网页会话（重新登录 kimi.com 后自动读取 kimi-auth cookie）',

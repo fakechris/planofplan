@@ -1,15 +1,15 @@
 /**
  * z.ai / GLM Coding Plan adapter（M2.1，M2.5 对齐 opencode-quota）
  *
- * 同时覆盖「GLM legacy（智谱 BigModel CN，早期单 5h 窗口）」与「GLM current（周+5h+MCP）」：
- * 同一端点家族，靠 extra.region 区分 host 与可用 token 源。
+ * GLM Coding Plan：用 API key 自动尝试 z.ai 与 BigModel quota host，
+ * 不要求用户区分 legacy/current 或手动选择 region。
  *
  * 规格出处：CodexBar docs/zai.md + ZaiProviderDescriptor.swift + opencode-quota glm-coding-plan.ts
  * - 端点：GET {host}/api/monitor/usage/quota/limit（cn: open.bigmodel.cn / bigmodel.cn；global: api.z.ai）
- * - 头：Authorization: Bearer <token> + accept: application/json
- * - token 源（cn）：Z_AI_API_KEY → BIGMODEL_API_KEY/ZHIPU_API_KEY/ZHIPUAI_API_KEY/GLM_API_KEY
+ * - 头：Authorization: <token>（onWatch）或 Bearer <token>（CodexBar）+ accept: application/json
+ * - token 源（cn）：Z_AI_API_KEY/ZAI_API_KEY → BIGMODEL_API_KEY/ZHIPU_API_KEY/ZHIPUAI_API_KEY/GLM_API_KEY
  *   → relay 文件 ~/.coding-relay/glm-api-key / ~/.config/bigmodel/api_key / ~/.config/zhipu/api_key
- *   （global 只认 Z_AI_API_KEY，BigModel 别名不用于 global 路由）
+ *   （global 只认 Z_AI_API_KEY/ZAI_API_KEY，BigModel 别名不用于 global 路由）
  * - 解析：data.limits[] TOKENS_LIMIT 按 unit（3=5h / 6=周，与 opencode-quota 判定一致，
  *   缺 unit 时退回按 nextResetTime 长短分类）为主/周窗口、TIME_LIMIT 为 MCP 通道；
  *   percentage 为【已用 %】（剩余 = 100 - percentage，opencode-quota 同语义，超界钳制 0-100）；
@@ -24,10 +24,8 @@ import { AdapterError } from '../types.ts';
 
 const LIMIT_PATH = '/api/monitor/usage/quota/limit';
 
-function hostsFor(region: string): string[] {
-  if (region === 'global') return ['https://api.z.ai'];
-  // opencode-quota zhipu 实测端点 bigmodel.cn；CodexBar 文档为 open.bigmodel.cn → 依次尝试
-  return ['https://open.bigmodel.cn', 'https://bigmodel.cn'];
+function hostsFor(): string[] {
+  return ['https://api.z.ai', 'https://open.bigmodel.cn', 'https://bigmodel.cn'];
 }
 
 function quotaUrls(plan: AdapterContext['plan']): string[] {
@@ -40,7 +38,7 @@ function quotaUrls(plan: AdapterContext['plan']): string[] {
     return [override];
   }
   const hostOverride = env.Z_AI_API_HOST ?? plan.extra.host;
-  const hosts = hostOverride ? [hostOverride] : hostsFor(plan.extra.region ?? 'cn');
+  const hosts = hostOverride ? [hostOverride] : hostsFor();
   return [...new Set(hosts.map((h) => h.replace(/\/+$/, '') + LIMIT_PATH))];
 }
 
@@ -78,6 +76,14 @@ function now(): number {
 
 function clampPct(v: number): number {
   return Math.min(100, Math.max(0, v));
+}
+
+export function glmAuthorizationHeaders(
+  apiKey: string,
+  preferred: 'bearer' | 'raw' = 'bearer',
+): string[] {
+  const bearer = `Bearer ${apiKey}`;
+  return preferred === 'raw' ? [apiKey, bearer] : [bearer, apiKey];
 }
 
 export function normalizeGlm(
@@ -186,7 +192,7 @@ function readRelayKeys(): string[] {
 }
 
 function cnEnvKey(): string | null {
-  for (const k of ['BIGMODEL_API_KEY', 'ZHIPU_API_KEY', 'ZHIPUAI_API_KEY', 'GLM_API_KEY']) {
+  for (const k of ['ZAI_API_KEY', 'BIGMODEL_API_KEY', 'ZHIPU_API_KEY', 'ZHIPUAI_API_KEY', 'GLM_API_KEY']) {
     const v = process.env[k];
     if (v && v.trim()) return v.trim();
   }
@@ -196,7 +202,7 @@ function cnEnvKey(): string | null {
 export const glmAdapter: PlanAdapter = {
   slug: 'glm',
   credentialHint:
-    '缺少凭据：设置 Z_AI_API_KEY / BIGMODEL_API_KEY，或运行 planofplan auth set <slug> --key <key>',
+    '缺少凭据：设置 Z_AI_API_KEY / ZAI_API_KEY / BIGMODEL_API_KEY，或运行 planofplan auth set <slug> --key <key>',
 
   async detectCredentials(ctx: AdapterContext): Promise<Credential | null> {
     if (ctx.plan.credRef) {
@@ -204,10 +210,8 @@ export const glmAdapter: PlanAdapter = {
       const stored = readCredential(ctx.plan.credRef);
       if (stored) return { kind: 'bearer', value: stored.value, source: 'manual' };
     }
-    const region = ctx.plan.extra.region ?? 'cn';
-    const zKey = process.env.Z_AI_API_KEY;
-    if (zKey && zKey.trim()) return { kind: 'bearer', value: zKey.trim(), source: 'env' };
-    if (region === 'global') return null; // global 路由不认 BIGMODEL 别名/relay
+    const zKey = process.env.Z_AI_API_KEY?.trim() || process.env.ZAI_API_KEY?.trim();
+    if (zKey) return { kind: 'bearer', value: zKey, source: 'env' };
     const cnKey = cnEnvKey();
     if (cnKey) return { kind: 'bearer', value: cnKey, source: 'env' };
     const relay = readRelayKeys()[0];
@@ -217,57 +221,74 @@ export const glmAdapter: PlanAdapter = {
 
   async fetchUsage(ctx: AdapterContext, cred: Credential): Promise<QuotaWindow[]> {
     const urls = quotaUrls(ctx.plan);
-    // 多个 host（open.bigmodel.cn → bigmodel.cn）逐个尝试；鉴权错误直接失败，网络/API 错误换下一 host
-    const headers: Record<string, string> = {
-      Authorization: `Bearer ${cred.value}`,
-      accept: 'application/json',
-    };
-    // team 模式预留：extra.orgId + extra.projId → Bigmodel 头 + type=2；M2 暂不启用
-    if (ctx.plan.extra.orgId && ctx.plan.extra.projId) {
-      headers['Bigmodel-Organization'] = ctx.plan.extra.orgId;
-      headers['Bigmodel-Project'] = ctx.plan.extra.projId;
-    }
+    // CodexBar 使用 Bearer；onWatch 使用原始 API key。两者都是真实客户端，
+    // 对 401/业务鉴权错误自动尝试另一种头格式。
+    const authHeaders = glmAuthorizationHeaders(
+      cred.value,
+      ctx.plan.extra.authHeader === 'raw' ? 'raw' : 'bearer',
+    );
 
     let lastErr: Error | null = null;
     for (const url of urls) {
-      let res: Response;
-      try {
-        res = await fetch(url, {
-          method: 'GET',
-          headers,
-          signal: AbortSignal.timeout(10_000),
-        });
-      } catch (e) {
-        if (e instanceof Error && e.name === 'TimeoutError') {
-          lastErr = new AdapterError('network', `GLM 请求超时：${url}`);
-        } else {
-          lastErr = new AdapterError(
-            'network',
-            `GLM 网络错误：${String(e instanceof Error ? e.message : e)}`,
-          );
+      for (const authorization of authHeaders) {
+        const headers: Record<string, string> = {
+          Authorization: authorization,
+          accept: 'application/json',
+        };
+        // team 模式预留：extra.orgId + extra.projId → Bigmodel 头 + type=2；M2 暂不启用
+        if (ctx.plan.extra.orgId && ctx.plan.extra.projId) {
+          headers['Bigmodel-Organization'] = ctx.plan.extra.orgId;
+          headers['Bigmodel-Project'] = ctx.plan.extra.projId;
         }
-        continue; // 尝试下一个 host
-      }
 
-      if (res.status === 401 || res.status === 403) {
-        throw new AdapterError('auth', `GLM 鉴权失败(HTTP ${res.status})：请检查 API Key`);
-      }
-      if (!res.ok) {
-        if (res.status === 429) throw new AdapterError('api', 'GLM 请求被限流(HTTP 429)');
-        lastErr = new AdapterError('api', `GLM API 错误(HTTP ${res.status})`);
-        continue;
-      }
+        let res: Response;
+        try {
+          res = await fetch(url, {
+            method: 'GET',
+            headers,
+            signal: AbortSignal.timeout(10_000),
+          });
+        } catch (e) {
+          if (e instanceof Error && e.name === 'TimeoutError') {
+            lastErr = new AdapterError('network', `GLM 请求超时：${url}`);
+          } else {
+            lastErr = new AdapterError(
+              'network',
+              `GLM 网络错误：${String(e instanceof Error ? e.message : e)}`,
+            );
+          }
+          break; // 网络错误与鉴权头无关，尝试下一个 host
+        }
 
-      let json: unknown;
-      try {
-        json = await res.json();
-      } catch {
-        lastErr = new AdapterError('parse', `GLM 响应不是合法 JSON：${url}`);
-        continue;
+        if (res.status === 401 || res.status === 403) {
+          lastErr = new AdapterError('auth', `GLM 鉴权失败(HTTP ${res.status})：请检查 API Key`);
+          continue; // 尝试另一种 Authorization 格式
+        }
+        if (!res.ok) {
+          if (res.status === 429) throw new AdapterError('api', 'GLM 请求被限流(HTTP 429)');
+          lastErr = new AdapterError('api', `GLM API 错误(HTTP ${res.status})`);
+          break; // 非鉴权错误换下一个 host
+        }
+
+        let json: unknown;
+        try {
+          json = await res.json();
+        } catch {
+          lastErr = new AdapterError('parse', `GLM 响应不是合法 JSON：${url}`);
+          break;
+        }
+        try {
+          return normalizeGlm(json, now(), {
+            percentageIsRemaining: ctx.plan.extra.percentageIsRemaining === 'true',
+          }).windows;
+        } catch (error) {
+          if (error instanceof AdapterError && error.kind === 'auth') {
+            lastErr = error;
+            continue; // onWatch 可能返回 HTTP 200 + code=401
+          }
+          throw error;
+        }
       }
-      return normalizeGlm(json, now(), {
-        percentageIsRemaining: ctx.plan.extra.percentageIsRemaining === 'true',
-      }).windows;
     }
     throw lastErr ?? new AdapterError('api', 'GLM 无可用 host');
   },

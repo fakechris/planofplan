@@ -5,6 +5,9 @@ import type { Store } from './db.ts';
 import type { Scheduler } from './core.ts';
 import { buildOverview } from './core.ts';
 import { writeCredential, deleteCredential } from './auth.ts';
+import { acceptKimiBrowserCookies, refreshKimiBrowserSession } from './adapters/kimi.ts';
+import { KIMI_BROWSERS, type KimiBrowser } from './browser-cookies.ts';
+import { getBuildInfo } from './build-info.ts';
 
 const WEB_DIR = resolve(import.meta.dir, '../web');
 
@@ -13,6 +16,10 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
 
   app.get('/api/overview', (c) => {
     return c.json(buildOverview(store, cfg.plans, Date.now()));
+  });
+
+  app.get('/api/build-info', (c) => {
+    return c.json(getBuildInfo());
   });
 
   app.get('/api/plans/:slug', (c) => {
@@ -36,6 +43,134 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     const slug = c.req.param('slug');
     const result = await scheduler.refreshPlan(slug);
     return c.json(result);
+  });
+
+  app.post('/api/refresh', async (c) => {
+    const plans = store.listPlans().filter((plan) => plan.enabled);
+    const results = [];
+    for (const plan of plans) {
+      results.push(await scheduler.refreshPlan(plan.slug));
+    }
+    return c.json({ ok: results.every((result) => result.ok), results });
+  });
+
+  // 仅由用户主动点击触发。浏览器 Cookie/Keychain token 不写入磁盘。
+  app.post('/api/browser-auth', async (c) => {
+    const requested = c.req.query('browser') ?? 'safari';
+    const browser = (KIMI_BROWSERS.includes(requested as KimiBrowser) ? requested : 'safari') as KimiBrowser;
+    store.updatePlanExtra('kimi', { browser });
+    const browserResult = await refreshKimiBrowserSession(browser, (message) => console.log(`[kimi] ${message}`), 'kimi');
+    if (!browserResult.token) {
+      return c.json(
+        {
+          ok: false,
+          error: `未找到有效 kimi-auth 浏览器会话（${browser}）`,
+          warnings: browserResult.warnings,
+        },
+        401,
+      );
+    }
+    const refreshed = await scheduler.refreshPlan('kimi');
+    return c.json(
+      {
+        ok: refreshed.ok,
+        browser,
+        source: browserResult.source,
+        warnings: browserResult.warnings,
+        refreshed,
+      },
+      refreshed.ok ? 200 : 502,
+    );
+  });
+
+  app.put('/api/plans/:slug/browser', async (c) => {
+    const slug = c.req.param('slug');
+    const plan = store.getPlan(slug);
+    if (!plan) return c.json({ ok: false, error: 'unknown plan' }, 404);
+    if (plan.adapter !== 'kimi') {
+      return c.json({ ok: false, error: `${plan.name} 暂不支持浏览器会话` }, 400);
+    }
+    let body: { browser?: string } = {};
+    try {
+      body = (await c.req.json()) as { browser?: string };
+    } catch {
+      return c.json({ ok: false, error: 'body 必须是 JSON' }, 400);
+    }
+    if (!body.browser || !KIMI_BROWSERS.includes(body.browser as KimiBrowser)) {
+      return c.json({ ok: false, error: '请选择受支持的浏览器' }, 400);
+    }
+    store.updatePlanExtra(slug, { browser: body.browser });
+    return c.json({ ok: true, slug, browser: body.browser });
+  });
+
+  app.post('/api/plans/:slug/browser-auth', async (c) => {
+    const slug = c.req.param('slug');
+    const plan = store.getPlan(slug);
+    if (!plan) return c.json({ ok: false, error: 'unknown plan' }, 404);
+    if (plan.adapter !== 'kimi') {
+      return c.json({ ok: false, error: `${plan.name} 暂不支持浏览器会话` }, 400);
+    }
+    let body: { browser?: string } = {};
+    try {
+      body = (await c.req.json()) as { browser?: string };
+    } catch {
+      return c.json({ ok: false, error: 'body 必须是 JSON' }, 400);
+    }
+    const browser = body.browser as KimiBrowser;
+    if (!KIMI_BROWSERS.includes(browser)) {
+      return c.json({ ok: false, error: '请选择受支持的浏览器' }, 400);
+    }
+    store.updatePlanExtra(slug, { browser });
+    const browserResult = await refreshKimiBrowserSession(
+      browser,
+      (message) => console.log(`[${slug}] ${message}`),
+      slug,
+    );
+    if (!browserResult.token) {
+      return c.json(
+        { ok: false, slug, browser, error: `未找到有效 kimi-auth（${browser}）`, warnings: browserResult.warnings },
+        401,
+      );
+    }
+    const refreshed = await scheduler.refreshPlan(slug);
+    return c.json(
+      { ok: refreshed.ok, slug, browser, source: browserResult.source, warnings: browserResult.warnings, refreshed },
+      refreshed.ok ? 200 : 502,
+    );
+  });
+
+  // 原生 menubar app 使用 SweetCookieKit 读取 Kimi Safari/Chromium/Firefox 会话后，
+  // 只把 kimi-auth 通过 localhost 交给 Bun。Cookie 不落盘。
+  app.post('/api/browser-session', async (c) => {
+    type BrowserSessionRequest = {
+      browser?: string;
+      planSlug?: string;
+      cookies?: Array<{ domain?: string; name?: string; value?: string }>;
+    };
+    let body: BrowserSessionRequest;
+    try {
+      body = (await c.req.json()) as BrowserSessionRequest;
+    } catch {
+      return c.json({ ok: false, error: 'body 必须是 JSON' }, 400);
+    }
+    const cookies = Array.isArray(body?.cookies) ? body.cookies : [];
+    let kimiResult: unknown = null;
+    const planSlug = body.planSlug ?? 'kimi';
+    if (acceptKimiBrowserCookies(cookies, `${body?.browser ?? 'browser'} (native)`, planSlug)) {
+      store.updatePlanExtra(planSlug, { browser: body.browser ?? null });
+      kimiResult = await scheduler.refreshPlan(planSlug);
+    }
+    const ok = kimiResult != null;
+    return c.json(
+      {
+        ok,
+        planSlug,
+        browser: body?.browser ?? null,
+        cookieNames: [...new Set(cookies.map((cookie) => cookie.name).filter(Boolean))],
+        kimi: kimiResult,
+      },
+      ok ? 200 : 502,
+    );
   });
 
   app.put('/api/plans/:slug/auth', async (c) => {

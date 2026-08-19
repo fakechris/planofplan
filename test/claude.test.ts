@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { normalizeClaude } from '../src/adapters/claude.ts';
-import { AdapterError } from '../src/types.ts';
+import { AdapterError, type AdapterContext, type Credential } from '../src/types.ts';
 
 describe('normalizeClaude', () => {
   test('本机实测响应形状：five_hour/seven_day utilization', () => {
@@ -40,5 +40,82 @@ describe('normalizeClaude', () => {
   test('空响应 → parse 错误', () => {
     expect(() => normalizeClaude({})).toThrow(AdapterError);
     expect(() => normalizeClaude(null)).toThrow(AdapterError);
+  });
+});
+
+describe('Claude OAuth lifecycle', () => {
+  test('401 refreshes with the rotated token and persists it before retrying usage', async () => {
+    const previousFetch = globalThis.fetch;
+    const previousTokenUrl = process.env.CLAUDE_OAUTH_TOKEN_URL;
+    const requests: Array<{ url: string; authorization?: string; body?: string }> = [];
+    const persisted: { value: { accessToken: string; refreshToken: string; expiresAt: number } | null } = {
+      value: null,
+    };
+
+    process.env.CLAUDE_OAUTH_TOKEN_URL = 'http://claude.test/oauth/token';
+    globalThis.fetch = (async (input: string | Request | URL, init?: RequestInit) => {
+      const request = input instanceof Request ? new Request(input, init) : new Request(input.toString(), init);
+      requests.push({
+        url: request.url,
+        authorization: request.headers.get('authorization') ?? undefined,
+        body: request.method === 'POST' ? await request.text() : undefined,
+      });
+      if (request.url.endsWith('/oauth/token')) {
+        return Response.json({
+          access_token: 'fresh-access',
+          refresh_token: 'refresh-2',
+          expires_in: 3600,
+          token_type: 'Bearer',
+        });
+      }
+      if (request.headers.get('authorization') === 'Bearer stale-access') {
+        return new Response('expired', { status: 401 });
+      }
+      return Response.json({
+        five_hour: { utilization: 12 },
+        seven_day: { utilization: 34 },
+      });
+    }) as typeof fetch;
+
+    try {
+      const credential = {
+        kind: 'bearer',
+        value: 'stale-access',
+        source: 'auto',
+        refreshToken: 'refresh-1',
+        persist: async (token: { accessToken: string; refreshToken: string; expiresAt: number }) => {
+          persisted.value = token;
+        },
+      } as unknown as Credential;
+      const ctx = {
+        plan: { slug: 'claude', name: 'Claude', adapter: 'claude', enabled: true, pollIntervalSec: 300, extra: {} },
+        now: Date.now,
+        log: () => {},
+      } as AdapterContext;
+
+      const { claudeAdapter } = await import('../src/adapters/claude.ts');
+      const windows = await claudeAdapter.fetchUsage(ctx, credential);
+
+      expect(windows.find((window) => window.window === 'weekly')?.percentage).toBe(34);
+      expect(requests.map((request) => request.authorization)).toEqual([
+        'Bearer stale-access',
+        undefined,
+        'Bearer fresh-access',
+      ]);
+      expect(new URLSearchParams(requests[1]?.body).get('grant_type')).toBe('refresh_token');
+      expect(new URLSearchParams(requests[1]?.body).get('refresh_token')).toBe('refresh-1');
+      expect(new URLSearchParams(requests[1]?.body).get('client_id')).toBe(
+        '9d1c250a-e61b-44d9-88ed-5944d1962f5e',
+      );
+      expect(persisted.value).toEqual({
+        accessToken: 'fresh-access',
+        refreshToken: 'refresh-2',
+        expiresAt: expect.any(Number),
+      });
+    } finally {
+      globalThis.fetch = previousFetch;
+      if (previousTokenUrl == null) delete process.env.CLAUDE_OAUTH_TOKEN_URL;
+      else process.env.CLAUDE_OAUTH_TOKEN_URL = previousTokenUrl;
+    }
   });
 });

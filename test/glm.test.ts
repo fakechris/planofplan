@@ -1,11 +1,16 @@
 import { describe, expect, test } from 'bun:test';
-import { normalizeGlm } from '../src/adapters/glm.ts';
+import { glmAuthorizationHeaders, normalizeGlm } from '../src/adapters/glm.ts';
 import { AdapterError } from '../src/types.ts';
 
 const NOW = 1_770_000_000_000;
 const in5h = NOW + 5 * 3_600_000;
 
 describe('normalizeGlm', () => {
+  test('兼容 CodexBar Bearer 和 onWatch 原始 API key 鉴权头', () => {
+    expect(glmAuthorizationHeaders('zai-key')).toEqual(['Bearer zai-key', 'zai-key']);
+    expect(glmAuthorizationHeaders('zai-key', 'raw')).toEqual(['zai-key', 'Bearer zai-key']);
+  });
+
   test('JinHanAI 实测样例：TOKENS_LIMIT(5h) + TIME_LIMIT(MCP)，双窗口', () => {
     const raw = {
       code: 200,

@@ -44,6 +44,16 @@ export interface Credential {
   value: string;
   /** 来源：manual（credentials.json）| env | auto */
   source: string;
+  /** OAuth refresh token supplied by a provider-owned credential store. */
+  refreshToken?: string | null;
+  /** OAuth access-token expiry, in epoch milliseconds when known. */
+  expiresAt?: number | null;
+  /** Persist a provider-owned rotated OAuth credential without exposing its storage format to the scheduler. */
+  persist?: (credential: {
+    accessToken: string;
+    refreshToken: string;
+    expiresAt: number | null;
+  }) => Promise<void> | void;
   /** 部分 provider（Codex）需要 account id 头 */
   accountId?: string | null;
   /** 会话型 provider（Cursor）用完整 Cookie 头鉴权 */
