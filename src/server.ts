@@ -307,7 +307,9 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     }
     const file = Bun.file(target);
     if (await file.exists()) {
-      return new Response(file);
+      // 本地 dashboard 的 HTML/JS/CSS 会随源码更新；无缓存头时浏览器会启发式缓存
+      // 旧 app.js，导致界面改动“不生效”。no-cache = 每次回源校验（配合 ETag 304）。
+      return new Response(file, { headers: { 'Cache-Control': 'no-cache' } });
     }
     return c.text('not found', 404);
   });
