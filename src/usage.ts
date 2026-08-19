@@ -8,6 +8,7 @@ import type {
   UsageConfidence,
   UsageRecord,
   UsageReport,
+  UsageScanFile,
   UsageSource,
 } from './types.ts';
 import { fetchOfficialUsage } from './official-usage.ts';
@@ -166,7 +167,13 @@ function record(
   usage: NumericUsage,
   source: UsageSource = 'local',
   confidence: UsageConfidence = 'measured',
-  options: { sessionId?: string | null; project?: string | null; estimatedCostUsd?: number | null; billableTokens?: number | null } = {},
+  options: {
+    sessionId?: string | null;
+    project?: string | null;
+    sourceFile?: string | null;
+    estimatedCostUsd?: number | null;
+    billableTokens?: number | null;
+  } = {},
 ): UsageRecord {
   return {
     id,
@@ -176,6 +183,7 @@ function record(
     model,
     sessionId: options.sessionId ?? null,
     project: options.project ?? null,
+    sourceFile: options.sourceFile ?? null,
     inputTokens: usage.inputTokens,
     cachedInputTokens: usage.cachedInputTokens,
     cacheCreationInputTokens: usage.cacheCreationInputTokens,
@@ -196,6 +204,13 @@ function record(
 
 function jsonlFiles(root: string, since: number): string[] {
   if (!existsSync(root)) return [];
+  try {
+    if (statSync(root).isFile()) {
+      return root.endsWith('.jsonl') ? [root] : [];
+    }
+  } catch {
+    return [];
+  }
   const files: string[] = [];
   const visit = (dir: string): void => {
     let entries;
@@ -282,7 +297,7 @@ function scanJsonlFiles(
       }
       if (!value || typeof value !== 'object') continue;
       const item = parse(value as Record<string, unknown>, file, lineIndex);
-      if (item) result.push(item);
+      if (item) result.push({ ...item, sourceFile: file });
     }
   }
   return result;
@@ -449,7 +464,10 @@ function parseDshRecord(
 
 export function scanDshLogs(root: string, since = Date.now() - 30 * DAY_MS, until = Date.now()): UsageRecord[] {
   const files = filesForRoot(root, since);
-  const compressed = existsSync(root) && !statSync(root).isFile()
+  const rootIsFile = existsSync(root) && statSync(root).isFile();
+  const compressed = rootIsFile && root.endsWith('.jsonl.zstd')
+    ? [root]
+    : existsSync(root) && !rootIsFile
     ? (() => {
       const result: string[] = [];
       const visit = (dir: string): void => {
@@ -479,7 +497,7 @@ export function scanDshLogs(root: string, since = Date.now() - 30 * DAY_MS, unti
       try {
         const value = JSON.parse(line) as Record<string, unknown>;
         const item = parseDshRecord(value, file, lineIndex, since, until);
-        if (item) result.push(item);
+        if (item) result.push({ ...item, sourceFile: file });
       } catch { /* malformed event */ }
     }
   }
@@ -492,66 +510,134 @@ export function scanDroidLogs(_root: string, _since = Date.now() - 30 * DAY_MS, 
   return [];
 }
 
-export function scanCodexLogs(root: string, since = Date.now() - 30 * DAY_MS, until = Date.now()): UsageRecord[] {
+interface CodexCursor {
+  parsedBytes: number;
+  sessionId: string | null;
+  model: string;
+  turnId: string | null;
+  previous: NumericUsage | null;
+  eventIndex: number;
+}
+
+function emptyCodexCursor(): CodexCursor {
+  return {
+    parsedBytes: 0,
+    sessionId: null,
+    model: 'unknown',
+    turnId: null,
+    previous: null,
+    eventIndex: 0,
+  };
+}
+
+function parseCodexCursor(value: string | null | undefined): CodexCursor | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as Partial<CodexCursor>;
+    if (
+      typeof parsed.parsedBytes !== 'number'
+      || typeof parsed.eventIndex !== 'number'
+      || typeof parsed.model !== 'string'
+    ) return null;
+    const previous = parsed.previous && typeof parsed.previous === 'object'
+      ? {
+        inputTokens: finiteNumber((parsed.previous as NumericUsage).inputTokens),
+        cachedInputTokens: finiteNumber((parsed.previous as NumericUsage).cachedInputTokens),
+        cacheCreationInputTokens: finiteNumber((parsed.previous as NumericUsage).cacheCreationInputTokens),
+        outputTokens: finiteNumber((parsed.previous as NumericUsage).outputTokens),
+        reasoningOutputTokens: finiteNumber((parsed.previous as NumericUsage).reasoningOutputTokens),
+        totalTokens: finiteNumber((parsed.previous as NumericUsage).totalTokens),
+      }
+      : null;
+    return {
+      parsedBytes: Math.max(0, parsed.parsedBytes),
+      sessionId: typeof parsed.sessionId === 'string' ? parsed.sessionId : null,
+      model: stableModel(parsed.model),
+      turnId: typeof parsed.turnId === 'string' ? parsed.turnId : null,
+      previous,
+      eventIndex: Math.max(0, parsed.eventIndex),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function scanCodexFile(
+  file: string,
+  since: number,
+  until: number,
+  initialCursor: CodexCursor | null = null,
+): { records: UsageRecord[]; cursor: CodexCursor } {
+  let bytes: Buffer;
+  try {
+    bytes = readFileSync(file);
+  } catch {
+    return { records: [], cursor: initialCursor ?? emptyCodexCursor() };
+  }
+  const start = initialCursor && initialCursor.parsedBytes <= bytes.length
+    ? initialCursor.parsedBytes
+    : 0;
+  const cursor = initialCursor && start > 0 ? { ...initialCursor } : emptyCodexCursor();
+  const content = bytes.subarray(start).toString('utf8');
+  const lines = content.split('\n');
+  const completeLines = Math.max(0, lines.length - 1);
   const result: UsageRecord[] = [];
-  for (const file of jsonlFiles(root, since)) {
-    let lines: string[];
+  let consumed = 0;
+  for (let index = 0; index < completeLines; index += 1) {
+    const line = lines[index]!;
+    consumed += Buffer.byteLength(line, 'utf8') + 1;
+    if (!line.trim()) continue;
+    let rootValue: unknown;
     try {
-      lines = readFileSync(file, 'utf8').split(/\r?\n/);
+      rootValue = JSON.parse(line);
     } catch {
       continue;
     }
-    let sessionId: string | null = null;
-    let model = 'unknown';
-    let turnId: string | null = null;
-    let previous: NumericUsage | null = null;
-    let eventIndex = 0;
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      let rootValue: unknown;
-      try {
-        rootValue = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      if (!rootValue || typeof rootValue !== 'object') continue;
-      const rootRecord = rootValue as Record<string, unknown>;
-      const payload = rootRecord.payload;
-      if (!payload || typeof payload !== 'object') continue;
-      const payloadRecord = payload as Record<string, unknown>;
-      if (rootRecord.type === 'session_meta') {
-        const session = payloadRecord.session_id ?? payloadRecord.id;
-        if (typeof session === 'string') sessionId = session;
-      }
-      if (rootRecord.type === 'turn_context') {
-        model = stableModel(payloadRecord.model);
-        turnId = typeof payloadRecord.turn_id === 'string' ? payloadRecord.turn_id : null;
-        previous = null;
-      }
-      if (rootRecord.type !== 'event_msg' || payloadRecord.type !== 'token_count') continue;
-      const info = payloadRecord.info;
-      if (!info || typeof info !== 'object') continue;
-      const usageValue = (info as Record<string, unknown>).last_token_usage;
-      if (!usageValue || typeof usageValue !== 'object') continue;
-      const current = usageFromRecord(usageValue as Record<string, unknown>);
-      const delta = subtractUsage(current, previous);
-      previous = current;
-      if (!hasTokens(delta)) continue;
-      const timestamp = parseTimestamp(rootRecord.timestamp, Date.now());
-      if (!inRange(timestamp, since, until)) continue;
-      eventIndex += 1;
-      result.push(record(
-        `local:codex:${file}:${eventIndex}`,
-        'codex',
-        model,
-        timestamp,
-        delta,
-        'local',
-        'measured',
-        { sessionId, project: null },
-      ));
-      void turnId;
+    if (!rootValue || typeof rootValue !== 'object') continue;
+    const rootRecord = rootValue as Record<string, unknown>;
+    const payload = rootRecord.payload;
+    if (!payload || typeof payload !== 'object') continue;
+    const payloadRecord = payload as Record<string, unknown>;
+    if (rootRecord.type === 'session_meta') {
+      const session = payloadRecord.session_id ?? payloadRecord.id;
+      if (typeof session === 'string') cursor.sessionId = session;
     }
+    if (rootRecord.type === 'turn_context') {
+      cursor.model = stableModel(payloadRecord.model);
+      cursor.turnId = typeof payloadRecord.turn_id === 'string' ? payloadRecord.turn_id : null;
+      cursor.previous = null;
+    }
+    if (rootRecord.type !== 'event_msg' || payloadRecord.type !== 'token_count') continue;
+    const info = payloadRecord.info;
+    if (!info || typeof info !== 'object') continue;
+    const usageValue = (info as Record<string, unknown>).last_token_usage;
+    if (!usageValue || typeof usageValue !== 'object') continue;
+    const current = usageFromRecord(usageValue as Record<string, unknown>);
+    const delta = subtractUsage(current, cursor.previous);
+    cursor.previous = current;
+    if (!hasTokens(delta)) continue;
+    const timestamp = parseTimestamp(rootRecord.timestamp, Date.now());
+    if (!inRange(timestamp, since, until)) continue;
+    cursor.eventIndex += 1;
+    result.push(record(
+      `local:codex:${file}:${cursor.eventIndex}`,
+      'codex',
+      cursor.model,
+      timestamp,
+      delta,
+      'local',
+      'measured',
+      { sessionId: cursor.sessionId, project: null, sourceFile: file },
+    ));
+  }
+  cursor.parsedBytes = start + consumed;
+  return { records: result, cursor };
+}
+
+export function scanCodexLogs(root: string, since = Date.now() - 30 * DAY_MS, until = Date.now()): UsageRecord[] {
+  const result: UsageRecord[] = [];
+  for (const file of jsonlFiles(root, since)) {
+    result.push(...scanCodexFile(file, since, until).records);
   }
   return result;
 }
@@ -611,7 +697,7 @@ export function scanClaudeLogs(
         normalized,
         'local',
         'measured',
-        { project },
+        { project, sourceFile: file },
       );
       const previous = byMessage.get(dedupeKey);
       if (!previous || candidate.timestamp >= previous.timestamp) byMessage.set(dedupeKey, candidate);
@@ -759,47 +845,200 @@ export function defaultUsageRange(days = 30): { since: number; until: number } {
   return { since: until - Math.min(365, Math.max(1, days)) * DAY_MS, until };
 }
 
-export async function collectUsageReport(store: Store, options: CollectUsageOptions = {}): Promise<UsageReport> {
-  const range = {
-    since: options.since ?? defaultUsageRange(30).since,
-    until: options.until ?? Date.now(),
+function dshFiles(root: string, since: number): string[] {
+  if (!existsSync(root)) return [];
+  try {
+    if (statSync(root).isFile()) {
+      return root.endsWith('.jsonl') || root.endsWith('.jsonl.zstd') ? [root] : [];
+    }
+  } catch {
+    return [];
+  }
+  const result = filesForRoot(root, since);
+  const visit = (dir: string): void => {
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        visit(path);
+      } else if (entry.isFile() && entry.name.endsWith('.jsonl.zstd')) {
+        try {
+          if (statSync(path).mtimeMs >= since - 2 * DAY_MS) result.push(path);
+        } catch {
+          /* file may be rotated while scanning */
+        }
+      }
+    }
   };
+  visit(root);
+  return [...new Set(result)].sort();
+}
+
+function grokLogFile(root: string): string {
+  try {
+    if (existsSync(root) && statSync(root).isFile()) return root;
+  } catch {
+    return root;
+  }
+  return join(root, 'logs', 'unified.jsonl');
+}
+
+interface LocalScanFile extends UsageScanFile {
+  project?: string | null;
+}
+
+function localScanFiles(options: CollectUsageOptions, since: number): LocalScanFile[] {
   const codexRoot = options.codexRoot ?? process.env.CODEX_HOME ?? join(homedir(), '.codex');
   const claudeRoots = options.claudeRoots ?? [
     process.env.CLAUDE_CONFIG_DIR ? join(process.env.CLAUDE_CONFIG_DIR, 'projects') : '',
     join(homedir(), '.config', 'claude', 'projects'),
     join(homedir(), '.claude', 'projects'),
   ].filter(Boolean);
-  const local = [
-    ...scanCodexLogs(codexRoot, range.since, range.until),
-    ...claudeRoots.flatMap((root) => scanClaudeLogs(root, range.since, range.until)),
-    ...scanZcodeLogs(
-      options.zcodeRoot ?? process.env.ZCODE_HOME ?? join(homedir(), '.zcode', 'cli'),
-      range.since,
-      range.until,
-    ),
-    ...scanKimiCliLogs(
-      options.kimiRoot ?? process.env.KIMI_CODE_HOME ?? join(homedir(), '.kimi-code'),
-      range.since,
-      range.until,
-    ),
-    ...scanGrokLogs(
-      options.grokRoot ?? process.env.GROK_HOME ?? join(homedir(), '.grok'),
-      range.since,
-      range.until,
-    ),
-    ...scanDshLogs(
-      options.dshRoot ?? process.env.DSH_HOME ?? join(homedir(), '.dsh', 'sessions'),
-      range.since,
-      range.until,
-    ),
-    ...scanDroidLogs(
-      options.droidRoot ?? process.env.FACTORY_HOME ?? join(homedir(), '.factory', 'sessions'),
-      range.since,
-      range.until,
-    ),
+  const roots: Array<{ provider: string; files: string[]; project?: string | null }> = [
+    { provider: 'codex', files: jsonlFiles(codexRoot, since) },
+    ...claudeRoots.map((root) => ({ provider: 'claude', files: jsonlFiles(root, since), project: null })),
+    {
+      provider: 'zcode',
+      files: filesForRoot(
+        options.zcodeRoot ?? process.env.ZCODE_HOME ?? join(homedir(), '.zcode', 'cli'),
+        since,
+      ),
+    },
+    {
+      provider: 'kimi-cli',
+      files: filesForRoot(
+        options.kimiRoot ?? process.env.KIMI_CODE_HOME ?? join(homedir(), '.kimi-code'),
+        since,
+      ),
+    },
+    {
+      provider: 'grok-cli',
+      files: filesForRoot(
+        grokLogFile(options.grokRoot ?? process.env.GROK_HOME ?? join(homedir(), '.grok')),
+        since,
+      ),
+    },
+    {
+      provider: 'dsh',
+      files: dshFiles(options.dshRoot ?? process.env.DSH_HOME ?? join(homedir(), '.dsh', 'sessions'), since),
+    },
   ];
+  return roots.flatMap(({ provider, files, project }) => files.flatMap((path) => {
+    try {
+      const stat = statSync(path);
+      return [{
+        path,
+        provider,
+        project,
+        size: stat.size,
+        mtimeMs: stat.mtimeMs,
+        scannedAt: 0,
+        scannedSince: 0,
+        parsedBytes: 0,
+        cursorJson: null,
+      }];
+    } catch {
+      return [];
+    }
+  }));
+}
+
+function scanLocalFile(
+  file: LocalScanFile,
+  since: number,
+  until: number,
+): UsageRecord[] {
+  switch (file.provider) {
+    case 'codex':
+      return scanCodexLogs(file.path, since, until);
+    case 'claude':
+      return scanClaudeLogs(file.path, since, until, file.project ?? null);
+    case 'zcode':
+      return scanZcodeLogs(file.path, since, until);
+    case 'kimi-cli':
+      return scanKimiCliLogs(file.path, since, until);
+    case 'grok-cli':
+      return scanGrokLogs(file.path, since, until);
+    case 'dsh':
+      return scanDshLogs(file.path, since, until);
+    default:
+      return [];
+  }
+}
+
+export async function collectUsageReport(store: Store, options: CollectUsageOptions = {}): Promise<UsageReport> {
+  const range = {
+    since: options.since ?? defaultUsageRange(30).since,
+    until: options.until ?? Date.now(),
+  };
+  const needsMigration = store.hasUnattributedLocalUsageRecords();
+  const migrationSince = needsMigration
+    ? Math.min(range.since, store.oldestUnattributedLocalUsageTimestamp() ?? range.since)
+    : range.since;
+  if (needsMigration) store.clearLocalUsageRecords();
+  const cached = new Map(store.getUsageScanFiles().map((file) => [file.path, file]));
+  const discovered = localScanFiles(options, migrationSince);
+  const changed = discovered.filter((file) => {
+    const previous = cached.get(file.path);
+    return !previous
+      || previous.size !== file.size
+      || previous.mtimeMs !== file.mtimeMs
+      || previous.scannedSince > migrationSince
+      || (file.provider === 'codex' && parseCodexCursor(previous.cursorJson) == null);
+  });
+  const replacements: Array<{
+    file: LocalScanFile;
+    records: UsageRecord[];
+    scannedSince: number;
+    parsedBytes?: number;
+    cursorJson?: string | null;
+  }> = [];
+  for (const file of changed) {
+    const previous = cached.get(file.path);
+    const cursor = previous?.provider === 'codex'
+      ? parseCodexCursor(previous.cursorJson)
+      : null;
+    const canAppend = file.provider === 'codex'
+      && previous != null
+      && cursor != null
+      && file.size > previous.size
+      && file.size >= cursor.parsedBytes
+      && previous.scannedSince <= migrationSince;
+    if (canAppend) {
+      const result = scanCodexFile(file.path, migrationSince, range.until, cursor);
+      store.appendUsageRecordsForFile(
+        file,
+        result.records,
+        migrationSince,
+        result.cursor.parsedBytes,
+        JSON.stringify(result.cursor),
+      );
+      continue;
+    }
+    if (file.provider === 'codex') {
+      const result = scanCodexFile(file.path, migrationSince, range.until);
+      replacements.push({
+        file,
+        records: result.records,
+        scannedSince: migrationSince,
+        parsedBytes: result.cursor.parsedBytes,
+        cursorJson: JSON.stringify(result.cursor),
+      });
+    } else {
+      replacements.push({
+        file,
+        records: scanLocalFile(file, migrationSince, range.until),
+        scannedSince: migrationSince,
+      });
+    }
+  }
+  store.replaceUsageRecordsForFiles(replacements);
   const official = options.includeOfficial === false ? [] : await fetchOfficialUsage(range);
-  store.upsertUsageRecords([...local, ...official]);
+  store.upsertUsageRecords(official);
   return store.getUsageReport(range.since, range.until);
 }

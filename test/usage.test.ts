@@ -1,10 +1,11 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openMemoryDb } from '../src/db.ts';
 import {
   buildUsageReport,
+  collectUsageReport,
   scanClaudeLogs,
   scanCodexLogs,
   scanDroidLogs,
@@ -348,6 +349,100 @@ describe('local token usage scanners', () => {
 });
 
 describe('usage report', () => {
+  test('incremental collection replaces changed files without duplicating old rows', async () => {
+    const root = tempRoot();
+    const zcodeRoot = join(root, 'zcode');
+    mkdirSync(zcodeRoot, { recursive: true });
+    const file = join(zcodeRoot, 'model-io.jsonl');
+    const row = (requestId: string, outputTokens: number) => ({
+      type: 'model_io',
+      requestId,
+      completedAt: `${DAY}T10:00:00.000Z`,
+      model: { modelId: 'glm-5.3' },
+      response: { usage: { inputTokens: 10, outputTokens, totalTokens: 10 + outputTokens } },
+    });
+
+    try {
+      writeFileSync(file, jsonl([row('request-1', 2), row('request-2', 3)]), 'utf8');
+      const store = openMemoryDb();
+      const options = {
+        since: SINCE,
+        until: UNTIL,
+        includeOfficial: false,
+        codexRoot: join(root, 'codex'),
+        claudeRoots: [join(root, 'claude')],
+        zcodeRoot,
+        kimiRoot: join(root, 'kimi'),
+        grokRoot: join(root, 'grok'),
+        dshRoot: join(root, 'dsh'),
+        droidRoot: join(root, 'droid'),
+      };
+
+      await collectUsageReport(store, options);
+      expect(store.getUsageRecords(SINCE, UNTIL)).toHaveLength(2);
+
+      writeFileSync(file, jsonl([row('request-2', 3)]), 'utf8');
+      await collectUsageReport(store, options);
+
+      const records = store.getUsageRecords(SINCE, UNTIL);
+      expect(records).toHaveLength(1);
+      expect(records[0]?.id).toContain('request-2');
+      expect(records[0]?.totalTokens).toBe(13);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('Codex append collection resumes from the persisted byte cursor', async () => {
+    const root = tempRoot();
+    const codexRoot = join(root, 'codex');
+    const codexDay = join(codexRoot, '2026', '08', '18');
+    mkdirSync(codexDay, { recursive: true });
+    const file = join(codexDay, 'rollout.jsonl');
+    const event = (inputTokens: number, outputTokens: number) => JSON.stringify({
+      type: 'event_msg',
+      timestamp: `${DAY}T10:00:00.000Z`,
+      payload: {
+        type: 'token_count',
+        info: { last_token_usage: { input_tokens: inputTokens, output_tokens: outputTokens, total_tokens: inputTokens + outputTokens } },
+      },
+    }) + '\n';
+
+    try {
+      writeFileSync(file, JSON.stringify({
+        type: 'turn_context',
+        payload: { model: 'gpt-5', turn_id: 'turn-1' },
+      }) + '\n' + event(10, 1), 'utf8');
+      const store = openMemoryDb();
+      const options = {
+        since: SINCE,
+        until: UNTIL,
+        includeOfficial: false,
+        codexRoot,
+        claudeRoots: [],
+        zcodeRoot: join(root, 'zcode'),
+        kimiRoot: join(root, 'kimi'),
+        grokRoot: join(root, 'grok'),
+        dshRoot: join(root, 'dsh'),
+        droidRoot: join(root, 'droid'),
+      };
+
+      await collectUsageReport(store, options);
+      const cursor = store.getUsageScanFiles('codex')[0];
+      expect(cursor?.parsedBytes).toBeGreaterThan(0);
+      expect(cursor?.cursorJson).toContain('"eventIndex":1');
+
+      appendFileSync(file, event(15, 2), 'utf8');
+      await collectUsageReport(store, options);
+
+      const records = store.getUsageRecords(SINCE, UNTIL);
+      expect(records).toHaveLength(2);
+      expect(records.map((record) => record.totalTokens)).toEqual([11, 6]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test('aggregates local and official records without merging their provenance', () => {
     const records: UsageRecord[] = [
       {

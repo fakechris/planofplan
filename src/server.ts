@@ -1,9 +1,7 @@
 import { Hono } from 'hono';
-import { existsSync, unlinkSync } from 'node:fs';
 import { join, resolve, isAbsolute } from 'node:path';
 import type { AppConfig } from './config.ts';
-import { ensureHome } from './config.ts';
-import { openDb, type Store } from './db.ts';
+import type { Store } from './db.ts';
 import type { Scheduler } from './core.ts';
 import { buildOverview } from './core.ts';
 import { writeCredential, deleteCredential } from './auth.ts';
@@ -25,15 +23,12 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     if (usageRefreshProcess) return;
     usageRefreshError = null;
     usageRefreshStartedAt = Date.now();
-    const scanDbPath = join(ensureHome(), `.usage-scan-${Date.now()}.db`);
     const scanProcess = Bun.spawn([
       process.execPath,
       join(import.meta.dir, 'cli.ts'),
       'tokens',
       '--days',
       String(days),
-      '--db',
-      scanDbPath,
       ...(includeOfficial ? [] : ['--no-official']),
     ], {
       stdout: 'ignore',
@@ -44,22 +39,12 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
       .then((exitCode) => {
         if (exitCode !== 0) {
           usageRefreshError = `本地日志扫描失败（exit ${exitCode}）`;
-          return;
-        }
-        const scanStore = openDb(scanDbPath);
-        try {
-          store.upsertUsageRecords(scanStore.getUsageRecords(0, Date.now() + 1));
-        } finally {
-          scanStore.close();
         }
       })
       .catch((error) => {
         usageRefreshError = error instanceof Error ? error.message : '本地日志扫描失败';
       })
       .finally(() => {
-        if (existsSync(scanDbPath)) {
-          try { unlinkSync(scanDbPath); } catch { /* best effort cleanup */ }
-        }
         usageRefreshProcess = null;
         usageRefreshStartedAt = null;
       });

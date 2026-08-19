@@ -1,5 +1,12 @@
 import { Database } from 'bun:sqlite';
-import type { PlanConfig, PlanStateRow, QuotaWindow, UsageRecord, UsageReport } from './types.ts';
+import type {
+  PlanConfig,
+  PlanStateRow,
+  QuotaWindow,
+  UsageRecord,
+  UsageReport,
+  UsageScanFile,
+} from './types.ts';
 import { buildUsageReport } from './usage.ts';
 
 const SCHEMA = `
@@ -45,6 +52,7 @@ CREATE TABLE IF NOT EXISTS usage_records (
   model TEXT NOT NULL,
   session_id TEXT,
   project TEXT,
+  source_file TEXT,
   input_tokens INTEGER NOT NULL DEFAULT 0,
   cached_input_tokens INTEGER NOT NULL DEFAULT 0,
   cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
@@ -60,6 +68,17 @@ CREATE TABLE IF NOT EXISTS usage_records (
 );
 CREATE INDEX IF NOT EXISTS idx_usage_records_time ON usage_records(timestamp);
 CREATE INDEX IF NOT EXISTS idx_usage_records_provider_model ON usage_records(provider, model, timestamp);
+CREATE TABLE IF NOT EXISTS usage_scan_files (
+  path TEXT PRIMARY KEY,
+  provider TEXT NOT NULL,
+  size INTEGER NOT NULL,
+  mtime_ms REAL NOT NULL,
+  scanned_at INTEGER NOT NULL,
+  scanned_since INTEGER NOT NULL,
+  parsed_bytes INTEGER NOT NULL DEFAULT 0,
+  cursor_json TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_usage_scan_files_provider ON usage_scan_files(provider);
 `;
 
 interface SnapshotRow {
@@ -95,6 +114,27 @@ export class Store {
     db.exec(SCHEMA);
     try {
       db.exec('ALTER TABLE usage_records ADD COLUMN fetched_at INTEGER');
+    } catch {
+      // Existing databases already have the column, or were created by the current schema.
+    }
+    try {
+      db.exec('ALTER TABLE usage_records ADD COLUMN source_file TEXT');
+    } catch {
+      // Existing databases already have the column, or were created by the current schema.
+    }
+    db.exec('CREATE INDEX IF NOT EXISTS idx_usage_records_source_file ON usage_records(source, source_file)');
+    try {
+      db.exec('ALTER TABLE usage_scan_files ADD COLUMN scanned_since INTEGER NOT NULL DEFAULT 0');
+    } catch {
+      // Existing databases already have the column, or were created by the current schema.
+    }
+    try {
+      db.exec('ALTER TABLE usage_scan_files ADD COLUMN parsed_bytes INTEGER NOT NULL DEFAULT 0');
+    } catch {
+      // Existing databases already have the column, or were created by the current schema.
+    }
+    try {
+      db.exec('ALTER TABLE usage_scan_files ADD COLUMN cursor_json TEXT');
     } catch {
       // Existing databases already have the column, or were created by the current schema.
     }
@@ -426,13 +466,25 @@ export class Store {
 
   upsertUsageRecords(records: UsageRecord[]): void {
     if (records.length === 0) return;
+    this.db.exec('BEGIN');
+    try {
+      this.writeUsageRecords(records, Date.now());
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  private writeUsageRecords(records: UsageRecord[], updatedAt: number): void {
     const stmt = this.db.query(
       `INSERT INTO usage_records (
          id, day, timestamp, provider, model, session_id, project,
+         source_file,
          input_tokens, cached_input_tokens, cache_creation_input_tokens,
          output_tokens, reasoning_output_tokens, total_tokens,
          billable_tokens, estimated_cost_usd, source, confidence, fetched_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          day = excluded.day,
          timestamp = excluded.timestamp,
@@ -440,6 +492,7 @@ export class Store {
          model = excluded.model,
          session_id = excluded.session_id,
          project = excluded.project,
+         source_file = excluded.source_file,
          input_tokens = excluded.input_tokens,
          cached_input_tokens = excluded.cached_input_tokens,
          cache_creation_input_tokens = excluded.cache_creation_input_tokens,
@@ -453,32 +506,187 @@ export class Store {
          fetched_at = excluded.fetched_at,
          updated_at = excluded.updated_at`,
     );
-    const updatedAt = Date.now();
+    for (const record of records) {
+      stmt.run(
+        record.id,
+        record.day,
+        record.timestamp,
+        record.provider,
+        record.model,
+        record.sessionId ?? null,
+        record.project ?? null,
+        record.sourceFile ?? null,
+        record.inputTokens,
+        record.cachedInputTokens,
+        record.cacheCreationInputTokens,
+        record.outputTokens,
+        record.reasoningOutputTokens,
+        record.totalTokens,
+        record.billableTokens,
+        record.estimatedCostUsd,
+        record.source,
+        record.confidence,
+        record.fetchedAt ?? null,
+        updatedAt,
+      );
+    }
+  }
+
+  hasUnattributedLocalUsageRecords(): boolean {
+    const row = this.db.query(
+      `SELECT 1 AS present FROM usage_records WHERE source = 'local' AND source_file IS NULL LIMIT 1`,
+    ).get() as { present?: number } | null;
+    return row?.present === 1;
+  }
+
+  oldestUnattributedLocalUsageTimestamp(): number | null {
+    const row = this.db.query(
+      `SELECT MIN(timestamp) AS timestamp
+       FROM usage_records
+       WHERE source = 'local' AND source_file IS NULL`,
+    ).get() as { timestamp?: number | null } | null;
+    return row?.timestamp == null ? null : Number(row.timestamp);
+  }
+
+  clearLocalUsageRecords(): void {
     this.db.exec('BEGIN');
     try {
-      for (const record of records) {
-        stmt.run(
-          record.id,
-          record.day,
-          record.timestamp,
-          record.provider,
-          record.model,
-          record.sessionId ?? null,
-          record.project ?? null,
-          record.inputTokens,
-          record.cachedInputTokens,
-          record.cacheCreationInputTokens,
-          record.outputTokens,
-          record.reasoningOutputTokens,
-          record.totalTokens,
-          record.billableTokens,
-          record.estimatedCostUsd,
-          record.source,
-          record.confidence,
-          record.fetchedAt ?? null,
-          updatedAt,
+      this.db.exec(`DELETE FROM usage_records WHERE source = 'local'`);
+      this.db.exec(`DELETE FROM usage_scan_files`);
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  getUsageScanFiles(provider?: string): UsageScanFile[] {
+    const rows = provider
+      ? this.db.query(
+        `SELECT path, provider, size, mtime_ms, scanned_at, scanned_since, parsed_bytes, cursor_json
+         FROM usage_scan_files WHERE provider = ?`,
+      ).all(provider)
+      : this.db.query(
+        `SELECT path, provider, size, mtime_ms, scanned_at, scanned_since, parsed_bytes, cursor_json
+         FROM usage_scan_files`,
+      ).all() as Array<{
+        path: string;
+        provider: string;
+        size: number;
+        mtime_ms: number;
+        scanned_at: number;
+      }>;
+    return (rows as Array<{
+      path: string;
+      provider: string;
+      size: number;
+      mtime_ms: number;
+      scanned_at: number;
+      scanned_since: number;
+      parsed_bytes: number;
+      cursor_json: string | null;
+    }>).map((row) => ({
+      path: row.path,
+      provider: row.provider,
+      size: row.size,
+      mtimeMs: row.mtime_ms,
+      scannedAt: row.scanned_at,
+      scannedSince: row.scanned_since,
+      parsedBytes: row.parsed_bytes,
+      cursorJson: row.cursor_json,
+    }));
+  }
+
+  replaceUsageRecordsForFiles(
+    files: Array<{
+      file: Pick<UsageScanFile, 'path' | 'provider' | 'size' | 'mtimeMs'>;
+      records: UsageRecord[];
+      scannedSince: number;
+      parsedBytes?: number;
+      cursorJson?: string | null;
+    }>,
+  ): void {
+    if (files.length === 0) return;
+    this.db.exec('BEGIN');
+    try {
+      const deleteRecords = this.db.query(
+        `DELETE FROM usage_records WHERE source = 'local' AND source_file = ?`,
+      );
+      const updateScan = this.db.query(
+        `INSERT INTO usage_scan_files (
+           path, provider, size, mtime_ms, scanned_at, scanned_since, parsed_bytes, cursor_json
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(path) DO UPDATE SET
+           provider = excluded.provider,
+           size = excluded.size,
+           mtime_ms = excluded.mtime_ms,
+           scanned_at = excluded.scanned_at,
+           scanned_since = excluded.scanned_since,
+           parsed_bytes = excluded.parsed_bytes,
+           cursor_json = excluded.cursor_json`,
+      );
+      const scannedAt = Date.now();
+      for (const item of files) {
+        deleteRecords.run(item.file.path);
+        this.writeUsageRecords(item.records, scannedAt);
+        updateScan.run(
+          item.file.path,
+          item.file.provider,
+          item.file.size,
+          item.file.mtimeMs,
+          scannedAt,
+          item.scannedSince,
+          item.parsedBytes ?? item.file.size,
+          item.cursorJson ?? null,
         );
       }
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  replaceUsageRecordsForFile(
+    file: Pick<UsageScanFile, 'path' | 'provider' | 'size' | 'mtimeMs'>,
+    records: UsageRecord[],
+    scannedSince = 0,
+  ): void {
+    this.replaceUsageRecordsForFiles([{ file, records, scannedSince, parsedBytes: file.size }]);
+  }
+
+  appendUsageRecordsForFile(
+    file: Pick<UsageScanFile, 'path' | 'provider' | 'size' | 'mtimeMs'>,
+    records: UsageRecord[],
+    scannedSince: number,
+    parsedBytes: number,
+    cursorJson: string,
+  ): void {
+    this.db.exec('BEGIN');
+    try {
+      if (records.length > 0) this.writeUsageRecords(records, Date.now());
+      this.db.query(
+        `INSERT INTO usage_scan_files (
+           path, provider, size, mtime_ms, scanned_at, scanned_since, parsed_bytes, cursor_json
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(path) DO UPDATE SET
+           provider = excluded.provider,
+           size = excluded.size,
+           mtime_ms = excluded.mtime_ms,
+           scanned_at = excluded.scanned_at,
+           scanned_since = excluded.scanned_since,
+           parsed_bytes = excluded.parsed_bytes,
+           cursor_json = excluded.cursor_json`,
+      ).run(
+        file.path,
+        file.provider,
+        file.size,
+        file.mtimeMs,
+        Date.now(),
+        scannedSince,
+        parsedBytes,
+        cursorJson,
+      );
       this.db.exec('COMMIT');
     } catch (error) {
       this.db.exec('ROLLBACK');
@@ -493,7 +701,7 @@ export class Store {
   getUsageRecords(since: number, until: number): UsageRecord[] {
     const rows = this.db
       .query(
-        `SELECT id, day, timestamp, provider, model, session_id, project,
+        `SELECT id, day, timestamp, provider, model, session_id, project, source_file,
                 input_tokens, cached_input_tokens, cache_creation_input_tokens,
                 output_tokens, reasoning_output_tokens, total_tokens,
                 billable_tokens, estimated_cost_usd, source, confidence
@@ -510,6 +718,7 @@ export class Store {
       model: string;
       session_id: string | null;
       project: string | null;
+      source_file: string | null;
       input_tokens: number;
       cached_input_tokens: number;
       cache_creation_input_tokens: number;
@@ -530,6 +739,7 @@ export class Store {
       model: row.model,
       sessionId: row.session_id,
       project: row.project,
+      sourceFile: row.source_file,
       inputTokens: row.input_tokens,
       cachedInputTokens: row.cached_input_tokens,
       cacheCreationInputTokens: row.cache_creation_input_tokens,

@@ -88,6 +88,7 @@ export interface UsageRecord {
   model: string;
   sessionId?: string | null;
   project?: string | null;
+  sourceFile?: string | null;
   inputTokens: number;
   cachedInputTokens: number;
   cacheCreationInputTokens: number;
@@ -99,6 +100,17 @@ export interface UsageRecord {
   source: UsageSource;
   confidence: UsageConfidence;
   fetchedAt?: number;
+}
+
+export interface UsageScanFile {
+  path: string;
+  provider: string;
+  size: number;
+  mtimeMs: number;
+  scannedAt: number;
+  scannedSince: number;
+  parsedBytes: number;
+  cursorJson?: string | null;
 }
 
 export interface UsageAggregate {
