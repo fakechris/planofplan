@@ -360,10 +360,13 @@ async function exchangeWorkOSRefreshToken(
   throw lastError instanceof Error ? lastError : new AdapterError('auth', 'WorkOS 鉴权失败');
 }
 
-async function credentialWithWorkOSAccessToken(credential: Credential): Promise<Credential> {
-  if (!credential.refreshToken || credential.value.trim()) return credential;
+async function credentialWithWorkOSAccessToken(
+  credential: Credential,
+  refreshToken = credential.refreshToken,
+): Promise<Credential> {
+  if (!refreshToken || credential.value.trim()) return credential;
   const tokens = await exchangeWorkOSRefreshToken(
-    credential.refreshToken,
+    refreshToken,
     credential.organizationId,
     credential.workosCookie,
   );
@@ -372,6 +375,7 @@ async function credentialWithWorkOSAccessToken(credential: Credential): Promise<
   updateFactoryWorkOSSession({
     accessToken,
     refreshToken: stringValue(tokens.refresh_token),
+    refreshTokenFallback: refreshToken,
     organizationId: credential.organizationId,
     workosCookie: credential.workosCookie,
   });
@@ -379,9 +383,26 @@ async function credentialWithWorkOSAccessToken(credential: Credential): Promise<
     ...credential,
     value: accessToken,
     refreshToken: stringValue(tokens.refresh_token) ?? credential.refreshToken,
+    refreshTokenFallback: refreshToken,
     organizationId: credential.organizationId,
     workosCookie: credential.workosCookie,
   };
+}
+
+async function refreshFactoryCredential(credential: Credential): Promise<Credential> {
+  const candidates = [credential.refreshToken, credential.refreshTokenFallback]
+    .filter((token): token is string => Boolean(token?.trim()))
+    .filter((token, index, all) => all.indexOf(token) === index);
+  let lastError: unknown = null;
+  for (const token of candidates) {
+    try {
+      return await credentialWithWorkOSAccessToken({ ...credential, value: '' }, token);
+    } catch (error) {
+      lastError = error;
+      if (!(error instanceof AdapterError) || error.kind !== 'auth') throw error;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new AdapterError('auth', 'WorkOS 鉴权失败');
 }
 
 export const factoryAdapter: PlanAdapter = {
@@ -405,6 +426,7 @@ export const factoryAdapter: PlanAdapter = {
           ?? (session.workosRefreshToken ? '' : session.bearerToken ?? ''),
         cookie: session.cookieHeader,
         refreshToken: session.workosRefreshToken,
+        refreshTokenFallback: session.workosRefreshTokenFallback,
         organizationId: session.organizationId,
         workosCookie: session.workosCookieHeader,
         source: `browser:${session.source}`,
@@ -417,7 +439,7 @@ export const factoryAdapter: PlanAdapter = {
     let activeCredential = credential;
     if (!activeCredential.value.trim() && activeCredential.refreshToken) {
       try {
-        activeCredential = await credentialWithWorkOSAccessToken(activeCredential);
+        activeCredential = await refreshFactoryCredential(activeCredential);
       } catch (error) {
         // WorkOS refresh tokens rotate. If a previous process redeemed the
         // browser token, the browser cookie remains an independent auth path.
@@ -438,10 +460,7 @@ export const factoryAdapter: PlanAdapter = {
 
       if (activeCredential.refreshToken && activeCredential.value.trim()) {
         try {
-          activeCredential = await credentialWithWorkOSAccessToken({
-            ...activeCredential,
-            value: '',
-          });
+          activeCredential = await refreshFactoryCredential(activeCredential);
           return fetchFactoryUsage(activeCredential);
         } catch (refreshError) {
           if (!activeCredential.cookie || !(refreshError instanceof AdapterError) || refreshError.kind !== 'auth') {

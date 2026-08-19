@@ -46,6 +46,8 @@ export interface Credential {
   source: string;
   /** OAuth refresh token supplied by a provider-owned credential store. */
   refreshToken?: string | null;
+  /** Previous browser refresh token kept as a one-step fallback after rotation. */
+  refreshTokenFallback?: string | null;
   /** WorkOS organization selected by the browser session, when present. */
   organizationId?: string | null;
   /** Browser cookies used by WorkOS when redeeming a browser refresh session. */

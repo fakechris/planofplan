@@ -2,7 +2,12 @@ import { describe, expect, test } from 'bun:test';
 import { normalizeFactoryBillingLimits, normalizeFactoryUsage } from '../src/adapters/factory.ts';
 import { factoryAdapter } from '../src/adapters/factory.ts';
 import { openMemoryDb } from '../src/db.ts';
-import { acceptFactoryBrowserCookies, clearFactoryBrowserSession, getFactoryBrowserSession } from '../src/factory-session.ts';
+import {
+  acceptFactoryBrowserCookies,
+  clearFactoryBrowserSession,
+  getFactoryBrowserSession,
+  updateFactoryWorkOSSession,
+} from '../src/factory-session.ts';
 import { createServer } from '../src/server.ts';
 
 describe('Factory usage', () => {
@@ -73,6 +78,7 @@ describe('Factory usage', () => {
       bearerToken: 'bearer-value',
       workosAccessToken: null,
       workosRefreshToken: null,
+      workosRefreshTokenFallback: null,
       organizationId: null,
       workosCookieHeader: null,
       source: 'Safari',
@@ -238,6 +244,40 @@ describe('Factory usage', () => {
       ]);
     } finally {
       globalThis.fetch = originalFetch;
+    }
+  });
+
+  test('reuses the rotated WorkOS refresh token after a process restart', async () => {
+    const home = await Bun.$`mktemp -d`.text();
+    const previousHome = process.env.PLANOFPPLAN_HOME;
+    process.env.PLANOFPPLAN_HOME = home.trim();
+    try {
+      clearFactoryBrowserSession();
+      expect(acceptFactoryBrowserCookies(
+        [{ name: 'session', value: 'browser-session' }],
+        'Comet (native)',
+        { refreshToken: 'browser-refresh-token' },
+      )).toBe(true);
+      updateFactoryWorkOSSession({
+        accessToken: 'rotated-access-token',
+        refreshToken: 'rotated-refresh-token',
+      });
+
+      clearFactoryBrowserSession();
+      expect(acceptFactoryBrowserCookies(
+        [{ name: 'session', value: 'browser-session' }],
+        'Comet (native)',
+        { refreshToken: 'browser-refresh-token' },
+      )).toBe(true);
+      expect(getFactoryBrowserSession()).toMatchObject({
+        workosRefreshToken: 'rotated-refresh-token',
+        workosRefreshTokenFallback: 'browser-refresh-token',
+      });
+    } finally {
+      clearFactoryBrowserSession();
+      if (previousHome == null) delete process.env.PLANOFPPLAN_HOME;
+      else process.env.PLANOFPPLAN_HOME = previousHome;
+      await Bun.$`rm -rf ${home}`.quiet();
     }
   });
 
