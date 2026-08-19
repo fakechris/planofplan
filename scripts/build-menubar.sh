@@ -67,7 +67,7 @@ cp "$PACKAGE/Info.plist" "$STAGED_APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :PlanofplanCommitShortSHA $SHORT_COMMIT_SHA" "$STAGED_APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :PlanofplanBuildTimestamp $BUILD_TIMESTAMP" "$STAGED_APP/Contents/Info.plist"
 printf '%s\n' "$ROOT" > "$STAGED_APP/Contents/Resources/project-root"
-printf '%s\n' "${PLANOFPPLAN_MENUBAR_PORT:-9288}" > "$STAGED_APP/Contents/Resources/port"
+printf '%s\n' "${PLANOFPPLAN_MENUBAR_PORT:-9291}" > "$STAGED_APP/Contents/Resources/port"
 
 if ! codesign --force --sign "$IDENTITY" --identifier "$IDENTIFIER" --timestamp=none "$STAGED_APP"; then
   echo "Failed to sign $STAGED_APP with $IDENTITY" >&2
