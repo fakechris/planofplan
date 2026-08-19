@@ -120,6 +120,12 @@ function usageSourceLabel(source, confidence) {
   return '本地日志';
 }
 
+function usageRangeLabel(report) {
+  if (!report?.since || !report?.until) return '所选范围';
+  const format = (value) => new Date(value).toISOString().slice(0, 16).replace('T', ' ');
+  return `${format(report.since)} – ${format(report.until)} UTC`;
+}
+
 function renderUsage(report) {
   const el = document.getElementById('usageReport');
   if (!el) return;
@@ -145,7 +151,7 @@ function renderUsage(report) {
       <small>${source.fetchedAt ? fmtAgo(source.fetchedAt, Date.now()) : ''}</small>
     </span>
   `).join('');
-  const models = report.models.slice(0, 10).map((model) => `
+  const models = report.models.map((model) => `
     <tr>
       <td>${escapeHtml(model.provider)}</td>
       <td class="model-cell">${escapeHtml(model.model)}</td>
@@ -160,7 +166,7 @@ function renderUsage(report) {
     </tr>
   `).join('');
   const dailyMax = Math.max(1, ...report.daily.map((day) => day.totalTokens));
-  const dailyHtml = report.daily.slice(0, 14).map((day) => `
+  const dailyHtml = report.daily.map((day) => `
     <div class="daily-row">
       <span>${escapeHtml(day.day || '--')}</span>
       <div class="daily-track"><i style="width:${Math.max(2, day.totalTokens / dailyMax * 100)}%"></i></div>
@@ -177,11 +183,11 @@ function renderUsage(report) {
     </div>
     <div class="usage-grid">
       <div class="usage-panel">
-        <div class="panel-title">Daily activity <span>按 UTC 日期</span></div>
+        <div class="panel-title">Daily activity <span>${usageRangeLabel(report)} · 按 UTC 日期</span></div>
         <div class="daily-list">${dailyHtml || '<span class="muted">暂无日数据</span>'}</div>
       </div>
       <div class="usage-panel usage-table-panel">
-        <div class="panel-title">Model breakdown <span>成本按可用价格表估算</span></div>
+        <div class="panel-title">Model breakdown <span>${report.models.length} 个模型 · 全部显示</span></div>
         <div class="table-scroll">
           <table>
             <thead><tr><th>Provider</th><th>Model</th><th>Input</th><th>Cache read</th><th>Cache create</th><th>Output</th><th>Reasoning</th><th>Total</th><th>Cost</th><th>Source</th></tr></thead>
@@ -190,7 +196,7 @@ function renderUsage(report) {
         </div>
       </div>
     </div>
-    <div class="usage-note">${scanNote}</div>
+    <div class="usage-note">${scanNote} 范围：${usageRangeLabel(report)}；左侧配额窗口单独计算。</div>
   `;
 }
 
@@ -555,19 +561,61 @@ setInterval(render, 30_000);
 
 document.getElementById('usageDays')?.addEventListener('change', () => { void render(); });
 
+let usageScanPollTimer = null;
+
+function stopUsageScanPolling() {
+  if (usageScanPollTimer != null) {
+    clearTimeout(usageScanPollTimer);
+    usageScanPollTimer = null;
+  }
+}
+
+function finishUsageScan(state) {
+  stopUsageScanPolling();
+  const btn = document.getElementById('usageScanBtn');
+  if (btn) {
+    btn.disabled = false;
+    btn.textContent = '扫描本地日志';
+  }
+  if (state === 'error') showToast('本地日志扫描失败，请查看 Usage 提示。', true);
+  else showToast('本地日志扫描完成，Usage & Spend 已更新。');
+}
+
+async function pollUsageScan(days) {
+  try {
+    const report = await request(`/api/usage?days=${encodeURIComponent(days)}`);
+    latestUsage = report;
+    renderUsage(report);
+    if (report.scanStatus?.state === 'running') {
+      usageScanPollTimer = setTimeout(() => { void pollUsageScan(days); }, 1500);
+      return;
+    }
+    await render();
+    finishUsageScan(report.scanStatus?.state);
+  } catch (error) {
+    finishUsageScan('error');
+    showToast(error.message, true);
+  }
+}
+
 document.getElementById('usageScanBtn')?.addEventListener('click', async () => {
   const btn = document.getElementById('usageScanBtn');
   const days = document.getElementById('usageDays')?.value || '30';
+  stopUsageScanPolling();
   btn.disabled = true;
   btn.textContent = '扫描中…';
   try {
-    await request(`/api/usage?days=${encodeURIComponent(days)}&refresh=1`);
-    await render();
-    showToast('本地日志扫描已启动，完成后 Usage & Spend 会自动更新。');
+    const report = await request(`/api/usage?days=${encodeURIComponent(days)}&refresh=1`);
+    latestUsage = report;
+    renderUsage(report);
+    if (report.scanStatus?.state === 'running') {
+      usageScanPollTimer = setTimeout(() => { void pollUsageScan(days); }, 1500);
+    } else {
+      await render();
+      finishUsageScan(report.scanStatus?.state);
+    }
   } catch (error) {
+    finishUsageScan('error');
     showToast(error.message, true);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = '扫描本地日志';
   }
 });

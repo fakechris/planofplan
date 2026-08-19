@@ -152,7 +152,7 @@ h1 { margin: 0; font-size: clamp(28px, 4vw, 44px); letter-spacing: -.045em; line
 .usage-panel { min-width: 0; padding: 16px 17px; background: var(--surface); }
 .panel-title { margin-bottom: 14px; color: var(--brand); font-size: 11px; font-weight: 700; letter-spacing: .04em; }
 .panel-title span { float: right; color: var(--faint); font-weight: 400; letter-spacing: 0; }
-.daily-list { display: flex; flex-direction: column; gap: 10px; }
+.daily-list { display: flex; flex-direction: column; gap: 10px; max-height: 390px; overflow-y: auto; padding-right: 4px; }
 .daily-row { display: grid; grid-template-columns: 72px minmax(60px, 1fr) 45px; gap: 8px; align-items: center; color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
 .daily-row b { color: var(--brand); text-align: right; font-weight: 600; }
 .daily-track { height: 5px; overflow: hidden; border-radius: 2px; background: var(--surface-soft); }

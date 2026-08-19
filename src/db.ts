@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS snapshots (
   note TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_snapshots_latest ON snapshots(plan_id, window, fetched_at DESC);
+CREATE INDEX IF NOT EXISTS idx_snapshots_plan_fetched ON snapshots(plan_id, fetched_at DESC);
 CREATE TABLE IF NOT EXISTS plan_state (
   plan_id TEXT PRIMARY KEY,
   last_success_at INTEGER,
@@ -325,9 +326,11 @@ export class Store {
 
   /** 每个稳定窗口（或额外模型车道）的最新一条；标签变化不应制造重复窗口。 */
   latestByPlan(planId: string, latestBatchOnly = false): QuotaWindow[] {
-    const batchFilter = latestBatchOnly
-      ? ' AND s.fetched_at = (SELECT MAX(previous.fetched_at) FROM snapshots previous WHERE previous.plan_id = s.plan_id)'
-      : '';
+    const latestFetchedAt = latestBatchOnly
+      ? (this.db.query(`SELECT MAX(fetched_at) AS fetchedAt FROM snapshots WHERE plan_id = ?`).get(planId) as { fetchedAt?: number | null } | null)?.fetchedAt ?? null
+      : null;
+    if (latestBatchOnly && latestFetchedAt == null) return [];
+    const batchFilter = latestBatchOnly ? ' AND s.fetched_at = ?' : '';
     const rows = this.db
       .query(
         `SELECT * FROM (
@@ -357,7 +360,7 @@ export class Store {
            END,
            window, label`,
       )
-      .all(planId) as SnapshotRow[];
+      .all(...(latestBatchOnly ? [planId, latestFetchedAt] : [planId])) as SnapshotRow[];
     return rows.map(rowToWindow);
   }
 
