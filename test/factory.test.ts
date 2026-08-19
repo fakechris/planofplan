@@ -1,7 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import { normalizeFactoryBillingLimits, normalizeFactoryUsage } from '../src/adapters/factory.ts';
 import { factoryAdapter } from '../src/adapters/factory.ts';
+import { openMemoryDb } from '../src/db.ts';
 import { acceptFactoryBrowserCookies, clearFactoryBrowserSession, getFactoryBrowserSession } from '../src/factory-session.ts';
+import { createServer } from '../src/server.ts';
 
 describe('Factory usage', () => {
   test('normalizes CodexBar token-rate-limit windows', () => {
@@ -133,5 +135,35 @@ describe('Factory usage', () => {
       globalThis.fetch = originalFetch;
       clearFactoryBrowserSession();
     }
+  });
+
+  test('returns a failed status when browser-session refresh cannot fetch usage', async () => {
+    const plan = {
+      slug: 'factory',
+      name: 'Factory Droid',
+      adapter: 'factory',
+      enabled: true,
+      pollIntervalSec: 300,
+      credRef: null,
+      extra: {},
+    } as const;
+    const store = openMemoryDb();
+    store.syncPlan(plan);
+    const scheduler = {
+      refreshPlan: async () => ({ ok: false, slug: 'factory', error: 'auth failed' }),
+    };
+    const app = createServer(store, scheduler as never, { port: 9291, plans: [plan] });
+    const response = await app.request('http://localhost/api/browser-session', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        planSlug: 'factory',
+        browser: 'comet',
+        cookies: [{ name: 'session', value: 'browser-session' }],
+      }),
+    });
+    expect(response.status).toBe(502);
+    expect((await response.json() as { ok?: boolean }).ok).toBe(false);
+    clearFactoryBrowserSession();
   });
 });

@@ -468,7 +468,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         readBrowserSession(for: selection, persistSelection: true)
     }
 
-    private func readBrowserSession(for selection: BrowserSelection, persistSelection: Bool = false) {
+    private func readBrowserSession(
+        for selection: BrowserSelection,
+        persistSelection: Bool = false,
+        preferWorkOS: Bool = true
+    ) {
         let browser = selection.browser
         if persistSelection {
             UserDefaults.standard.set(browser, forKey: "\(selectedBrowserKey).\(selection.planSlug)")
@@ -485,7 +489,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     domainMatch: .suffix,
                     includeExpired: false
                 )
-                let workos = selection.planSlug == "factory"
+                let workos = preferWorkOS && selection.planSlug == "factory"
                     ? self.workOSCredentials(in: nativeBrowser)
                     : nil
                 if let workos {
@@ -499,7 +503,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     let body = try JSONEncoder().encode(payload)
                     self.request(path: "/api/browser-session", method: "POST", body: body) { [weak self] _, status in
                         NSLog("planofplan browser \(browser) \(selection.planSlug): session POST status \(status)")
-                        self?.refreshOverview()
+                        guard let self else { return }
+                        if (200..<300).contains(status) {
+                            self.refreshOverview()
+                        } else {
+                            NSLog("planofplan browser \(browser) factory: WorkOS failed, falling back to cookies")
+                            self.readBrowserSession(
+                                for: selection,
+                                persistSelection: false,
+                                preferWorkOS: false
+                            )
+                        }
                     }
                     return
                 }

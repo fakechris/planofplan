@@ -177,7 +177,10 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
       store.updatePlanExtra(planSlug, { browser: body.browser ?? null });
       kimiResult = await scheduler.refreshPlan(planSlug);
     }
-    const ok = kimiResult != null;
+    const ok = typeof kimiResult === 'object'
+      && kimiResult != null
+      && 'ok' in kimiResult
+      && (kimiResult as { ok?: unknown }).ok === true;
     return c.json(
       {
         ok,
