@@ -84,7 +84,9 @@ export function buildOverview(store: Store, configPlans: PlanConfig[], now: numb
 function buildPlanOverview(store: Store, plan: PlanConfig): OverviewPlan {
   const adapter = getAdapter(plan.adapter);
   const state = store.getState(plan.slug);
-  const windows = store.latestByPlan(plan.slug);
+  // A successful provider poll is one snapshot batch. Do not merge a new
+  // weekly-only Codex response with an older 5H row from a previous schema.
+  const windows = store.latestByPlan(plan.slug, true);
 
   let status: PlanStatus;
   let authStatus = state?.auth_status ?? AUTH_STATUS.UNKNOWN;

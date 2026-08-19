@@ -255,7 +255,10 @@ export class Store {
   }
 
   /** 每个稳定窗口（或额外模型车道）的最新一条；标签变化不应制造重复窗口。 */
-  latestByPlan(planId: string): QuotaWindow[] {
+  latestByPlan(planId: string, latestBatchOnly = false): QuotaWindow[] {
+    const batchFilter = latestBatchOnly
+      ? ' AND s.fetched_at = (SELECT MAX(previous.fetched_at) FROM snapshots previous WHERE previous.plan_id = s.plan_id)'
+      : '';
     const rows = this.db
       .query(
         `SELECT * FROM (
@@ -267,7 +270,7 @@ export class Store {
                END
              ORDER BY fetched_at DESC, id DESC
            ) rn
-           FROM snapshots s WHERE plan_id = ?
+           FROM snapshots s WHERE plan_id = ?${batchFilter}
          ) WHERE rn = 1 ORDER BY
            CASE
              WHEN window = 'rolling_5h' OR window LIKE 'standard_%' THEN 10

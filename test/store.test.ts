@@ -139,6 +139,21 @@ describe('Store', () => {
     expect(store.latestByPlan('glm')).toHaveLength(1);
   });
 
+  test('latestBatchOnly excludes windows omitted by the newest poll', () => {
+    const store = openMemoryDb();
+    store.syncPlan({ ...plan, slug: 'codex', adapter: 'codex', name: 'OpenAI Codex' });
+    const fiveHour = { ...win(94, 100), window: 'rolling_5h', label: '5小时限额' };
+    const weekly = { ...win(94, 200), window: 'weekly', label: '周限额' };
+    store.insertWindows('codex', [fiveHour], 100);
+    store.insertWindows('codex', [weekly], 200);
+
+    expect(store.latestByPlan('codex').map((window) => window.window)).toEqual([
+      'rolling_5h',
+      'weekly',
+    ]);
+    expect(store.latestByPlan('codex', true).map((window) => window.window)).toEqual(['weekly']);
+  });
+
   test('prune 删除早于保留期的快照', () => {
     const store = openMemoryDb();
     store.syncPlan(plan);

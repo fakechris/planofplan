@@ -6,8 +6,8 @@
  *   token 刷新归 Codex CLI 所有，本 adapter 只读不刷新（过期时提示运行 `codex` 重新登录）
  * - 端点：GET https://chatgpt.com/backend-api/wham/usage
  * - 头：Authorization: Bearer <token>；ChatGPT-Account-Id: <account_id>；User-Agent
- * - 响应：rate_limit.primary_window(used_percent, reset_at 秒, limit_window_seconds=18000→5h)
- *   + secondary_window(周) + credits(has_credits/unlimited/balance) + plan_type
+ * - 响应：rate_limit.primary_window/secondary_window(used_percent, reset_at 秒,
+ *   limit_window_seconds；实际窗口以该字段为准) + credits(has_credits/unlimited/balance) + plan_type
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';

@@ -78,3 +78,34 @@ describe('buildOverview plan filtering', () => {
     expect(all.plans.length).toBeGreaterThanOrEqual(2);
   });
 });
+
+describe('buildOverview current snapshot batch', () => {
+  test('does not merge an old Codex 5H row into a weekly-only refresh', () => {
+    const store = openMemoryDb();
+    const codex = DEFAULT_PLANS.find((item) => item.slug === 'codex')!;
+    store.syncPlan(codex);
+    store.insertWindows(codex.slug, [{
+      window: 'rolling_5h',
+      label: '5小时限额',
+      used: null,
+      total: null,
+      unit: 'percent',
+      percentage: 94,
+      resetAt: 1_800_000_000_000,
+      note: null,
+    }], 100);
+    store.insertWindows(codex.slug, [{
+      window: 'weekly',
+      label: '周限额',
+      used: null,
+      total: null,
+      unit: 'percent',
+      percentage: 94,
+      resetAt: 1_800_000_000_000,
+      note: null,
+    }], 200);
+
+    const overview = buildOverview(store, [codex], 300);
+    expect(overview.plans[0]!.windows.map((window) => window.window)).toEqual(['weekly']);
+  });
+});
