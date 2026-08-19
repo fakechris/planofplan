@@ -524,8 +524,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         workos: workos
                     )
                     let body = try JSONEncoder().encode(payload)
-                    self.request(path: "/api/browser-session", method: "POST", body: body) { [weak self] _, status in
+                    self.request(path: "/api/browser-session", method: "POST", body: body) { [weak self] data, status in
                         NSLog("planofplan browser \(browser) \(selection.planSlug): session POST status \(status)")
+                        if let data, let response = String(data: data, encoding: .utf8) {
+                            NSLog(
+                                "planofplan browser \(browser) \(selection.planSlug): "
+                                    + "session response \(String(response.prefix(600)))"
+                            )
+                        }
                         guard let self else { return }
                         if (200..<300).contains(status) {
                             self.refreshOverview()
@@ -547,8 +553,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     workos: workos
                 )
                 let body = try JSONEncoder().encode(payload)
-                self.request(path: "/api/browser-session", method: "POST", body: body) { [weak self] _, status in
+                self.request(path: "/api/browser-session", method: "POST", body: body) { [weak self] data, status in
                     NSLog("planofplan browser \(browser) \(selection.planSlug): session POST status \(status)")
+                    if let data, let response = String(data: data, encoding: .utf8) {
+                        NSLog(
+                            "planofplan browser \(browser) \(selection.planSlug): "
+                                + "session response \(String(response.prefix(600)))"
+                        )
+                    }
                     self?.refreshOverview()
                 }
             } catch {
@@ -573,9 +585,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         planSlug: String
     ) throws -> [BrowserCookiePayload] {
         let sources = try client.records(matching: query, in: nativeBrowser)
+        let recordNames = sources
+            .flatMap(\.records)
+            .map(\.name)
+            .joined(separator: ",")
         NSLog(
             "planofplan browser \(nativeBrowser.displayName) \(planSlug): found "
-                + "\(sources.reduce(0) { $0 + $1.records.count }) cookie records"
+                + "\(sources.reduce(0) { $0 + $1.records.count }) cookie records [\(recordNames)]"
         )
         let grouped = Dictionary(grouping: sources, by: { $0.store.profile.id })
         let sortedGroups = grouped.values.sorted {

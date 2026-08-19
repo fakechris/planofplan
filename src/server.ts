@@ -188,7 +188,10 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
       // first record is the live session.
       const candidates = normalizedCookies.filter((cookie) => cookie.name === 'kimi-auth');
       for (const candidate of candidates) {
-        if (!acceptKimiBrowserCookies([candidate], source, planSlug)) continue;
+        const candidateCookies = normalizedCookies
+          .filter((cookie) => cookie.name !== 'kimi-auth')
+          .concat(candidate);
+        if (!acceptKimiBrowserCookies(candidateCookies, source, planSlug)) continue;
         accepted = true;
         kimiResult = await scheduler.refreshPlan(planSlug);
         if (

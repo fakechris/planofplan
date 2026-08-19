@@ -407,6 +407,7 @@ function queryKimiAuthCookies(dbPath: string): string[] {
 }
 
 const browserSessions = new Map<string, { token: string; source: string }>();
+const browserCookieHeaders = new Map<string, string>();
 
 function readKimiDesktopAuthToken(): { token: string; source: string } | null {
   const desktopDb = kimiAuthCookieDbs().find((path) => path.includes('/kimi-desktop/'));
@@ -477,6 +478,9 @@ export async function refreshKimiBrowserSession(
 export function acceptKimiBrowserToken(token: string, source: string, planSlug = 'kimi'): boolean {
   const value = token.trim();
   if (!value) return false;
+  if (!browserCookieHeaders.has(planSlug)) {
+    browserCookieHeaders.set(planSlug, `kimi-auth=${value}`);
+  }
   browserSessions.set(planSlug, { token: value, source });
   return true;
 }
@@ -492,8 +496,13 @@ export function acceptKimiBrowserCookies(
     // prefixes, or otherwise reinterpret a browser cookie here.
     const token = cookie.value.trim();
     if (!token) continue;
+    const cookieHeader = cookies
+      .filter((entry) => typeof entry.name === 'string' && typeof entry.value === 'string' && entry.value.trim())
+      .map((entry) => `${entry.name}=${entry.value}`)
+      .join('; ');
     // KimiCookieImporter.SessionInfo.authToken uses first(where:), so keep
     // the native importer order instead of re-ranking cookies by JWT claims.
+    browserCookieHeaders.set(planSlug, cookieHeader);
     return acceptKimiBrowserToken(token, source, planSlug);
   }
   return false;
@@ -508,12 +517,12 @@ function timezoneName(): string {
 }
 
 /** 网页会话请求头（对齐 CodexBar webRequest：cookie + Bearer + 平台/设备头） */
-function webHeaders(token: string): Record<string, string> {
+function webHeaders(token: string, cookieHeader?: string | null): Record<string, string> {
   const claims = jwtClaims(token);
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     Authorization: `Bearer ${token}`,
-    Cookie: `kimi-auth=${token}`,
+    Cookie: cookieHeader?.includes('=') ? cookieHeader : `kimi-auth=${token}`,
     Origin: 'https://www.kimi.com',
     Referer: 'https://www.kimi.com/code/console',
     Accept: '*/*',
@@ -534,12 +543,16 @@ function webHeaders(token: string): Record<string, string> {
 }
 
 /** 网页会话拉周+5h：POST GetUsages(scope=FEATURE_CODING)，响应内层结构与 /coding/v1/usages 相同 */
-async function fetchWebUsage(token: string, log: (msg: string) => void): Promise<QuotaWindow[]> {
+async function fetchWebUsage(
+  token: string,
+  log: (msg: string) => void,
+  cookieHeader?: string | null,
+): Promise<QuotaWindow[]> {
   let res: Response;
   try {
     res = await fetch(GET_USAGES_URL, {
       method: 'POST',
-      headers: webHeaders(token),
+      headers: webHeaders(token, cookieHeader),
       body: '{"scope":["FEATURE_CODING"]}',
       signal: AbortSignal.timeout(10_000),
     });
@@ -572,7 +585,7 @@ async function fetchWebUsage(token: string, log: (msg: string) => void): Promise
       // 继续请求 GetSubscriptionStats，保证月度窗口仍能更新。
       log('Kimi GetUsages 当前只返回 totalQuota，周/5H 保留最近快照，继续读取月限额');
       try {
-        return [await fetchSubscriptionStats(token)];
+        return [await fetchSubscriptionStats(token, cookieHeader)];
       } catch (e) {
         log(`月限额获取失败：${e instanceof Error ? e.message : String(e)}`);
         return [];
@@ -584,7 +597,7 @@ async function fetchWebUsage(token: string, log: (msg: string) => void): Promise
 
   // 月限额：失败只记日志（CodexBar 同为 best-effort enrichment）
   try {
-    windows.push(await fetchSubscriptionStats(token));
+    windows.push(await fetchSubscriptionStats(token, cookieHeader));
   } catch (e) {
     log(`月限额获取失败：${e instanceof Error ? e.message : String(e)}`);
   }
@@ -592,12 +605,12 @@ async function fetchWebUsage(token: string, log: (msg: string) => void): Promise
 }
 
 /** 用 kimi-auth 网页会话拉月度订阅池；401 说明会话过期，需重新登录 kimi.com */
-async function fetchSubscriptionStats(token: string): Promise<QuotaWindow> {
+async function fetchSubscriptionStats(token: string, cookieHeader?: string | null): Promise<QuotaWindow> {
   let res: Response;
   try {
     res = await fetch(SUBSCRIPTION_STATS_URL, {
       method: 'POST',
-      headers: webHeaders(token),
+      headers: webHeaders(token, cookieHeader),
       body: '{}',
       signal: AbortSignal.timeout(10_000),
     });
@@ -656,7 +669,12 @@ export const kimiAdapter: PlanAdapter = {
     }
     const web = readKimiAuthToken(ctx.plan.slug, !configuredBrowser, !configuredBrowser);
     if (web && web.token) {
-      return { kind: 'bearer', value: web.token, source: 'web', cookie: web.token };
+      return {
+        kind: 'bearer',
+        value: web.token,
+        source: 'web',
+        cookie: browserCookieHeaders.get(ctx.plan.slug) ?? web.token,
+      };
     }
 
     return null;
@@ -665,7 +683,7 @@ export const kimiAdapter: PlanAdapter = {
   async fetchUsage(ctx: AdapterContext, cred: Credential): Promise<QuotaWindow[]> {
     // 网页会话路径：周/5h + 月 全走 www.kimi.com（Auto-cookie 兜底）
     if (cred.source === 'web') {
-      return fetchWebUsage(cred.value, (msg) => ctx.log(msg));
+      return fetchWebUsage(cred.value, (msg) => ctx.log(msg), cred.cookie);
     }
 
     const base = (process.env.KIMI_CODE_BASE_URL ?? ctx.plan.extra.baseUrl ?? 'https://api.kimi.com').replace(/\/+$/, '');

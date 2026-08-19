@@ -378,12 +378,13 @@ describe('Kimi CodexBar web request compatibility', () => {
           now: Date.now,
           log: () => {},
         },
-        { kind: 'bearer', value: token, source: 'web', cookie: token },
+        { kind: 'bearer', value: token, source: 'web', cookie: `kimi-auth=${token}; kimi-locale=en-US` },
       );
       expect(windows.find((window) => window.window === 'weekly')?.percentage).toBe(20);
       expect(requests).toHaveLength(2);
       expect(requests[0]?.headers.get('x-msh-device-id')).toBeNull();
       expect(requests[0]?.headers.get('x-msh-session-id')).toBe('browser-session');
+      expect(requests[0]?.headers.get('Cookie')).toContain('kimi-locale=en-US');
       expect(requests[1]?.headers.get('x-msh-device-id')).toBeNull();
     } finally {
       globalThis.fetch = previousFetch;
