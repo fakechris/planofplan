@@ -169,8 +169,12 @@ export function updateFactoryWorkOSSession(tokens: {
     organizationId: tokens.organizationId?.trim() || currentSession.organizationId,
     workosCookieHeader: tokens.workosCookie?.trim() || currentSession.workosCookieHeader,
   };
+  // WorkOS refresh token 一次性轮换。这里必须无条件回写：从持久化恢复的会话
+  // （source='persisted'，即 daemon 重启后的唯一形态）兑换会消耗文件里的 token，
+  // 新 token 只存在于内存；若不回写，daemon 一旦再重启就拿着已消耗的 token
+  // 永久 400。手动 API key 凭据不带 refreshToken，不会走到这里。
   const rotated = tokens.refreshToken?.trim();
-  if (rotated && (currentSession.source.includes('(native)') || currentSession.source.startsWith('browser:'))) {
+  if (rotated) {
     const userSub = jwtSubject(tokens.accessToken) ?? readPersistedSession()?.userSub ?? null;
     persistRefreshToken(rotated, currentSession.organizationId, currentSession.cookieHeader, userSub);
   }

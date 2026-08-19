@@ -291,6 +291,46 @@ describe('Factory usage', () => {
     }
   });
 
+  test('persists rotations restored from disk so a second restart survives', async () => {
+    const home = await Bun.$`mktemp -d`.text();
+    const previousHome = process.env.PLANOFPPLAN_HOME;
+    process.env.PLANOFPPLAN_HOME = home.trim();
+    try {
+      // 第一次导入（menubar native 读取）并轮换。
+      clearFactoryBrowserSession();
+      expect(acceptFactoryBrowserCookies(
+        [{ name: 'session', value: 'browser-session' }],
+        'Comet (native)',
+        { refreshToken: 'browser-refresh-token' },
+      )).toBe(true);
+      updateFactoryWorkOSSession({
+        accessToken: 'rotated-access-token',
+        refreshToken: 'first-rotated-token',
+      });
+
+      // 真实 daemon 重启：进程内存清空，仅从 factory-session.json 恢复（source='persisted'）。
+      clearFactoryBrowserSession();
+      const restored = getFactoryBrowserSession();
+      expect(restored).toMatchObject({ source: 'persisted', workosRefreshToken: 'first-rotated-token' });
+
+      // 重启后的第一次兑换必须把新 token 回写文件，否则再次重启就是已消耗的死 token。
+      updateFactoryWorkOSSession({
+        accessToken: 'rotated-access-token-2',
+        refreshToken: 'second-rotated-token',
+      });
+      clearFactoryBrowserSession();
+      expect(getFactoryBrowserSession()).toMatchObject({
+        source: 'persisted',
+        workosRefreshToken: 'second-rotated-token',
+      });
+    } finally {
+      clearFactoryBrowserSession();
+      if (previousHome == null) delete process.env.PLANOFPPLAN_HOME;
+      else process.env.PLANOFPPLAN_HOME = previousHome;
+      await Bun.$`rm -rf ${home}`.quiet();
+    }
+  });
+
   test('keeps the persisted refresh token as fallback after cookie rotation on the same account', async () => {
     const home = await Bun.$`mktemp -d`.text();
     const previousHome = process.env.PLANOFPPLAN_HOME;
