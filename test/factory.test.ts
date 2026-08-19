@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { normalizeFactoryBillingLimits, normalizeFactoryUsage } from '../src/adapters/factory.ts';
+import { factoryAdapter } from '../src/adapters/factory.ts';
 import { acceptFactoryBrowserCookies, clearFactoryBrowserSession, getFactoryBrowserSession } from '../src/factory-session.ts';
 
 describe('Factory usage', () => {
@@ -68,9 +69,69 @@ describe('Factory usage', () => {
     expect(getFactoryBrowserSession()).toEqual({
       cookieHeader: 'wos-session=session-value; access-token=bearer-value',
       bearerToken: 'bearer-value',
+      workosAccessToken: null,
+      workosRefreshToken: null,
       source: 'Safari',
     });
     clearFactoryBrowserSession();
     expect(getFactoryBrowserSession()).toBeNull();
+  });
+
+  test('uses a browser WorkOS refresh token before Factory billing calls', async () => {
+    clearFactoryBrowserSession();
+    expect(acceptFactoryBrowserCookies(
+      [{ name: 'session', value: 'browser-session' }],
+      'Comet',
+      { refreshToken: 'workos-refresh-token' },
+    )).toBe(true);
+
+    const requests: Array<{ url: string; method: string; authorization: string | null; body: string }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input, init) => {
+      const url = String(input);
+      requests.push({
+        url,
+        method: init?.method ?? 'GET',
+        authorization: new Headers(init?.headers).get('authorization'),
+        body: typeof init?.body === 'string' ? init.body : '',
+      });
+      if (url === 'https://api.workos.com/user_management/authenticate') {
+        return new Response(JSON.stringify({
+          access_token: 'workos-access-token',
+          refresh_token: 'workos-refresh-token-rotated',
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        usesTokenRateLimitsBilling: true,
+        limits: {
+          standard: {
+            fiveHour: { usedPercent: 12, secondsRemaining: 3600 },
+          },
+        },
+      }), { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      const windows = await factoryAdapter.fetchUsage({} as never, {
+        kind: 'bearer',
+        value: '',
+        cookie: 'session=browser-session',
+        refreshToken: 'workos-refresh-token',
+        source: 'browser:Comet',
+      });
+      expect(windows[0]?.percentage).toBe(12);
+      expect(requests.map((request) => request.url)).toEqual([
+        'https://api.workos.com/user_management/authenticate',
+        'https://api.factory.ai/api/billing/limits',
+      ]);
+      expect(JSON.parse(requests[0]!.body)).toMatchObject({
+        grant_type: 'refresh_token',
+        refresh_token: 'workos-refresh-token',
+      });
+      expect(requests[1]!.authorization).toBe('Bearer workos-access-token');
+    } finally {
+      globalThis.fetch = originalFetch;
+      clearFactoryBrowserSession();
+    }
   });
 });

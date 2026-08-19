@@ -3,10 +3,16 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { AdapterContext, Credential, PlanAdapter, QuotaWindow } from '../types.ts';
 import { AdapterError } from '../types.ts';
-import { getFactoryBrowserSession } from '../factory-session.ts';
+import { getFactoryBrowserSession, updateFactoryWorkOSSession } from '../factory-session.ts';
 
 const API_BASE = 'https://api.factory.ai';
 const APP_BASES = ['https://api.factory.ai', 'https://app.factory.ai', 'https://auth.factory.ai'];
+const WORKOS_AUTH_BASE = 'https://api.workos.com';
+const WORKOS_AUTH_PATH = '/user_management/authenticate';
+const WORKOS_CLIENT_IDS = [
+  'client_01HXRMBQ9BJ3E7QSTQ9X2PHVB7',
+  'client_01HNM792M5G5G1A2THWPXKFMXB',
+];
 const AUTH_PATH = '/api/app/auth/me';
 const BILLING_LIMITS_PATH = '/api/billing/limits';
 const SUBSCRIPTION_USAGE_PATH = '/api/organization/subscription/usage';
@@ -58,6 +64,11 @@ interface FactoryAuthResponse {
       orbSubscription?: { plan?: { name?: unknown } };
     };
   };
+}
+
+interface WorkOSAuthResponse {
+  access_token?: unknown;
+  refresh_token?: unknown;
 }
 
 function numberValue(value: unknown): number | null {
@@ -300,6 +311,64 @@ async function getJSONFromBases(path: string, credential: Credential): Promise<u
   throw lastError instanceof Error ? lastError : new AdapterError('network', `Factory 请求失败：${path}`);
 }
 
+async function exchangeWorkOSRefreshToken(refreshToken: string): Promise<WorkOSAuthResponse> {
+  let lastError: unknown = null;
+  for (const clientId of WORKOS_CLIENT_IDS) {
+    try {
+      const response = await fetch(`${WORKOS_AUTH_BASE}${WORKOS_AUTH_PATH}`, {
+        method: 'POST',
+        headers: {
+          accept: 'application/json',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          client_id: clientId,
+          grant_type: 'refresh_token',
+          refresh_token: refreshToken,
+        }),
+        signal: AbortSignal.timeout(12_000),
+      });
+      if (!response.ok) {
+        const body = await response.text().catch(() => '');
+        lastError = new AdapterError(
+          response.status === 400 || response.status === 401 ? 'auth' : 'api',
+          `WorkOS 鉴权失败(HTTP ${response.status})${body.includes('invalid_grant') ? '：refresh token 已失效' : ''}`,
+        );
+        continue;
+      }
+      const payload = await response.json() as WorkOSAuthResponse;
+      const accessToken = stringValue(payload.access_token);
+      if (!accessToken) {
+        lastError = new AdapterError('parse', 'WorkOS 鉴权响应缺少 access_token');
+        continue;
+      }
+      return {
+        access_token: accessToken,
+        refresh_token: stringValue(payload.refresh_token),
+      };
+    } catch (error) {
+      lastError = new AdapterError('network', `WorkOS 网络错误：${String(error instanceof Error ? error.message : error)}`);
+    }
+  }
+  throw lastError instanceof Error ? lastError : new AdapterError('auth', 'WorkOS 鉴权失败');
+}
+
+async function credentialWithWorkOSAccessToken(credential: Credential): Promise<Credential> {
+  if (!credential.refreshToken || credential.value.trim()) return credential;
+  const tokens = await exchangeWorkOSRefreshToken(credential.refreshToken);
+  const accessToken = stringValue(tokens.access_token);
+  if (!accessToken) throw new AdapterError('auth', 'WorkOS 鉴权响应缺少 access_token');
+  updateFactoryWorkOSSession({
+    accessToken,
+    refreshToken: stringValue(tokens.refresh_token),
+  });
+  return {
+    ...credential,
+    value: accessToken,
+    refreshToken: stringValue(tokens.refresh_token) ?? credential.refreshToken,
+  };
+}
+
 export const factoryAdapter: PlanAdapter = {
   slug: 'factory',
   credentialHint:
@@ -317,8 +386,10 @@ export const factoryAdapter: PlanAdapter = {
     if (session) {
       return {
         kind: 'bearer',
-        value: session.bearerToken ?? '',
+        value: session.workosAccessToken
+          ?? (session.workosRefreshToken ? '' : session.bearerToken ?? ''),
         cookie: session.cookieHeader,
+        refreshToken: session.workosRefreshToken,
         source: `browser:${session.source}`,
       };
     }
@@ -326,6 +397,28 @@ export const factoryAdapter: PlanAdapter = {
   },
 
   async fetchUsage(_ctx: AdapterContext, credential: Credential): Promise<QuotaWindow[]> {
+    let activeCredential = await credentialWithWorkOSAccessToken(credential);
+    try {
+      return await fetchFactoryUsage(activeCredential);
+    } catch (error) {
+      if (
+        activeCredential.refreshToken &&
+        activeCredential.value.trim() &&
+        error instanceof AdapterError &&
+        error.kind === 'auth'
+      ) {
+        activeCredential = await credentialWithWorkOSAccessToken({
+          ...activeCredential,
+          value: '',
+        });
+        return fetchFactoryUsage(activeCredential);
+      }
+      throw error;
+    }
+  },
+};
+
+async function fetchFactoryUsage(credential: Credential): Promise<QuotaWindow[]> {
     let billing: unknown;
     try {
       billing = await getJSON(BILLING_LIMITS_PATH, credential);
@@ -342,5 +435,4 @@ export const factoryAdapter: PlanAdapter = {
     const query = userId ? `?useCache=true&userId=${encodeURIComponent(userId)}` : '?useCache=true';
     const usage = await getJSONFromBases(`${SUBSCRIPTION_USAGE_PATH}${query}`, credential);
     return normalizeFactoryUsage(usage);
-  },
-};
+}

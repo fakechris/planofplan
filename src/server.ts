@@ -150,6 +150,7 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
       browser?: string;
       planSlug?: string;
       cookies?: Array<{ domain?: string; name?: string; value?: string }>;
+      workos?: { accessToken?: string | null; refreshToken?: string | null };
     };
     let body: BrowserSessionRequest;
     try {
@@ -169,6 +170,7 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
               : []
           ),
           source,
+          body.workos,
         )
       : acceptKimiBrowserCookies(cookies, source, planSlug);
     if (accepted) {

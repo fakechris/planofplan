@@ -91,8 +91,9 @@ Relevant existing repo conventions:
 - `src/types.ts` already models `credits` and `tokens` units.
 
 No Factory-specific credential file or environment variable was found in the
-repo. There is no basis in first-party docs for automatically reading a
-Factory browser cookie, OAuth token, or `~/.factory` secret.
+repo. The browser-session implementation follows CodexBar's open-source
+provider behavior for reading Factory cookies and WorkOS browser tokens; this
+is separate from the documented Factory Analytics API.
 
 ## Implementation decision
 
@@ -105,20 +106,31 @@ page, rather than the documented organization Analytics API:
 3. Fall back to `/api/app/auth/me` and
    `/api/organization/subscription/usage` across Factory's API/app/auth hosts
    for legacy Standard/Premium accounts.
-4. On macOS, the native menubar imports Factory session cookies from the
-   selected browser and passes only recognized cookie names to the daemon's
-   memory. It does not persist browser cookies.
+4. On macOS, the native menubar imports Factory session cookies and
+   CodexBar-compatible WorkOS tokens from the selected Chromium browser's
+   Local Storage. The daemon exchanges `workos:refresh-token` at
+   `https://api.workos.com/user_management/authenticate`, then keeps the
+   resulting session in memory for Factory requests. Browser cookies and
+   WorkOS tokens are not persisted by planofplan.
 
 The implementation intentionally does not claim parity with the documented
 organization Analytics API, which reports historical token consumption rather
-than personal remaining quota. WorkOS local-storage token minting remains a
-future fallback for accounts that do not expose a usable Factory session
-cookie.
+than personal remaining quota. The personal quota path follows CodexBar's
+browser-cookie, WorkOS, and Factory endpoint behavior.
 
 ## Caveats
 
 - The public page fetch was unauthenticated, so this research cannot establish
   the internal endpoint used by the signed-in personal page.
+- CodexBar's current primary source confirms that Factory browser login can
+  require WorkOS local-storage tokens in addition to Factory cookies:
+  [FactoryStatusProbe.swift](https://github.com/steipete/CodexBar/blob/main/Sources/CodexBarCore/Providers/Factory/FactoryStatusProbe.swift)
+  and
+  [FactoryLocalStorageImporter.swift](https://github.com/steipete/CodexBar/blob/main/Sources/CodexBarCore/Providers/Factory/FactoryLocalStorageImporter.swift).
+- WorkOS token exchange uses
+  `POST https://api.workos.com/user_management/authenticate` with a Factory
+  client ID, `grant_type=refresh_token`, and the browser's
+  `workos:refresh-token`.
 - The Analytics API documentation establishes organization metrics and
   credits consumed; it does **not** promise subscription remaining balance,
   reset windows, or parity with `/settings/usage`.

@@ -32,6 +32,12 @@ struct BrowserSessionPayload: Encodable {
     let planSlug: String
     let browser: String
     let cookies: [BrowserCookiePayload]
+    let workos: BrowserWorkOSPayload?
+}
+
+struct BrowserWorkOSPayload: Encodable {
+    let accessToken: String?
+    let refreshToken: String?
 }
 
 struct BuildMetadata {
@@ -504,10 +510,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                     break
                 }
-                guard let cookies = selectedCookies else {
+                let workos = selection.planSlug == "factory"
+                    ? self.workOSCredentials(in: nativeBrowser)
+                    : nil
+                guard let cookies = selectedCookies ?? (workos == nil ? nil : []) else {
                     throw BrowserSessionError.noSessionCookie
                 }
-                let payload = BrowserSessionPayload(planSlug: selection.planSlug, browser: browser, cookies: cookies)
+                let payload = BrowserSessionPayload(
+                    planSlug: selection.planSlug,
+                    browser: browser,
+                    cookies: cookies,
+                    workos: workos
+                )
                 let body = try JSONEncoder().encode(payload)
                 self.request(path: "/api/browser-session", method: "POST", body: body) { [weak self] _, status in
                     NSLog("planofplan browser \(browser) \(selection.planSlug): session POST status \(status)")
@@ -526,6 +540,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.refreshOverview()
             }
         }
+    }
+
+    private func workOSCredentials(in browser: Browser) -> BrowserWorkOSPayload? {
+        let client = BrowserCookieClient()
+        var seenLevelDB = Set<String>()
+        var refreshToken: String?
+        var accessToken: String?
+
+        for store in client.stores(for: browser) {
+            guard let databaseURL = store.databaseURL else { continue }
+            var profileURL = databaseURL.deletingLastPathComponent()
+            if profileURL.lastPathComponent == "Network" {
+                profileURL = profileURL.deletingLastPathComponent()
+            }
+            let levelDBURL = profileURL
+                .appendingPathComponent("Local Storage")
+                .appendingPathComponent("leveldb")
+            guard seenLevelDB.insert(levelDBURL.path).inserted else { continue }
+
+            let entries = ChromiumLocalStorageReader.readTextEntries(in: levelDBURL)
+            for entry in entries where entry.key.hasSuffix("workos:refresh-token") {
+                refreshToken = entry.value
+            }
+            for entry in entries where entry.key.hasSuffix("workos:access-token") {
+                accessToken = entry.value
+            }
+        }
+
+        guard refreshToken?.isEmpty == false || accessToken?.isEmpty == false else {
+            return nil
+        }
+        NSLog(
+            "planofplan browser \(browser.displayName) factory: found WorkOS tokens "
+                + "access=\(accessToken?.count ?? 0) refresh=\(refreshToken?.count ?? 0)"
+        )
+        return BrowserWorkOSPayload(accessToken: accessToken, refreshToken: refreshToken)
     }
 
     private func cookieDomains(for planSlug: String) -> [String] {
