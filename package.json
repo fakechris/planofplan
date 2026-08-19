@@ -7,6 +7,7 @@
   "scripts": {
     "serve": "bun src/cli.ts serve",
     "menubar:build": "./scripts/build-menubar.sh",
+    "daemon:install": "./scripts/install-daemon.sh",
     "demo": "bun src/cli.ts serve --demo",
     "usage": "bun src/cli.ts usage",
     "status": "bun src/cli.ts status",

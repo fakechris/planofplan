@@ -146,6 +146,25 @@ Cookie token 不写入数据库或凭据文件。
 }
 ```
 
+## 常驻 daemon（launchd 自愈）
+
+menubar app 只在自身启动时探测并拉起一次 daemon，daemon 之后死掉它不会重试
+（2026-08-19 的事故原因）。安装 launchd 守护后：daemon 崩溃/被杀约 10 秒内自动重启，
+登录自启，端口与 menubar bundle 一致（默认 9291），menubar 探测到端口健康就不会重复 spawn：
+
+```bash
+bun run daemon:install                                    # 安装并立即启动
+launchctl print gui/$(id -u)/local.planofplan.daemon      # 查看状态
+launchctl bootout gui/$(id -u)/local.planofplan.daemon    # 停止（下次登录仍会自启）
+rm ~/Library/LaunchAgents/local.planofplan.daemon.plist   # 彻底卸载
+```
+
+- 日志在 `~/.planofplan/serve.log`（kimi Safari 授权警告每分钟追加约两行，注意定期
+  `: > ~/.planofplan/serve.log` 清空）。
+- plist 记录的是仓库绝对路径，仓库移动/改名后需重新 `bun run daemon:install`。
+- 装了守护后不要再手动 `bun run serve`：默认端口不同（9288 vs 9291），会出现两个
+  daemon 同时轮询并写同一个 SQLite 库。
+
 ## 配置
 
 运行时状态全部在 `~/.planofplan/`（可用 `PLANOFPPLAN_HOME` 改）：
