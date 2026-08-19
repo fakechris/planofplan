@@ -150,10 +150,11 @@ h1 { margin: 0; font-size: clamp(28px, 4vw, 44px); letter-spacing: -.045em; line
 .source-official { border-color: rgba(98, 217, 232, .35); color: var(--cyan); }
 .usage-grid { display: grid; grid-template-columns: minmax(230px, .7fr) minmax(0, 1.7fr); gap: 1px; background: var(--border); }
 .usage-panel { min-width: 0; padding: 16px 17px; background: var(--surface); }
-.panel-title { margin-bottom: 14px; color: var(--brand); font-size: 11px; font-weight: 700; letter-spacing: .04em; }
-.panel-title span { float: right; color: var(--faint); font-weight: 400; letter-spacing: 0; }
-.daily-list { display: flex; flex-direction: column; gap: 10px; max-height: 390px; overflow-y: auto; padding-right: 4px; }
-.daily-row { display: grid; grid-template-columns: 72px minmax(60px, 1fr) 45px; gap: 8px; align-items: center; color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.panel-title { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 14px; color: var(--brand); font-size: 11px; font-weight: 700; letter-spacing: .04em; }
+.panel-title span { min-width: 0; overflow: hidden; color: var(--faint); font-weight: 400; letter-spacing: 0; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+.daily-list { display: flex; width: 100%; flex-direction: column; gap: 10px; max-height: 390px; overflow-y: auto; padding-right: 4px; }
+.daily-row { display: grid; grid-template-columns: 76px minmax(0, 1fr) 52px; gap: 8px; align-items: center; color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.daily-row > span { white-space: nowrap; }
 .daily-row b { color: var(--brand); text-align: right; font-weight: 600; }
 .daily-track { height: 5px; overflow: hidden; border-radius: 2px; background: var(--surface-soft); }
 .daily-track i { display: block; height: 100%; border-radius: inherit; background: var(--cyan); }
