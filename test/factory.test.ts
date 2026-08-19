@@ -66,25 +66,35 @@ describe('Factory usage', () => {
     ]);
   });
 
-  test('accepts only recognized Factory session cookies and keeps them in memory', () => {
-    clearFactoryBrowserSession();
-    expect(acceptFactoryBrowserCookies([
-      { name: 'irrelevant', value: 'nope' },
-      { name: 'wos-session', value: 'session-value' },
-      { name: 'access-token', value: 'bearer-value' },
-    ], 'Safari')).toBe(true);
-    expect(getFactoryBrowserSession()).toEqual({
-      cookieHeader: 'wos-session=session-value; access-token=bearer-value',
-      bearerToken: 'bearer-value',
-      workosAccessToken: null,
-      workosRefreshToken: null,
-      workosRefreshTokenFallback: null,
-      organizationId: null,
-      workosCookieHeader: null,
-      source: 'Safari',
-    });
-    clearFactoryBrowserSession();
-    expect(getFactoryBrowserSession()).toBeNull();
+  test('accepts only recognized Factory session cookies and keeps them in memory', async () => {
+    const home = await Bun.$`mktemp -d`.text();
+    const previousHome = process.env.PLANOFPPLAN_HOME;
+    process.env.PLANOFPPLAN_HOME = home.trim();
+    try {
+      clearFactoryBrowserSession();
+      expect(acceptFactoryBrowserCookies([
+        { name: 'irrelevant', value: 'nope' },
+        { name: 'wos-session', value: 'session-value' },
+        { name: 'access-token', value: 'bearer-value' },
+      ], 'Safari')).toBe(true);
+      expect(getFactoryBrowserSession()).toEqual({
+        cookieHeader: 'wos-session=session-value; access-token=bearer-value',
+        bearerToken: 'bearer-value',
+        workosAccessToken: null,
+        workosRefreshToken: null,
+        workosRefreshTokenFallback: null,
+        organizationId: null,
+        workosCookieHeader: null,
+        source: 'Safari',
+      });
+      clearFactoryBrowserSession();
+      expect(getFactoryBrowserSession()).toBeNull();
+    } finally {
+      clearFactoryBrowserSession();
+      if (previousHome == null) delete process.env.PLANOFPPLAN_HOME;
+      else process.env.PLANOFPPLAN_HOME = previousHome;
+      await Bun.$`rm -rf ${home}`.quiet();
+    }
   });
 
   test('uses a browser WorkOS refresh token before Factory billing calls', async () => {
@@ -272,6 +282,93 @@ describe('Factory usage', () => {
       expect(getFactoryBrowserSession()).toMatchObject({
         workosRefreshToken: 'rotated-refresh-token',
         workosRefreshTokenFallback: 'browser-refresh-token',
+      });
+    } finally {
+      clearFactoryBrowserSession();
+      if (previousHome == null) delete process.env.PLANOFPPLAN_HOME;
+      else process.env.PLANOFPPLAN_HOME = previousHome;
+      await Bun.$`rm -rf ${home}`.quiet();
+    }
+  });
+
+  test('keeps the persisted refresh token as fallback after cookie rotation on the same account', async () => {
+    const home = await Bun.$`mktemp -d`.text();
+    const previousHome = process.env.PLANOFPPLAN_HOME;
+    process.env.PLANOFPPLAN_HOME = home.trim();
+    try {
+      function fakeJwt(sub: string): string {
+        const part = (value: unknown) =>
+          Buffer.from(JSON.stringify(value)).toString('base64url');
+        return `${part({ alg: 'HS256' })}.${part({ sub })}.signature`;
+      }
+      clearFactoryBrowserSession();
+      // 第一次导入并轮换，持久化 userSub 锚点。
+      expect(acceptFactoryBrowserCookies(
+        [{ name: 'session', value: 'session-one' }],
+        'Comet (native)',
+        { refreshToken: 'browser-refresh-token' },
+      )).toBe(true);
+      updateFactoryWorkOSSession({
+        accessToken: fakeJwt('user_1'),
+        refreshToken: 'rotated-refresh-token',
+      });
+
+      // Cookie 已轮换（fingerprint 失配），但 access-token cookie 仍是同一账号：
+      // 浏览器 localStorage 的旧 token 已被上次兑换消耗，持久化轮换链必须保留为兜底。
+      clearFactoryBrowserSession();
+      expect(acceptFactoryBrowserCookies(
+        [
+          { name: 'session', value: 'session-two' },
+          { name: 'access-token', value: fakeJwt('user_1') },
+        ],
+        'Comet (native)',
+        { refreshToken: 'stale-browser-token' },
+      )).toBe(true);
+      expect(getFactoryBrowserSession()).toMatchObject({
+        workosRefreshToken: 'stale-browser-token',
+        workosRefreshTokenFallback: 'rotated-refresh-token',
+      });
+    } finally {
+      clearFactoryBrowserSession();
+      if (previousHome == null) delete process.env.PLANOFPPLAN_HOME;
+      else process.env.PLANOFPPLAN_HOME = previousHome;
+      await Bun.$`rm -rf ${home}`.quiet();
+    }
+  });
+
+  test('discards the persisted refresh token when the browser account changed', async () => {
+    const home = await Bun.$`mktemp -d`.text();
+    const previousHome = process.env.PLANOFPPLAN_HOME;
+    process.env.PLANOFPPLAN_HOME = home.trim();
+    try {
+      function fakeJwt(sub: string): string {
+        const part = (value: unknown) =>
+          Buffer.from(JSON.stringify(value)).toString('base64url');
+        return `${part({ alg: 'HS256' })}.${part({ sub })}.signature`;
+      }
+      clearFactoryBrowserSession();
+      expect(acceptFactoryBrowserCookies(
+        [{ name: 'session', value: 'session-one' }],
+        'Comet (native)',
+        { refreshToken: 'browser-refresh-token' },
+      )).toBe(true);
+      updateFactoryWorkOSSession({
+        accessToken: fakeJwt('user_1'),
+        refreshToken: 'rotated-refresh-token',
+      });
+
+      clearFactoryBrowserSession();
+      expect(acceptFactoryBrowserCookies(
+        [
+          { name: 'session', value: 'session-two' },
+          { name: 'access-token', value: fakeJwt('user_2') },
+        ],
+        'Comet (native)',
+        { refreshToken: 'new-account-browser-token' },
+      )).toBe(true);
+      expect(getFactoryBrowserSession()).toMatchObject({
+        workosRefreshToken: 'new-account-browser-token',
+        workosRefreshTokenFallback: null,
       });
     } finally {
       clearFactoryBrowserSession();

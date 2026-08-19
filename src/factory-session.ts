@@ -39,6 +39,7 @@ interface PersistedFactorySession {
   refreshToken: string;
   organizationId: string | null;
   cookieFingerprint: string | null;
+  userSub?: string | null;
 }
 
 function persistedSessionPath(): string {
@@ -55,6 +56,19 @@ function cookieFingerprint(cookieHeader: string): string | null {
   return value ? createHash('sha256').update(value).digest('hex') : null;
 }
 
+/** WorkOS / Factory access token 都是 JWT；读取 sub 用作账号锚点，避免 Cookie 轮换误判换号。 */
+function jwtSubject(token: string | null | undefined): string | null {
+  if (!token) return null;
+  const part = token.split('.')[1];
+  if (!part) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(part, 'base64url').toString('utf8')) as { sub?: unknown };
+    return typeof payload.sub === 'string' && payload.sub.trim() ? payload.sub.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
 function readPersistedSession(): PersistedFactorySession | null {
   try {
     const raw = JSON.parse(readFileSync(persistedSessionPath(), 'utf8')) as Partial<PersistedFactorySession>;
@@ -63,18 +77,25 @@ function readPersistedSession(): PersistedFactorySession | null {
       refreshToken: raw.refreshToken.trim(),
       organizationId: typeof raw.organizationId === 'string' ? raw.organizationId : null,
       cookieFingerprint: typeof raw.cookieFingerprint === 'string' ? raw.cookieFingerprint : null,
+      userSub: typeof raw.userSub === 'string' ? raw.userSub : null,
     };
   } catch {
     return null;
   }
 }
 
-function persistRefreshToken(refreshToken: string, organizationId: string | null, cookieHeader: string): void {
+function persistRefreshToken(
+  refreshToken: string,
+  organizationId: string | null,
+  cookieHeader: string,
+  userSub: string | null,
+): void {
   const file = persistedSessionPath();
   writeFileSync(file, JSON.stringify({
     refreshToken,
     organizationId,
     cookieFingerprint: cookieFingerprint(cookieHeader),
+    ...(userSub ? { userSub } : {}),
   }) + '\n', { mode: 0o600 });
   chmodSync(file, 0o600);
 }
@@ -98,19 +119,33 @@ export function acceptFactoryBrowserCookies(
   const persisted = readPersistedSession();
   const persistedMatches = persisted != null
     && (!persisted.cookieFingerprint || persisted.cookieFingerprint === cookieFingerprint(selectedCookieHeader));
+  // WorkOS refresh token 一次性轮换：daemon 兑换会消耗浏览器 localStorage 里的 token。
+  // Cookie 值本身高频轮换（access-token 等），fingerprint 失配不代表换号；只要
+  // access-token cookie 的 JWT sub 与持久化 userSub 一致，就保留持久化轮换链做兜底，
+  // 浏览器 token 失效（已被上次兑换消耗）时仍能恢复。
+  const browserAccessToken = selected.find((cookie) => cookie.name === 'access-token')?.value ?? null;
+  const sameAccountFallback = persisted != null
+    && !persistedMatches
+    && !!persisted.userSub
+    && jwtSubject(browserAccessToken) === persisted.userSub;
   const persistedForSession = persistedMatches ? persisted : null;
   const persistedRefreshToken = persistedForSession?.refreshToken ?? null;
   const browserRefreshToken = workos?.refreshToken?.trim() || null;
   if (selected.length === 0 && !workosAccessToken && !workosRefreshToken) return false;
 
+  const primaryRefreshToken = persistedRefreshToken ?? browserRefreshToken;
+  const fallbackRefreshToken = [
+    sameAccountFallback ? persisted!.refreshToken : null,
+    browserRefreshToken,
+  ]
+    .find((token): token is string => !!token?.trim() && token.trim() !== primaryRefreshToken) ?? null;
+
   currentSession = {
     cookieHeader: selectedCookieHeader,
-    bearerToken: selected.find((cookie) => cookie.name === 'access-token')?.value ?? null,
+    bearerToken: browserAccessToken,
     workosAccessToken,
-    workosRefreshToken: persistedRefreshToken ?? browserRefreshToken,
-    workosRefreshTokenFallback: persistedRefreshToken && browserRefreshToken && persistedRefreshToken !== browserRefreshToken
-      ? browserRefreshToken
-      : null,
+    workosRefreshToken: primaryRefreshToken,
+    workosRefreshTokenFallback: fallbackRefreshToken,
     organizationId: persistedForSession?.organizationId ?? selectedOrganizationId,
     workosCookieHeader,
     source,
@@ -136,7 +171,8 @@ export function updateFactoryWorkOSSession(tokens: {
   };
   const rotated = tokens.refreshToken?.trim();
   if (rotated && (currentSession.source.includes('(native)') || currentSession.source.startsWith('browser:'))) {
-    persistRefreshToken(rotated, currentSession.organizationId, currentSession.cookieHeader);
+    const userSub = jwtSubject(tokens.accessToken) ?? readPersistedSession()?.userSub ?? null;
+    persistRefreshToken(rotated, currentSession.organizationId, currentSession.cookieHeader, userSub);
   }
 }
 
