@@ -46,6 +46,7 @@ struct BuildMetadata {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var port = 9288
     private let selectedBrowserKey = "planofplan.selectedBrowser"
+    private let explicitBrowserKey = "planofplan.selectedBrowser.explicit"
     private let fullDiskAccessSettingsURL = URL(
         string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
     )!
@@ -174,7 +175,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func ensureDaemon() {
-        request(path: "/api/overview", method: "GET") { [weak self] result in
+        request(path: "/api/overview", method: "GET") { [weak self] result, _ in
             guard let self else { return }
             if result == nil {
                 self.startDaemon()
@@ -289,8 +290,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func selectedBrowser(for planSlug: String) -> String {
         let stored = UserDefaults.standard.string(forKey: "\(selectedBrowserKey).\(planSlug)")
+        let explicitlySelected = UserDefaults.standard.bool(forKey: "\(explicitBrowserKey).\(planSlug)")
         if planSlug == "factory",
-           (stored == nil || stored == "safari"),
+           !explicitlySelected,
            let factoryBrowser = preferredFactoryBrowser()
         {
             return factoryBrowser
@@ -312,17 +314,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard !didBootstrapBrowserSessions, let overview else { return }
         didBootstrapBrowserSessions = true
         for plan in overview.plans where plan.browserSupported == true {
-            readBrowserSession(
-                for: BrowserSelection(
-                    planSlug: plan.slug,
-                    browser: selectedBrowser(for: plan.slug)
-                )
+            let selection = BrowserSelection(
+                planSlug: plan.slug,
+                browser: selectedBrowser(for: plan.slug)
             )
+            NSLog("planofplan browser bootstrap \(selection.planSlug): \(selection.browser)")
+            readBrowserSession(for: selection)
         }
     }
 
     private func refreshOverview() {
-        request(path: "/api/overview", method: "GET") { [weak self] data in
+        request(path: "/api/overview", method: "GET") { [weak self] data, _ in
             guard let self, let data else {
                 self?.rebuildMenu()
                 return
@@ -426,10 +428,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         path: String,
         method: String,
         body: Data? = nil,
-        completion: @escaping (Data?) -> Void
+        completion: @escaping (Data?, Int) -> Void
     ) {
         guard let url = URL(string: "http://127.0.0.1:\(port)\(path)") else {
-            completion(nil)
+            completion(nil, 0)
             return
         }
         var request = URLRequest(url: url)
@@ -442,27 +444,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             do {
                 let (data, response) = try await URLSession.shared.data(for: request)
                 let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-                completion((200..<300).contains(status) ? data : nil)
+                completion((200..<300).contains(status) ? data : nil, status)
             } catch {
-                completion(nil)
+                completion(nil, 0)
             }
         }
     }
 
     @objc private func refreshAll() {
-        request(path: "/api/refresh", method: "POST") { [weak self] _ in
+        request(path: "/api/refresh", method: "POST") { [weak self] _, _ in
             self?.refreshOverview()
         }
     }
 
     @objc private func readBrowserSession(_ sender: NSMenuItem) {
         guard let selection = sender.representedObject as? BrowserSelection else { return }
-        readBrowserSession(for: selection)
+        readBrowserSession(for: selection, persistSelection: true)
     }
 
-    private func readBrowserSession(for selection: BrowserSelection) {
+    private func readBrowserSession(for selection: BrowserSelection, persistSelection: Bool = false) {
         let browser = selection.browser
-        UserDefaults.standard.set(browser, forKey: "\(selectedBrowserKey).\(selection.planSlug)")
+        if persistSelection {
+            UserDefaults.standard.set(browser, forKey: "\(selectedBrowserKey).\(selection.planSlug)")
+            UserDefaults.standard.set(true, forKey: "\(explicitBrowserKey).\(selection.planSlug)")
+        }
         guard let nativeBrowser = nativeBrowser(for: browser) else { return }
 
         Task { @MainActor [weak self] in
@@ -475,6 +480,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     includeExpired: false
                 )
                 let sources = try client.records(matching: query, in: nativeBrowser)
+                NSLog(
+                    "planofplan browser \(browser) \(selection.planSlug): found \(sources.reduce(0) { $0 + $1.records.count }) cookie records"
+                )
                 let grouped = Dictionary(grouping: sources, by: { $0.store.profile.id })
                 let sortedGroups = grouped.values.sorted {
                     self.mergedBrowserLabel(for: $0) < self.mergedBrowserLabel(for: $1)
@@ -501,7 +509,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 let payload = BrowserSessionPayload(planSlug: selection.planSlug, browser: browser, cookies: cookies)
                 let body = try JSONEncoder().encode(payload)
-                self.request(path: "/api/browser-session", method: "POST", body: body) { [weak self] _ in
+                self.request(path: "/api/browser-session", method: "POST", body: body) { [weak self] _, status in
+                    NSLog("planofplan browser \(browser) \(selection.planSlug): session POST status \(status)")
                     self?.refreshOverview()
                 }
             } catch {
