@@ -458,7 +458,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             do {
                 let (data, response) = try await URLSession.shared.data(for: request)
                 let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-                completion((200..<300).contains(status) ? data : nil, status)
+                completion(data, status)
             } catch {
                 completion(nil, 0)
             }
