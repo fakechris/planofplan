@@ -2,6 +2,63 @@
 
 更新时间：2026-08-19（以当前仓库 `HEAD` 为准）
 
+## 0. 2026-08-19 深夜调查结论（最新，优先读这节）
+
+两位 provider 的 401 根因均已用本机真实链路证据闭环，且 Kimi 已修复可用。
+
+### Kimi 根因（已修复）
+
+- `kimi-auth` cookie 与 apiv2 鉴权**无关**。实测：
+  - 带 `Authorization: Bearer <kimi-auth>` → 服务端报 `token has invalid claims: token is expired`；
+  - 纯 Cookie（无 Authorization）→ `REASON_INVALID_AUTH_TOKEN`，apiv2 根本不接受 Cookie 鉴权。
+- kimi.com 前端（statics.moonshot.cn `request-*.js`）真实凭据在 **localStorage**：
+  `access_token` / `refresh_token` / `msh_user_id`，API 用 `Authorization: Bearer <localStorage.access_token>`。
+- token 刷新端点：`POST https://auth.kimi.com/api/account.gateway.v1.AuthService/RefreshToken`，
+  Connect-JSON，字段 `refresh_token`，响应 `access_token` + `refresh_token`（会轮换）。
+- Safari 的 localStorage 布局（Safari 17+）：
+  `~/Library/Containers/com.apple.Safari/Data/Library/WebKit/WebsiteData/Default/<hash>/<hash>/LocalStorage/localstorage.sqlite3`
+  （ItemTable；value 可能是 UTF-16LE BLOB；hash 预映像含设备盐，无法离线推导，代码用扫描 + 键名/JWT 形状匹配）。
+- 修复实现：
+  - `readSafariKimiWebTokens()`（src/browser-cookies.ts）只读 localStorage；
+  - `readKimiWebSession()`（src/adapters/kimi.ts）优先级：env → localStorage 新鲜 access_token（读取穿透，
+    页面打开时自己刷新）→ daemon 自持刷新链 `~/.planofplan/kimi-web-session.json`（0600，
+    access 新鲜直接用，否则 RefreshToken 兑换并持久化；localStorage refresh_token 优先、
+    持久化链仅在 JWT `sub` 锚点同账号时兜底）→ 旧 kimi-auth cookie 路径保留为最后兜底。
+  - 实测与网页 quota 页数据一致（Week 97%、5H 0%、Month 0%）。
+- 注意：daemon 兑换会消耗浏览器 localStorage 的 refresh_token（一次性轮换），用户下次打开
+  kimi.com 页面可能需要重新登录一次；之后两边各持独立链，互不影响。
+- 用户明确确认：Kimi 浏览器会话只允许 Safari（本节修复同样只读 Safari 存储）。
+
+### Factory 根因（部分修复，待一次用户动作恢复）
+
+- WorkOS refresh token 是**一次性轮换**的，daemon 和 app.factory.ai 页面共享 Comet localStorage
+  里的同一个 token，谁先兑换谁消耗它。典型失败环：daemon 兑换成功（消耗浏览器 token）→
+  daemon 重启/丢失内存 → 浏览器 localStorage 里只剩死 token → 401 → 用户哪天打开 Factory
+  页面 → 页面静默重登写回新 token → 又恢复。这就是“反复 401 又偶尔自愈”的原因。
+- 实测：浏览器 25 字符 refresh token 对 client `client_01HNM792M5G5G1A2THWPXKFMXB` 有效
+  （另一个 client 400）；billing `/api/billing/limits` 只认 Bearer，纯 Cookie 401。
+- 本次修复：`factory-session.json` 持久化轮换链增加 `userSub` 账号锚点（ exchanged access
+  token JWT 的 `sub`）。Cookie 值高频轮换导致 fingerprint 失配时，只要 incoming
+  `access-token` cookie 的 JWT sub 与持久化 userSub 一致，持久化链保留为 fallback
+  （浏览器 token 已被上次兑换消耗时仍能恢复）。换号则丢弃。
+- ⚠️ 本次调查中的诊断 probe 消耗掉了当前机器的轮换链（持久化文件里的 token 已失效）。
+  恢复方法：在 Comet 打开一次 app.factory.ai（页面会写回新 token），然后 menubar 重新读取
+  Factory Comet 会话（或重启 menubar app）。
+- 长期可选改进：把 daemon 轮换后的 WorkOS refresh token 回写 Comet localStorage（对齐
+  onWatch 对 kimi-code.json 的做法），彻底消除竞态；涉及第三方浏览器存储写入，需单独评估。
+
+### 其他发现
+
+- daemon（menubar app 子进程）stdout/stderr 被重定向到 `/dev/null`（main.swift
+  `startDaemon()`），所有 `[kimi] ...` 类逐阶段日志被丢弃。排查时用 `/usr/bin/log show
+  --predicate 'process == "PlanofplanMenuBar"'` 看 NSLog，或临时加诊断端点。
+- daemon 实际端口 9288/9291 以 menubar 菜单为准（本机当前 9291）。
+- `~/.kimi-code/credentials/kimi-code.json` 是空壳（access/refresh 全空），CLI 路径当前不可用，
+  重新 `kimi-code login` 可恢复 CLI 主路径。
+
+以下为原始调查背景，保留供参考。
+
+
 这份文档给下一位 agent 使用。目标不是重新设计 provider，而是继续验证
 Factory Droid 和 Kimi 的真实登录态、请求链路以及剩余的 HTTP 401 问题。
 
