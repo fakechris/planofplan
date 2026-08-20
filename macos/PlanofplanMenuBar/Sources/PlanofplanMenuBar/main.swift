@@ -49,14 +49,25 @@ struct UsageSummary: Decodable {
     }
 }
 
-/// 下拉面板：CodexBar 式单 provider 大卡片 + ‹ › 左右切换。
-/// 自绘深色卡片、固定配色——不依赖菜单 vibrancy/系统外观，浅色模式下
-/// 同样保证对比度（此前用 secondaryLabelColor 在浅色菜单上几乎不可读）。
+/// 下拉面板：第一页 index 总览（全部 plan 紧凑行，点行跳转），之后每
+/// provider 一张大卡片；‹ › 自绘箭头 + 命中区域切换（NSButton 的 tint
+/// 在菜单里不可靠，黑底黑字不可见）。plan 多到一页放不下时自动拆多页
+/// 总览。自绘深色卡片、固定配色，不依赖菜单 vibrancy/系统外观。
 final class PanelView: NSView {
+    private enum Page {
+        case index(rows: [Int])
+        case provider(Int)
+    }
+
     private let plans: [Plan]
     private var usage: UsageSummary?
-    private var index: Int
+    private var pages: [Page] = []
+    private var page: Int = 0
     private let onSelect: (Int) -> Void
+
+    private var chevronLeftRect = NSRect.zero
+    private var chevronRightRect = NSRect.zero
+    private var indexRowRects: [(rect: NSRect, planIndex: Int)] = []
 
     private let cardBG = NSColor(srgbRed: 0.055, green: 0.075, blue: 0.10, alpha: 1)
     private let cardBorder = NSColor(white: 1, alpha: 0.09)
@@ -67,58 +78,64 @@ final class PanelView: NSView {
     private let warnColor = NSColor(srgbRed: 0.91, green: 0.71, blue: 0.32, alpha: 1)
     private let badColor = NSColor(srgbRed: 0.94, green: 0.44, blue: 0.44, alpha: 1)
     private let accentColor = NSColor(srgbRed: 0.36, green: 0.84, blue: 0.90, alpha: 1)
+    private let chevronColor = NSColor(white: 1, alpha: 0.55)
 
     static let panelWidth: CGFloat = 344
     static let cardInset: CGFloat = 6
 
+    /// 面板固定高度：取 provider 页与 9 行总览页的较大者。
     static func height(plans: [Plan]) -> CGFloat {
         let maxWindows = CGFloat(max(1, plans.map { $0.windows.count }.max() ?? 1))
-        let switcher: CGFloat = 42
-        let statusBlock: CGFloat = 44
-        let windowBlock = maxWindows * 64
-        let usageFooter: CGFloat = 62
-        return cardInset + 10 + switcher + statusBlock + windowBlock + usageFooter + 10 + cardInset
+        let providerHeight = 10 + 42 + 44 + maxWindows * 64 + 62 + 10
+        let indexHeight = 10 + 42 + CGFloat(max(plans.count, 1)) * 30 + 62 + 10
+        return 2 * cardInset + max(providerHeight, min(indexHeight, 480))
     }
 
-    init(plans: [Plan], usage: UsageSummary?, startIndex: Int, onSelect: @escaping (Int) -> Void = { _ in }) {
+    init(plans: [Plan], usage: UsageSummary?, startPage: Int = 0, onSelect: @escaping (Int) -> Void = { _ in }) {
         self.plans = plans
         self.usage = usage
         self.onSelect = onSelect
-        self.index = min(max(startIndex, 0), max(plans.count - 1, 0))
         super.init(frame: NSRect(x: 0, y: 0, width: PanelView.panelWidth, height: PanelView.height(plans: plans)))
-
-        let buttonSize = NSSize(width: 30, height: 26)
-        let topY = PanelView.height(plans: plans) - PanelView.cardInset - 10 - 30
-        for (title, action, x) in [
-            ("‹", #selector(prevProvider), PanelView.cardInset + 10),
-            ("›", #selector(nextProvider), PanelView.panelWidth - PanelView.cardInset - 10 - 30),
-        ] {
-            let button = NSButton(title: title, target: self, action: action)
-            button.frame = NSRect(origin: NSPoint(x: x, y: topY), size: buttonSize)
-            button.bezelStyle = .shadowlessSquare
-            button.isBordered = false
-            button.font = NSFont.systemFont(ofSize: 16, weight: .semibold)
-            (button.cell as? NSButtonCell)?.backgroundColor = .clear
-            button.contentTintColor = NSColor(white: 1, alpha: 0.55)
-            addSubview(button)
-        }
+        buildPages()
+        page = min(max(startPage, 0), max(pages.count - 1, 0))
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    @objc private func prevProvider() { switchProvider(to: index - 1) }
-    @objc private func nextProvider() { switchProvider(to: index + 1) }
+    private func buildPages() {
+        guard !plans.isEmpty else {
+            pages = [.index(rows: [])]
+            return
+        }
+        // 总览行数容量：内容高度（去掉切换行/usage 页脚/内边距）/ 行高
+        let contentHeight = bounds.height - 2 * PanelView.cardInset - 42 - 62 - 22
+        let capacity = max(3, Int(contentHeight / 30))
+        var indexPages: [Page] = []
+        if plans.count > capacity {
+            var offset = 0
+            while offset < plans.count {
+                indexPages.append(.index(rows: Array(offset..<min(offset + capacity, plans.count))))
+                offset += capacity
+            }
+        } else {
+            indexPages = [.index(rows: Array(plans.indices))]
+        }
+        pages = indexPages + plans.indices.map { .provider($0) }
+    }
 
-    private func switchProvider(to next: Int) {
-        guard plans.count > 1 else { return }
-        index = ((next % plans.count) + plans.count) % plans.count
-        onSelect(index)
+    private func goPrev() {
+        page = (page - 1 + pages.count) % pages.count
+        onSelect(page)
         setNeedsDisplay(bounds)
     }
 
-    private var cardRect: NSRect {
-        bounds.insetBy(dx: PanelView.cardInset, dy: PanelView.cardInset)
+    private func goNext() {
+        page = (page + 1) % pages.count
+        onSelect(page)
+        setNeedsDisplay(bounds)
     }
+
+    private var cardRect: NSRect { bounds.insetBy(dx: PanelView.cardInset, dy: PanelView.cardInset) }
 
     override func draw(_ dirtyRect: NSRect) {
         cardBG.setFill()
@@ -128,46 +145,120 @@ final class PanelView: NSView {
         border.lineWidth = 1
         border.stroke()
 
-        guard plans.indices.contains(index) else {
+        indexRowRects = []
+        guard !pages.isEmpty else {
             drawText("正在连接本地 daemon…", at: NSPoint(x: 20, y: bounds.midY),
                      font: .systemFont(ofSize: 12), color: textSecondary)
             return
         }
-        let plan = plans[index]
         let contentLeft = cardRect.minX + 16
         let contentWidth = cardRect.width - 32
-        var y = cardRect.maxY - 30
 
-        // ── 切换行：名称 + 序号（‹ › 按钮在两侧）
-        let nameAttr = NSAttributedString(string: plan.name, attributes: [
-            .font: NSFont.systemFont(ofSize: 13.5, weight: .bold),
+        // ── 头部：标题 + 序号 + 页点 + 自绘 ‹ ›（命中区域记录）
+        let headerBottom = cardRect.maxY - 52
+        let chevronSize = NSSize(width: 34, height: 30)
+        chevronLeftRect = NSRect(x: cardRect.minX + 8, y: headerBottom + 8, width: chevronSize.width, height: chevronSize.height)
+        chevronRightRect = NSRect(x: cardRect.maxX - 8 - chevronSize.width, y: headerBottom + 8, width: chevronSize.width, height: chevronSize.height)
+        drawChevron("‹", in: chevronLeftRect)
+        drawChevron("›", in: chevronRightRect)
+
+        let title: String
+        switch pages[page] {
+        case .index: title = "全部 Plans"
+        case .provider(let i): title = plans[i].name
+        }
+        let titleAttr = NSAttributedString(string: title, attributes: [
+            .font: NSFont.systemFont(ofSize: 13, weight: .bold),
             .foregroundColor: textPrimary,
         ])
-        let indexAttr = NSAttributedString(string: "  \(index + 1)/\(plans.count)", attributes: [
+        let indexAttr = NSAttributedString(string: "  \(page + 1)/\(pages.count)", attributes: [
             .font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .medium),
             .foregroundColor: textTertiary,
         ])
-        let nameSize = nameAttr.size()
+        let titleSize = titleAttr.size()
         let indexSize = indexAttr.size()
-        let totalWidth = nameSize.width + indexSize.width
-        nameAttr.draw(at: NSPoint(x: bounds.midX - totalWidth / 2, y: y - 3))
-        indexAttr.draw(at: NSPoint(x: bounds.midX - totalWidth / 2 + nameSize.width, y: y))
-        y -= 16
+        let totalWidth = titleSize.width + indexSize.width
+        titleAttr.draw(at: NSPoint(x: bounds.midX - totalWidth / 2, y: cardRect.maxY - 34))
+        indexAttr.draw(at: NSPoint(x: bounds.midX - totalWidth / 2 + titleSize.width, y: cardRect.maxY - 31))
 
-        // 页点
-        if plans.count > 1 {
+        if pages.count > 1 {
             let dotGap: CGFloat = 9
-            let dotsWidth = CGFloat(plans.count - 1) * dotGap
-            var dotX = bounds.midX - dotsWidth / 2
-            for i in 0..<plans.count {
-                (i == index ? accentColor : NSColor(white: 1, alpha: 0.18)).setFill()
-                NSBezierPath(ovalIn: NSRect(x: dotX, y: y - 1, width: 3.5, height: 3.5)).fill()
+            var dotX = bounds.midX - CGFloat(pages.count - 1) * dotGap / 2
+            for i in 0..<pages.count {
+                (i == page ? accentColor : NSColor(white: 1, alpha: 0.18)).setFill()
+                NSBezierPath(ovalIn: NSRect(x: dotX, y: cardRect.maxY - 48, width: 3.5, height: 3.5)).fill()
                 dotX += dotGap
             }
         }
-        y -= 22
 
-        // ── 状态块
+        // ── 页面主体
+        switch pages[page] {
+        case .index(let rows):
+            drawIndexPage(rows: rows, top: headerBottom, contentLeft: contentLeft, contentWidth: contentWidth)
+        case .provider(let i):
+            drawProviderPage(plans[i], top: headerBottom, contentLeft: contentLeft, contentWidth: contentWidth)
+        }
+
+        drawUsageFooter(contentLeft: contentLeft, contentWidth: contentWidth)
+    }
+
+    private func drawChevron(_ symbol: String, in rect: NSRect) {
+        let para = NSMutableParagraphStyle()
+        para.alignment = .center
+        let attr = NSAttributedString(string: symbol, attributes: [
+            .font: NSFont.systemFont(ofSize: 17, weight: .bold),
+            .foregroundColor: pages.count > 1 ? chevronColor : NSColor(white: 1, alpha: 0.15),
+            .paragraphStyle: para,
+        ])
+        attr.draw(in: NSRect(x: rect.minX, y: rect.minY - 2, width: rect.width, height: rect.height))
+    }
+
+    /// 总览页：每 plan 一行——状态 pip、名称、最紧张窗口百分比与倒计时。
+    private func drawIndexPage(rows: [Int], top: CGFloat, contentLeft: CGFloat, contentWidth: CGFloat) {
+        var y = top - 18
+        let rowHeight: CGFloat = 30
+        for planIndex in rows {
+            let plan = plans[planIndex]
+            let rowRect = NSRect(x: contentLeft, y: y - 6, width: contentWidth, height: rowHeight - 6)
+            indexRowRects.append((rect: rowRect, planIndex: planIndex))
+
+            let statusColor = color(forStatus: plan.status)
+            statusColor.setFill()
+            NSBezierPath(ovalIn: NSRect(x: contentLeft, y: y + 1, width: 6, height: 6)).fill()
+
+            drawText(plan.name, at: NSPoint(x: contentLeft + 14, y: y - 1),
+                     font: .systemFont(ofSize: 11.5, weight: .medium), color: textPrimary)
+
+            // 最紧张窗口（已用百分比最高）
+            let tight = plan.windows.filter { $0.percentage != nil }
+                .max { ($0.percentage ?? 0) < ($1.percentage ?? 0) }
+            let unlimited = plan.windows.first { $0.note == "不限量" && $0.percentage == nil }
+            var rightText = "--"
+            var rightColor = textTertiary
+            if let tight {
+                rightText = "\(Int(tight.percentage!.rounded()))%"
+                rightColor = color(forRemaining: 100 - tight.percentage!)
+            } else if unlimited != nil {
+                rightText = "∞"
+                rightColor = okColor
+            }
+            drawRightAligned(rightText, y: y - 1, right: cardRect.maxX - 62,
+                             font: .monospacedDigitSystemFont(ofSize: 12, weight: .bold), color: rightColor)
+            if let label = tight?.label {
+                drawRightAligned(label, y: y + 1, right: cardRect.maxX - 16,
+                                 font: .systemFont(ofSize: 9), color: textTertiary)
+            }
+
+            NSColor(white: 1, alpha: 0.05).setFill()
+            NSRect(x: contentLeft, y: y - 9, width: contentWidth, height: 1).fill()
+            y -= rowHeight
+        }
+    }
+
+    /// provider 大卡片页：状态块 + 每窗口富信息块。
+    private func drawProviderPage(_ plan: Plan, top: CGFloat, contentLeft: CGFloat, contentWidth: CGFloat) {
+        var y = top - 14
+
         let statusColor = color(forStatus: plan.status)
         statusColor.setFill()
         NSBezierPath(ovalIn: NSRect(x: contentLeft, y: y - 1, width: 7, height: 7)).fill()
@@ -182,7 +273,6 @@ final class PanelView: NSView {
                  font: .systemFont(ofSize: 10), color: textTertiary)
         y -= 14
 
-        // ── 窗口块（每个窗口 64px：label+恢复时间 / 大数字%+条+倒计时）
         if plan.windows.isEmpty {
             let message = plan.status == "not_configured"
                 ? (plan.credentialHint ?? "暂无数据")
@@ -191,7 +281,6 @@ final class PanelView: NSView {
                      font: .systemFont(ofSize: 11),
                      color: (plan.status == "auth_error" || plan.status == "error") ? badColor : textTertiary,
                      maxWidth: contentWidth, maxLines: 2)
-            y -= 50
         } else {
             for window in plan.windows {
                 let pct = window.percentage
@@ -201,8 +290,7 @@ final class PanelView: NSView {
                 drawText(window.label, at: NSPoint(x: contentLeft, y: y),
                          font: .systemFont(ofSize: 11, weight: .semibold), color: textSecondary)
                 if let resetAt = window.resetAt {
-                    let resetText = "恢复 " + PanelView.shortDateTime(resetAt)
-                    drawRightAligned(resetText, y: y, right: cardRect.maxX - 16,
+                    drawRightAligned("恢复 " + PanelView.shortDateTime(resetAt), y: y, right: cardRect.maxX - 16,
                                      font: .systemFont(ofSize: 9.5), color: textTertiary)
                 }
                 y -= 21
@@ -233,20 +321,18 @@ final class PanelView: NSView {
                                      color: textPrimary)
                 }
 
-                let barX = contentLeft
-                let barWidth = contentWidth
-                let barRect = NSRect(x: barX, y: y - 12, width: barWidth, height: 5)
+                let barRect = NSRect(x: contentLeft, y: y - 12, width: contentWidth, height: 5)
                 NSColor(white: 1, alpha: 0.10).setFill()
                 NSBezierPath(roundedRect: barRect, xRadius: 2.5, yRadius: 2.5).fill()
                 if let pct, pct > 0 {
                     levelColor.setFill()
-                    let fillWidth = max(5, barWidth * min(max(pct, 0), 100) / 100)
-                    NSBezierPath(roundedRect: NSRect(x: barX, y: y - 12, width: fillWidth, height: 5),
+                    let fillWidth = max(5, contentWidth * min(max(pct, 0), 100) / 100)
+                    NSBezierPath(roundedRect: NSRect(x: contentLeft, y: y - 12, width: fillWidth, height: 5),
                                  xRadius: 2.5, yRadius: 2.5).fill()
                 }
 
                 if let note = window.note, !note.isEmpty {
-                    drawText(note, at: NSPoint(x: barX, y: y - 26),
+                    drawText(note, at: NSPoint(x: contentLeft, y: y - 26),
                              font: .systemFont(ofSize: 9.5), color: textTertiary)
                     y -= 64
                 } else {
@@ -254,13 +340,12 @@ final class PanelView: NSView {
                 }
             }
         }
+    }
 
-        // ── usage 页脚
-        y = cardRect.minY + 14
+    private func drawUsageFooter(contentLeft: CGFloat, contentWidth: CGFloat) {
+        let y = cardRect.minY + 14
         NSColor(white: 1, alpha: 0.08).setFill()
-        let sepRect = NSRect(x: contentLeft, y: y + 40, width: contentWidth, height: 1)
-        sepRect.fill()
-
+        NSRect(x: contentLeft, y: y + 40, width: contentWidth, height: 1).fill()
         drawText("TOKEN USAGE · 30 DAYS", at: NSPoint(x: contentLeft, y: y + 24),
                  font: .systemFont(ofSize: 9, weight: .bold), color: textTertiary)
         let numberFont = NSFont.monospacedDigitSystemFont(ofSize: 11.5, weight: .semibold)
@@ -273,6 +358,30 @@ final class PanelView: NSView {
         if !top.isEmpty {
             drawText(top.joined(separator: " · "), at: NSPoint(x: contentLeft, y: y - 10),
                      font: .systemFont(ofSize: 10), color: textSecondary)
+        }
+    }
+
+    // ── 交互：自绘箭头的命中区域 + 总览行点击跳转 ─────────────────
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        if chevronLeftRect.contains(point) {
+            goPrev()
+            return
+        }
+        if chevronRightRect.contains(point) {
+            goNext()
+            return
+        }
+        for row in indexRowRects where row.rect.contains(point) {
+            if let pageIndex = pages.firstIndex(where: { page in
+                if case .provider(let i) = page { return i == row.planIndex }
+                return false
+            }) {
+                page = pageIndex
+                onSelect(page)
+                setNeedsDisplay(bounds)
+            }
+            return
         }
     }
 
@@ -391,6 +500,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var daemon: Process?
     private var overview: Overview?
     private var usageSummary: UsageSummary?
+    /// PanelView 当前页码（总览页=0..n，之后每 provider 一页）。跨菜单重建保持。
     private var selectedPlanIndex = 0
     private var didBootstrapBrowserSessions = false
     private var safariPermissionState: SafariPermissionState = .unknown
@@ -447,9 +557,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item.view = PanelView(
                 plans: overview.plans,
                 usage: usageSummary,
-                startIndex: selectedPlanIndex
-            ) { [weak self] idx in
-                self?.selectedPlanIndex = idx
+                startPage: selectedPlanIndex
+            ) { [weak self] page in
+                self?.selectedPlanIndex = page
             }
             item.isEnabled = false
             menu.addItem(item)
