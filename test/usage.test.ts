@@ -544,10 +544,14 @@ describe('usage byPlan 归属', () => {
       { ...base, id: 'e', timestamp: now, provider: 'claude', model: 'MiniMax-M3', totalTokens: 10 },
       { ...base, id: 'f', timestamp: now, provider: 'codex', model: 'kimi-k3', totalTokens: 5 },
       { ...base, id: 'g', timestamp: now, provider: 'dsh', model: 'deepseek-v4-flash', totalTokens: 200 },
+      { ...base, id: 'h', timestamp: now, provider: 'claude', model: 'qwen-max', totalTokens: 7 },
+      { ...base, id: 'i', timestamp: now, provider: 'claude', model: 'claude-fable-5', totalTokens: 40 },
     ];
     const report = buildUsageReport(records, { since: now - 1000, until: now + 1000 });
     const plans = Object.fromEntries(report.byPlan.map((row) => [row.plan, row]));
-    expect(plans.claude.totalTokens).toBe(150);
+    expect(plans.claude.totalTokens).toBe(190);           // claude 壳下只认 Anthropic 家族（fable 50+40）
+    expect(plans.claude.topModels.map((m) => m.model)).toContain('claude-fable-5');
+    expect(report.byPlan.some((row) => row.topModels.some((m) => m.model === 'qwen-max'))).toBeFalse(); // 未识别第三方不归属
     expect(plans.claude.topModels.map((m) => m.model)).toEqual(['claude-opus-5', 'claude-fable-5']);
     expect(plans.glm.totalTokens).toBe(50);          // claude/glm-5.2 + zcode/GLM-5.3
     expect(plans.minimax.totalTokens).toBe(10);

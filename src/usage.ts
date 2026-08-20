@@ -787,8 +787,13 @@ export function usagePlanFor(provider: string, model: string): string | null {
   if (m.includes('minimax')) return 'minimax';
   if (m.startsWith('deepseek') || provider === 'dsh') return 'deepseek';
   if (provider === 'grok-cli') return 'grok';
-  if (m.startsWith('claude') || provider === 'claude') return 'claude';
   if (m.startsWith('gpt') || provider === 'codex') return 'codex';
+  // claude 壳是多租户入口：可经 router 跑任意第三方模型（实测有 MiniMax-M3、
+  // glm-5.2 混在 provider=claude 下）。只有明确的 Anthropic 家族才归入
+  // claude plan；未识别的第三方模型不归属任何 plan（保留在全局 totals，
+  // 不虚构到某个 plan 的用量里）。
+  const isAnthropicFamily = m.startsWith('claude') || /sonnet|opus|haiku|fable/.test(m);
+  if (isAnthropicFamily && provider === 'claude') return 'claude';
   return null;
 }
 
