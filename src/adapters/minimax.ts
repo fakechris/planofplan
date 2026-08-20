@@ -93,6 +93,8 @@ interface LaneInput {
   end: number | null;
   remainsTime: number | null;
   unlimitedService: boolean;
+  /** 显式渲染（如不限量周车道），跳过占位过滤与空值丢弃。 */
+  force?: boolean;
 }
 
 type Lane = QuotaWindow & { modelName?: string };
@@ -100,6 +102,7 @@ type Lane = QuotaWindow & { modelName?: string };
 function pushLane(out: Lane[], input: LaneInput, now: number): void {
   // 占位车道（status 3 且总量/剩余缺失或为 0、剩余 100%）跳过（CodexBar isUnavailableQuotaPlaceholder）
   if (
+    !input.force &&
     input.status === 3 &&
     input.total == null &&
     input.remaining == null &&
@@ -121,7 +124,7 @@ function pushLane(out: Lane[], input: LaneInput, now: number): void {
     percentage = clamp((used / input.total) * 100, 0, 100);
   }
 
-  if (percentage == null && used == null) return;
+  if (!input.force && percentage == null && used == null) return;
 
   let resetAt: number | null = null;
   if (input.end != null && input.end > now) {
@@ -186,7 +189,9 @@ export function normalizeMiniMax(raw: unknown, now: number): { windows: QuotaWin
       unlimitedService: false,
     }, now);
 
-    // weekly 车道仅在真实配额时渲染（CodexBar 同规则）
+    // weekly 车道：有真实配额时渲染数值；无配额（status 3 不限量）时显式
+    // 渲染 ∞ 车道，与 MiniMax App 的「周限额 ∞ 无限制」一致，避免只剩
+    // 视频周车道时被误读为主窗口周限额。
     const weeklyTotal = num(item.current_weekly_total_count);
     if (weeklyTotal != null && weeklyTotal > 0) {
       pushLane(lanes, {
@@ -201,6 +206,20 @@ export function normalizeMiniMax(raw: unknown, now: number): { windows: QuotaWin
         remainsTime: num(item.weekly_remains_time),
         unlimitedService: false,
       }, now);
+    } else if (num(item.weekly_end_time) != null) {
+      pushLane(lanes, {
+        window: 'weekly_unlimited',
+        label: 'Week',
+        modelName,
+        total: null,
+        remaining: null,
+        remainingPercent: null,
+        status: num(item.current_weekly_status),
+        end: num(item.weekly_end_time),
+        remainsTime: null,
+        unlimitedService: true,
+        force: true,
+      }, now);
     }
   }
 
@@ -209,14 +228,14 @@ export function normalizeMiniMax(raw: unknown, now: number): { windows: QuotaWin
   }
 
   // 同窗口多条车道时 label 追加模型名（如 5H·general / 5H·video），避免 UI 上一排同名 bar
-  const countByWindow = new Map<string, number>();
-  for (const lane of lanes) {
-    countByWindow.set(lane.window, (countByWindow.get(lane.window) ?? 0) + 1);
-  }
+  // 同窗口多条车道时区分命名：video 车道固定用「视频·」前缀（MiniMax App
+  // 的「视频赠送」语义），general 车道保持裸标签。
   const windows: QuotaWindow[] = lanes.map((lane) => {
-    const dup = (countByWindow.get(lane.window) ?? 0) > 1;
-    const label = dup && lane.modelName ? `${lane.label}·${lane.modelName}` : lane.label;
-    return { ...lane, label };
+    if (lane.modelName === 'video') {
+      const base = lane.label === 'Week' ? '周' : lane.label;
+      return { ...lane, label: `视频·${base}` };
+    }
+    return lane;
   });
 
   const planName =

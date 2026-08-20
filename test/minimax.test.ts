@@ -111,3 +111,62 @@ describe('normalizeMiniMax', () => {
     expect(() => normalizeMiniMax(null, NOW)).toThrow(AdapterError);
   });
 });
+
+describe('normalizeMiniMax 新版不限量套餐（2026-08 实测响应）', () => {
+  const raw = {
+    base_resp: { status_code: 0, status_msg: 'success' },
+    model_remains: [
+      {
+        model_name: 'general',
+        start_time: NOW - 1.2 * 3_600_000,
+        end_time: NOW + 3 * 3_600_000,
+        remains_time: 13_305_076,
+        current_interval_total_count: 0,
+        current_interval_usage_count: 0,
+        current_interval_remaining_percent: 91,
+        current_interval_status: 1,
+        current_weekly_total_count: 0,
+        current_weekly_usage_count: 0,
+        current_weekly_status: 3,
+        current_weekly_remaining_percent: 100,
+        weekly_end_time: NOW + 3 * 86_400_000,
+      },
+      {
+        model_name: 'video',
+        end_time: NOW + 12 * 3_600_000,
+        remains_time: 45_705_076,
+        current_interval_total_count: 3,
+        current_interval_usage_count: 3,
+        current_interval_remaining_percent: 100,
+        current_interval_status: 1,
+        current_weekly_total_count: 21,
+        current_weekly_usage_count: 21,
+        current_weekly_status: 1,
+        current_weekly_remaining_percent: 100,
+        weekly_end_time: NOW + 3 * 86_400_000,
+      },
+    ],
+  };
+
+  test('general 5h 纯百分比制（counts 为 0 也能得到已用百分比）', () => {
+    const { windows } = normalizeMiniMax(raw, NOW);
+    const general = windows.find((w) => w.window === 'rolling_5h' && w.label === '5H');
+    expect(general?.percentage).toBe(9);
+    expect(general?.used).toBeNull();
+  });
+
+  test('weekly 不限量显式渲染 ∞ 车道，而不是隐藏', () => {
+    const { windows } = normalizeMiniMax(raw, NOW);
+    const unlimited = windows.find((w) => w.window === 'weekly_unlimited');
+    expect(unlimited?.note).toBe('不限量');
+    expect(unlimited?.percentage).toBeNull();
+    expect(unlimited?.resetAt).toBe(NOW + 3 * 86_400_000);
+  });
+
+  test('video 车道用「视频·」前缀，不再占用裸 Week 标签', () => {
+    const { windows } = normalizeMiniMax(raw, NOW);
+    expect(windows.find((w) => w.label === '视频·5H')?.total).toBe(3);
+    expect(windows.find((w) => w.label === '视频·周')?.total).toBe(21);
+    expect(windows.find((w) => w.label === 'Week')?.window).toBe('weekly_unlimited');
+  });
+});

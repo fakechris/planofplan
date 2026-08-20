@@ -418,11 +418,13 @@ function renderPlan(p, now) {
       const node = tpl.content.cloneNode(true);
       node.querySelector('.win-label').textContent = w.label;
       const meta = node.querySelector('.win-meta');
-      const pct = w.percentage == null ? '--' : `${w.percentage}%`;
-      const frac = w.used != null && w.total != null
-        ? `${w.used}/${w.total}`
-        : w.used != null ? String(w.used) : '';
-      meta.innerHTML = `${Number.isFinite(w.percentage) ? `<b>${pct}</b>` : pct}${frac ? ` · ${frac}` : ''}`;
+      const unlimited = w.note === '不限量' && w.percentage == null;
+      const pct = unlimited ? '∞' : w.percentage == null ? '--' : `${w.percentage}%`;
+      const frac = unlimited ? ''
+        : w.used != null && w.total != null
+          ? `${w.used}/${w.total}`
+          : w.used != null ? String(w.used) : '';
+      meta.innerHTML = `${Number.isFinite(w.percentage) || unlimited ? `<b>${pct}</b>` : pct}${frac ? ` · ${frac}` : ''}`;
       const fill = node.querySelector('.fill');
       fill.className = `fill ${levelClass(w.percentage)}`;
       fill.style.width = `${w.percentage ?? 0}%`;

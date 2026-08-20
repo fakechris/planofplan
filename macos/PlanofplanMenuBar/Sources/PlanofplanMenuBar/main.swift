@@ -207,10 +207,11 @@ final class PanelView: NSView {
                 }
                 y -= 21
 
-                let pctText = pct == nil ? "--%" : "\(Int(pct!.rounded()))%"
+                let unlimited = window.note == "不限量" && pct == nil
+                let pctText = unlimited ? "∞" : (pct == nil ? "--%" : "\(Int(pct!.rounded()))%")
                 let pctAttr = NSAttributedString(string: pctText, attributes: [
                     .font: NSFont.monospacedDigitSystemFont(ofSize: 19, weight: .bold),
-                    .foregroundColor: levelColor,
+                    .foregroundColor: unlimited ? okColor : levelColor,
                 ])
                 pctAttr.draw(at: NSPoint(x: contentLeft, y: y - 3))
                 let pctWidth = pctAttr.size().width
