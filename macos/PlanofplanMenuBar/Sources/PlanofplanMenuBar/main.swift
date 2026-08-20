@@ -381,14 +381,22 @@ final class PanelView: NSView {
     private func drawUsageFooter(contentLeft: CGFloat, contentWidth: CGFloat, planSlug: String?) {
         let y = cardRect.minY + 14
         NSColor(white: 1, alpha: 0.08).setFill()
-        NSRect(x: contentLeft, y: y + 40, width: contentWidth, height: 1).fill()
+        // provider 页的分隔线画在富块顶部；index 页保持原位
+        if let planSlug, usage?.usage(forPlan: planSlug) != nil {
+            NSRect(x: contentLeft, y: cardRect.minY + 148 + 4, width: contentWidth, height: 1).fill()
+        } else {
+            NSRect(x: contentLeft, y: y + 40, width: contentWidth, height: 1).fill()
+        }
 
         let numberFont = NSFont.monospacedDigitSystemFont(ofSize: 11.5, weight: .semibold)
         if let planSlug, let planUsage = usage?.usage(forPlan: planSlug) {
-            drawText("USAGE · 30 DAYS", at: NSPoint(x: contentLeft, y: y + 24),
+            // 富用量块自上而下排布，全部锚定在页脚区域顶部（148px 高），
+            // 旧实现自底向上画导致柱状图/项目行落在卡片外不可见。
+            let top = cardRect.minY + 148
+            drawText("USAGE · 30 DAYS", at: NSPoint(x: contentLeft, y: top - 12),
                      font: .systemFont(ofSize: 9, weight: .bold), color: textTertiary)
 
-            // 今日 / 30 天双栏（今日取 daily 最后一天与本地今天匹配的条目）
+            // 今日 / 30 天双栏
             let formatter = DateFormatter()
             formatter.dateFormat = "yyyy-MM-dd"
             let today = formatter.string(from: Date())
@@ -397,18 +405,18 @@ final class PanelView: NSView {
             if let cost = todayEntry?.estimatedCostUsd {
                 todayText += String(format: " · $%.2f", cost)
             }
-            drawText(todayText, at: NSPoint(x: contentLeft, y: y + 4), font: numberFont, color: textPrimary)
+            drawText(todayText, at: NSPoint(x: contentLeft, y: top - 32), font: numberFont, color: textPrimary)
             var monthText = "30天 " + PanelView.shortNumber(planUsage.totalTokens ?? 0)
             if let cost = planUsage.estimatedCostUsd {
                 monthText += String(format: " · $%.2f", cost)
             }
-            drawRightAligned(monthText, y: y + 4, right: cardRect.maxX - 16,
+            drawRightAligned(monthText, y: top - 32, right: cardRect.maxX - 16,
                              font: numberFont, color: textPrimary)
 
-            // 最近 14 天迷你柱状图
+            // 最近 14 天迷你柱状图（底部对齐，今日高亮）
             let bars = planUsage.daily?.suffix(14) ?? []
             if bars.count > 1 {
-                let chartTop = y - 12
+                let chartBottom = top - 72
                 let chartHeight: CGFloat = 26
                 let gap: CGFloat = 2
                 let barWidth = (contentWidth - CGFloat(bars.count - 1) * gap) / CGFloat(bars.count)
@@ -416,7 +424,7 @@ final class PanelView: NSView {
                 for (index, entry) in bars.enumerated() {
                     let height = max(2, chartHeight * entry.totalTokens / peak)
                     let rect = NSRect(x: contentLeft + CGFloat(index) * (barWidth + gap),
-                                      y: chartTop - chartHeight + (chartHeight - height),
+                                      y: chartBottom,
                                       width: barWidth, height: height)
                     (entry.day == today ? accentColor : NSColor(white: 1, alpha: 0.22)).setFill()
                     NSBezierPath(roundedRect: rect, xRadius: 1, yRadius: 1).fill()
@@ -424,7 +432,7 @@ final class PanelView: NSView {
             }
 
             // Top 项目（路径取最后两段）
-            var projectY = y - 18
+            var projectY = top - 92
             for project in planUsage.topProjects?.prefix(3) ?? [] {
                 let name = PanelView.projectDisplayName(project.project)
                 drawTruncatedRight(name, y: projectY, right: cardRect.maxX - 74, maxWidth: 190,
