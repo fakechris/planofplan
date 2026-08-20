@@ -239,6 +239,45 @@ function renderSessions(list) {
       showToast(error.message, true);
     }
   });
+  if (open) void loadSessionTranscript(open.id);
+}
+
+async function loadSessionTranscript(id) {
+  const box = document.getElementById('sessionTranscript');
+  if (!box) return;
+  box.innerHTML = '<div class="muted">读取对话…</div>';
+  try {
+    const data = await request(`/api/sessions/${encodeURIComponent(id)}/transcript`);
+    box.innerHTML = transcriptHtml(data);
+    box.querySelector('[data-resume]')?.addEventListener('click', async (event) => {
+      event.stopPropagation();
+      try {
+        await request(`/api/sessions/${encodeURIComponent(id)}/resume`, { method: 'POST' });
+        showToast('已在 Terminal 中 resume');
+      } catch (error) {
+        showToast(error.message, true);
+      }
+    });
+  } catch (error) {
+    box.innerHTML = `<div class="muted">${escapeHtml(error.message)}</div>`;
+  }
+}
+
+function transcriptHtml(data) {
+  const turns = (data.turns || []).map((turn) => {
+    const label = turn.role === 'tool'
+      ? `tool · ${turn.toolName || 'call'}`
+      : turn.role === 'user' ? 'You' : 'Assistant';
+    return `<div class="turn turn-${escapeHtml(turn.role)}"><span>${escapeHtml(label)}</span><p>${escapeHtml(turn.text || '')}</p></div>`;
+  }).join('');
+  const resume = data.resume?.available
+    ? `<button class="button-primary" type="button" data-resume>Resume</button>`
+    : `<span class="muted">${escapeHtml(data.resume?.reason || '此来源不能 resume')}</span>`;
+  return `
+    <div class="session-actions">${resume}</div>
+    <div class="transcript">${turns || '<div class="muted">没有可读的对话正文</div>'}</div>
+    ${data.truncated ? '<div class="muted">正文已截断（大日志只读前若干轮）</div>' : ''}
+  `;
 }
 
 function sessionDetailHtml(session) {
@@ -249,7 +288,10 @@ function sessionDetailHtml(session) {
       <dt>日志</dt><dd>${escapeHtml(session.sourceFile || '--')}</dd>
       <dt>开始</dt><dd>${session.startedAt ? fmtTime(session.startedAt, true) : '--'}</dd>
     </div>
-    ${session.sourceFile ? `<div class="session-actions"><button class="secondary-btn" type="button" data-reveal="${escapeHtml(session.id)}">在 Finder 中显示</button></div>` : ''}
+    <div class="session-actions">
+      ${session.sourceFile ? `<button class="secondary-btn" type="button" data-reveal="${escapeHtml(session.id)}">在 Finder 中显示</button>` : ''}
+    </div>
+    <div id="sessionTranscript" class="session-transcript"></div>
   `;
 }
 

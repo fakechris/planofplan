@@ -13,6 +13,8 @@ import { basename } from 'node:path';
 import { getBuildInfo } from './build-info.ts';
 import { buildUsageReport } from './usage.ts';
 import { buildSessionList } from './sessions.ts';
+import { readTranscript } from './transcript.ts';
+import { launchResume } from './resume.ts';
 import { getStartupSettings, setLaunchOnStartup } from './startup.ts';
 
 const WEB_DIR = resolve(import.meta.dir, '../web');
@@ -167,6 +169,22 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     const session = store.getSession(id);
     if (!session) return c.json({ ok: false, error: 'unknown session' }, 404);
     return c.json(session);
+  });
+
+  app.get('/api/sessions/:id/transcript', async (c) => {
+    const id = decodeURIComponent(c.req.param('id'));
+    const session = store.getSession(id);
+    if (!session) return c.json({ ok: false, error: 'unknown session' }, 404);
+    return c.json(await readTranscript(session));
+  });
+
+  app.post('/api/sessions/:id/resume', (c) => {
+    const id = decodeURIComponent(c.req.param('id'));
+    const session = store.getSession(id);
+    if (!session) return c.json({ ok: false, error: 'unknown session' }, 404);
+    const result = launchResume(session);
+    if (!result.ok) return c.json({ ok: false, error: result.error, command: result.command ?? null }, 400);
+    return c.json({ ok: true, command: result.command });
   });
 
   app.post('/api/sessions/:id/reveal', (c) => {

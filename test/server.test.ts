@@ -81,6 +81,39 @@ describe('Kimi browser policy', () => {
     expect(body.byProvider).toEqual([{ provider: 'codex', count: 1 }]);
   });
 
+  test('session transcript API returns turns for a catalog row', async () => {
+    const store = openMemoryDb();
+    for (const plan of DEFAULT_PLANS) store.syncPlan(plan);
+    const now = Date.now();
+    const { writeFileSync, mkdtempSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'planofplan-api-transcript-'));
+    const file = join(dir, 'sess.jsonl');
+    writeFileSync(file, `${JSON.stringify({ type: 'user', message: { content: [{ type: 'text', text: 'hello catalog' }] } })}\n`);
+    store.upsertSessions([{
+      id: 'claude:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+      provider: 'claude',
+      nativeId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+      cwd: '/tmp',
+      title: 'hello catalog',
+      sourceFile: file,
+      startedAt: now,
+      updatedAt: now,
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
+      estimatedCostUsd: null,
+      seenAt: now,
+    }]);
+    const response = await createServer(store, scheduler as never, { port: 9291, plans: DEFAULT_PLANS })
+      .request('http://localhost/api/sessions/claude%3Aaaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/transcript');
+    expect(response.status).toBe(200);
+    const body = await response.json() as { turns: Array<{ role: string; text: string }>; resume: { available: boolean } };
+    expect(body.turns[0]).toMatchObject({ role: 'user', text: 'hello catalog' });
+    expect(typeof body.resume.available).toBe('boolean');
+  });
+
   test('usage API caches the report between scans', async () => {
     const store = openMemoryDb();
     for (const plan of DEFAULT_PLANS) store.syncPlan(plan);

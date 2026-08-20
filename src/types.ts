@@ -137,6 +137,25 @@ export interface SessionRecord {
   seenAt: number;
 }
 
+export interface TranscriptTurn {
+  role: 'user' | 'assistant' | 'tool';
+  text: string;
+  toolName?: string;
+}
+
+export interface SessionResume {
+  available: boolean;
+  command: string | null;
+  reason?: string;
+}
+
+export interface SessionTranscript {
+  session: SessionRecord;
+  turns: TranscriptTurn[];
+  truncated: boolean;
+  resume: SessionResume;
+}
+
 export interface SessionList {
   generatedAt: number;
   since: number;

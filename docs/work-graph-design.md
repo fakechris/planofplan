@@ -124,7 +124,9 @@ Token 列是 **usage_records 的聚合投影**，不是第二份消费账本。s
 ```
 GET  /api/sessions?days=30&provider=&project=
 GET  /api/sessions/:id
+GET  /api/sessions/:id/transcript → turns + resume 是否可用（M4）
 POST /api/sessions/:id/reveal     → macOS `open -R <source_file>`；其它平台 501
+POST /api/sessions/:id/resume     → 有 CLI 则在 Terminal 里 cd + resume（M4）
 ```
 
 `GET` 默认只读库，不触发扫描（与 `/api/usage` 相同）。「扫描本地日志」走现有 `tokens` 子进程；`collectUsageReport` 成功后调用 `collectSessionCatalog`。
@@ -156,6 +158,8 @@ M3 完成后再开 M4。M5 可复用 dsh-involute `export/track-calendar-view.ht
 
 ```
 src/sessions.ts     catalog：发现、文件头解析、titleify、与 usage 聚合
+src/transcript.ts   只读 JSONL 流式正文（有上限）
+src/resume.ts       PATH 上探测 CLI，macOS Terminal 启动
 src/db.ts           sessions 表 CRUD（现有 Store，不加第二个库）
 src/usage.ts        collectUsageReport 末尾调用 collectSessionCatalog；不复制 walk
 src/server.ts       /api/sessions*
