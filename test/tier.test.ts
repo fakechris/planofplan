@@ -155,11 +155,15 @@ describe('annotateWindowsWithTier', () => {
 });
 
 describe('开关', () => {
-  test('planWantsTierPricing 只在 peakPricing="true" 时为 true', () => {
+  test('planWantsTierPricing 显式开关优先；glm/deepseek 未写 flag 时默认打开', () => {
     expect(planWantsTierPricing(undefined)).toBe(false);
     expect(planWantsTierPricing({})).toBe(false);
     expect(planWantsTierPricing({ peakPricing: 'true' })).toBe(true);
     expect(planWantsTierPricing({ peakPricing: 'false' })).toBe(false);
+    expect(planWantsTierPricing({}, 'glm')).toBe(true);
+    expect(planWantsTierPricing({}, 'deepseek')).toBe(true);
+    expect(planWantsTierPricing({ peakPricing: 'false' }, 'glm')).toBe(false);
+    expect(planWantsTierPricing({}, 'codex')).toBe(false);
   });
 
   test('isTierPricingEnabled 默认开启，PLANOFPPLAN_TIER_PRICING=0 关闭', () => {

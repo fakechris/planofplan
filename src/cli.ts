@@ -12,7 +12,8 @@ import { readFactoryCliAuth } from './factory-cli-auth.ts';
 import type { Store } from './db.ts';
 import type { QuotaWindow } from './types.ts';
 import { buildUsageReport, collectUsageReport } from './usage.ts';
-import { buildSessionList, collectSessionCatalog } from './sessions.ts';
+import { buildSessionList, collectSessionCatalog, searchSessions } from './sessions.ts';
+import { sessionProject } from './repos.ts';
 
 const argv = process.argv.slice(2);
 
@@ -36,7 +37,7 @@ function help(): void {
   planofplan serve [--demo] [--port N]     启动守护进程 + Web dashboard（http://localhost:9288）
   planofplan usage [--json] [--provider sl] 全 plan 用量输出
   planofplan tokens [--json] [--days N] [--provider sl] token usage & spend 报表
-  planofplan sessions [--json] [--days N] [--provider sl] [--refresh] 本地 session 目录
+  planofplan sessions [--json] [--days N] [--provider sl] [--search q] [--refresh] 本地 session 目录
   planofplan status                         各 plan 调度/凭据/最近抓取状态
   planofplan refresh [slug]                 手动刷新一个/全部 plan
   planofplan browser-auth                  读取 Safari kimi-auth 并刷新 Kimi
@@ -47,8 +48,8 @@ function help(): void {
 `);
 }
 
-function flags(): { demo: boolean; port: number | null; json: boolean; provider: string | null; key: string | null; auto: boolean; browser: KimiBrowser | null; days: number; official: boolean; db: string | null; refresh: boolean } {
-  const f = { demo: false, port: null as number | null, json: false, provider: null as string | null, key: null as string | null, auto: false, browser: null as KimiBrowser | null, days: 30, official: true, db: null as string | null, refresh: false };
+function flags(): { demo: boolean; port: number | null; json: boolean; provider: string | null; key: string | null; auto: boolean; browser: KimiBrowser | null; days: number; official: boolean; db: string | null; refresh: boolean; search: string | null } {
+  const f = { demo: false, port: null as number | null, json: false, provider: null as string | null, key: null as string | null, auto: false, browser: null as KimiBrowser | null, days: 30, official: true, db: null as string | null, refresh: false, search: null as string | null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === '--demo') f.demo = true;
@@ -58,6 +59,7 @@ function flags(): { demo: boolean; port: number | null; json: boolean; provider:
     else if (a === '--port') f.port = Number(argv[++i]);
     else if (a === '--key') f.key = argv[++i] ?? null;
     else if (a === '--provider') f.provider = argv[++i] ?? null;
+    else if (a === '--search' || a === '-q') f.search = argv[++i] ?? null;
     else if (a === '--days') f.days = Math.min(365, Math.max(1, Number(argv[++i] ?? 30) || 30));
     else if (a === '--no-official') f.official = false;
     else if (a === '--db') f.db = argv[++i] ?? null;
@@ -106,6 +108,7 @@ function sessionsCmd(): void {
   if (f.refresh) collectSessionCatalog(store, { since, until: now });
   let rows = store.listSessionRows();
   if (f.provider) rows = rows.filter((row) => row.provider === f.provider);
+  if (f.search) rows = searchSessions(rows, f.search);
   const list = buildSessionList(rows, { since, until: now, generatedAt: now });
   if (f.json) {
     console.log(JSON.stringify(list, null, 2));
@@ -117,7 +120,7 @@ function sessionsCmd(): void {
   }
   for (const session of list.sessions.slice(0, 40)) {
     const title = session.title || '(untitled)';
-    const project = session.cwd ? session.cwd.replace(/^.*[/\\]/, '') : '--';
+    const project = sessionProject(session);
     console.log(`  ${session.provider}  ${title}  · ${project}  · ${formatTokens(session.totalTokens)}`);
   }
   if (list.sessions.length > 40) console.log(`  … ${list.sessions.length - 40} more`);

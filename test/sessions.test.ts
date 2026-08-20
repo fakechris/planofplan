@@ -2,10 +2,12 @@ import { describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Database } from 'bun:sqlite';
 import { openMemoryDb } from '../src/db.ts';
 import {
   collectSessionCatalog,
   extractSessionFile,
+  extractSessionRecords,
   isShortAck,
   sessionKey,
   titleify,
@@ -173,6 +175,7 @@ describe('session catalog extractors', () => {
         dshRoot: join(root, 'dsh'),
         kimiRoot: join(root, 'missing-kimi'),
         droidRoot: join(root, 'missing-factory'),
+        zcodeRoot: join(root, 'missing-zcode'),
       });
       expect(count).toBeGreaterThanOrEqual(4);
       const claude = store.getSession(`claude:${claudeId}`);
@@ -184,6 +187,57 @@ describe('session catalog extractors', () => {
       expect(codex?.totalTokens).toBe(15);
       expect(grok?.title).toBe('Grok session');
       expect(dsh?.title).toBe('先落设计文档再开 session 目录');
+      expect(store.getSession('zcode:should-not-exist')).toBeNull();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('ZCode GUI sessions come from cli/db sqlite, not Application Support Chromium cookies', () => {
+    const root = tempRoot();
+    const dbPath = join(root, 'db', 'db.sqlite');
+    try {
+      mkdirSync(join(root, 'db'), { recursive: true });
+      const db = new Database(dbPath);
+      db.exec(`
+        CREATE TABLE session (
+          id text primary key,
+          title text,
+          directory text,
+          path text,
+          parent_id text,
+          time_created integer,
+          time_updated integer
+        );
+      `);
+      db.query(`INSERT INTO session (id, title, directory, path, parent_id, time_created, time_updated)
+                VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
+        'sess_top',
+        '排查 GLM 高峰 pill',
+        '/Users/chris/workspace/planofplan',
+        '/Users/chris/workspace/planofplan',
+        null,
+        1,
+        2,
+      );
+      db.query(`INSERT INTO session (id, title, directory, path, parent_id, time_created, time_updated)
+                VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
+        'sess_subagent_agent_1',
+        '子代理',
+        '/tmp',
+        '/tmp',
+        'sess_top',
+        1,
+        2,
+      );
+      db.close();
+      const rows = extractSessionRecords('zcode', dbPath, 3);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        id: 'zcode:sess_top',
+        cwd: '/Users/chris/workspace/planofplan',
+        title: '排查 GLM 高峰 pill',
+      });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

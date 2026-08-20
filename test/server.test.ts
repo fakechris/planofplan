@@ -75,10 +75,45 @@ describe('Kimi browser policy', () => {
     const body = await response.json() as {
       sessions: Array<{ id: string; provider: string; title: string | null }>;
       byProvider: Array<{ provider: string; count: number }>;
+      graph: { projects: Array<{ name: string }> };
     };
     expect(body.sessions).toHaveLength(1);
     expect(body.sessions[0]?.provider).toBe('codex');
     expect(body.byProvider).toEqual([{ provider: 'codex', count: 1 }]);
+    expect(body.graph?.projects?.length).toBeGreaterThan(0);
+  });
+
+  test('sessions API search matches title and git project', async () => {
+    const store = openMemoryDb();
+    for (const plan of DEFAULT_PLANS) store.syncPlan(plan);
+    const now = Date.now();
+    store.upsertSessions([{
+      id: 'grok:bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+      provider: 'grok',
+      nativeId: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+      cwd: '/Users/chris/source/dsh/explorer',
+      title: '抽出用户需求和 git 项目',
+      sourceFile: '/tmp/summary.json',
+      startedAt: now - 60_000,
+      updatedAt: now - 30_000,
+      inputTokens: 1,
+      outputTokens: 1,
+      totalTokens: 2,
+      estimatedCostUsd: null,
+      seenAt: now,
+      gitRoot: '/Users/chris/source/dsh-involute',
+      gitUrl: 'https://github.com/dsh-external/dsh-track.git',
+      gitName: 'dsh-track',
+    }]);
+    const server = createServer(store, scheduler as never, { port: 9291, plans: DEFAULT_PLANS });
+    const hit = await server.request('http://localhost/api/sessions?days=7&q=dsh-track');
+    const miss = await server.request('http://localhost/api/sessions?days=7&q=no-such-project');
+    expect(hit.status).toBe(200);
+    const hitBody = await hit.json() as { sessions: Array<{ id: string }>; graph: { projects: Array<{ name: string }> } };
+    expect(hitBody.sessions).toHaveLength(1);
+    expect(hitBody.graph.projects[0]?.name).toBe('dsh-track');
+    const missBody = await miss.json() as { sessions: unknown[] };
+    expect(missBody.sessions).toHaveLength(0);
   });
 
   test('session transcript API returns turns for a catalog row', async () => {

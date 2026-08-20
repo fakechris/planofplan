@@ -128,13 +128,14 @@ describe('transcript readers', () => {
 describe('resume availability', () => {
   test('unknown provider is not advertised', () => {
     const info = resumeFor(session({
-      id: 'zcode:1',
-      provider: 'zcode',
+      id: 'nope:1',
+      provider: 'nope',
       nativeId: '1',
       sourceFile: '/tmp/x',
     }));
     expect(info.available).toBe(false);
     expect(info.command).toBeNull();
+    expect(info.reason).toContain('没有已知的 resume CLI');
   });
 
   test('claude resume is advertised only when the binary exists', () => {

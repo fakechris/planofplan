@@ -26,5 +26,9 @@ BUN=$(find_bun) || {
   exit 1
 }
 
+# launchd PATH 只有 /usr/bin:/bin。Resume 要找到 grok/droid/kimi/claude。
+PATH="$HOME/.grok/bin:$HOME/.kimi-code/bin:$HOME/.local/bin:$HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+export PATH
+
 cd "$ROOT"
 exec "$BUN" src/cli.ts serve --port "${PLANOFPPLAN_DAEMON_PORT:-9291}"

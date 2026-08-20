@@ -135,6 +135,32 @@ describe('buildOverview tier 注解', () => {
     expect(overview.plans[0]!.tier?.label).toBe('DeepSeek 高峰');
   });
 
+  test('GLM 默认 extra 为空时工作日下午仍显示高峰', () => {
+    const store = openMemoryDb();
+    const plan = {
+      ...DEFAULT_PLANS.find((item) => item.slug === 'glm')!,
+      extra: {},
+    };
+    store.syncPlan(plan);
+    store.insertWindows(plan.slug, [{
+      window: 'rolling_5h',
+      label: '5H',
+      used: 0,
+      total: 100,
+      unit: 'percent',
+      percentage: 0,
+      resetAt: null,
+      note: null,
+    }], 100);
+    store.setState(plan.slug, { last_success_at: 100 });
+
+    // 2026-08-20 (Thu) 16:00 Shanghai = UTC 08:00
+    const duringPeak = Date.UTC(2026, 7, 20, 8, 0, 0);
+    const overview = buildOverview(store, [plan], duringPeak);
+    expect(overview.plans[0]!.tier?.tier).toBe('peak');
+    expect(overview.plans[0]!.tier?.label).toBe('GLM 高峰');
+  });
+
   test('未启用 peakPricing 的 plan tier 为 null', () => {
     const store = openMemoryDb();
     const plan = DEFAULT_PLANS.find((item) => item.slug === 'codex')!;

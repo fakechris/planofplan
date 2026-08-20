@@ -9,10 +9,10 @@ import { acceptKimiBrowserCookies, refreshKimiBrowserSession } from './adapters/
 import { KIMI_BROWSER, KIMI_BROWSERS, type KimiBrowser } from './browser-cookies.ts';
 import { acceptFactoryBrowserCookies } from './factory-session.ts';
 import { spawnSync } from 'node:child_process';
-import { basename } from 'node:path';
 import { getBuildInfo } from './build-info.ts';
 import { buildUsageReport } from './usage.ts';
-import { buildSessionList } from './sessions.ts';
+import { buildSessionList, searchSessions } from './sessions.ts';
+import { sessionProject } from './repos.ts';
 import { readTranscript } from './transcript.ts';
 import { launchResume } from './resume.ts';
 import { getStartupSettings, setLaunchOnStartup } from './startup.ts';
@@ -167,6 +167,7 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     const days = Math.min(365, Math.max(1, Number(c.req.query('days') ?? 30) || 30));
     const provider = c.req.query('provider')?.trim() || null;
     const project = c.req.query('project')?.trim() || null;
+    const query = c.req.query('q')?.trim() || '';
     const refresh = c.req.query('refresh') === '1';
     const now = Date.now();
     const since = now - days * 86_400_000;
@@ -174,12 +175,8 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     if (refresh || allRows.length === 0) startSessionIndex(days);
     let rows = allRows;
     if (provider) rows = rows.filter((row) => row.provider === provider);
-    if (project) {
-      rows = rows.filter((row) => {
-        const name = row.cwd ? basename(row.cwd.replace(/[/\\]+$/, '')) : '(unknown)';
-        return name === project;
-      });
-    }
+    if (project) rows = rows.filter((row) => sessionProject(row) === project);
+    if (query) rows = searchSessions(rows, query);
     const list = buildSessionList(rows, { since, until: now, generatedAt: now });
     return c.json({
       ...list,
@@ -205,7 +202,7 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     const id = decodeURIComponent(c.req.param('id'));
     const session = store.getSession(id);
     if (!session) return c.json({ ok: false, error: 'unknown session' }, 404);
-    const result = launchResume(session);
+    const result = launchResume(session, { resume: cfg.resume });
     if (!result.ok) return c.json({ ok: false, error: result.error, command: result.command ?? null }, 400);
     return c.json({ ok: true, command: result.command });
   });

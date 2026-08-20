@@ -52,7 +52,18 @@ Grok 例外：token 日志在 `~/.grok/logs/unified.jsonl`，**session 目录**�
 ## 3. 跳转（三档，诚实标注）
 
 1. **应用内阅读**（M4）：永远能做。自己的 GUI 渲染 user/assistant/tool。
-2. **原生 Resume**（M4）：探测到 CLI 才显示按钮（`claude --resume`、`codex resume`、`droid`、Grok）。没有入口就不画。
+2. **原生 Resume**（M4）：探测到入口才显示按钮。launchd PATH 极小，必须搜家目录候选；**跳过坏掉的 Homebrew Codex node wrapper**（缺 vendor 原生二进制就换 nvm/native）。DSH 打开 `http://127.0.0.1:3080/`（web，不是 TUI）。ZCode 打开 GUI（`zcode://workspace/open?path=`）。Claude 优先 `~/.local/bin/claude.sh`。覆盖写在 `~/.planofplan/config.json`：
+
+```json
+{
+  "resume": {
+    "claude": { "bin": "~/.local/bin/claude.sh" },
+    "dsh": { "kind": "url", "url": "http://127.0.0.1:3080/" }
+  }
+}
+```
+
+`args` 里 `{id}` 会替换成 native session id；`env` 会在 Terminal 里 `export`（密钥更适合放 wrapper，不要写进 config）。
 3. **Handoff**（M4 以后，可选）：把摘要喂给当前 agent。不是跳转。
 
 M3 只做到：列出 session、展示元数据、给出 `source_file` 路径（可「在 Finder 中显示」）。不假装打开 Claude/Team/Z/Qwen 的 UI。
@@ -137,7 +148,7 @@ planofplan sessions [--json] [--days N] [--provider sl]
 
 读库列出；不单独全盘重扫。需要刷新时先 `planofplan tokens`（或 dashboard 按钮）。
 
-Dashboard：Token 消耗区块**下方**新增「Session 目录」。筛 provider / 项目（cwd basename）。行：provider、标题、项目、更新时间、token。点开展开 cwd、id、`source_file`、Finder 按钮。空态提示先扫本地日志。
+Dashboard：对话 tab。搜索（标题 / 需求 / git 项目 / 来源）；筛 provider / **git 项目**（不是 cwd basename）。列表或项目聚合视图。行：provider、需求标题、git 项目。点开读正文 + Resume。chat 搜索后置。
 
 ---
 
@@ -147,7 +158,7 @@ Dashboard：Token 消耗区块**下方**新增「Session 目录」。筛 provide
 |---|---|---|---|
 | **M3 Session 目录** | `sessions` 表 + 头扫描 + 与 usage 同趟 + 列表页/CLI | Claude / Codex / Grok / DSH 能列出；条数与 usage 能对上（同文件/同 sid）；大文件不全文读 | 正文渲染、Resume、图、issue |
 | **M4 阅读 + Resume** | 应用内 transcript；有 CLI 才显示 Resume | 点开一条 Claude 和一条 Codex 能读对话；无 CLI 的源只有阅读 | 假深链；跨 agent 续跑当默认 |
-| **M5 日历纱线** | 搬 dsh-track `calendar` 模型：泳道 = 碰到的 git repo，节点 = 需求级用户请求 | 跨项目一天视图可交互；零活动泳道可折叠 | 写入 declared 边 |
+| **M5 日历纱线** | 先做现有 catalog 的知识图：git 项目（cwd walk-up）、需求（首条长用户请求）、observed 边 `in-project` / `has-requirement`；搜索；项目聚合视图。日历纱线随后 | 跨项目能按 git repo 聚需求；搜「dsh-track」能命中目录名不是 dsh-track 的 session | 写入 declared 边；chat 搜索；skill 蒸馏 |
 | **M6 谱系（可选）** | 需求候选、commit 对齐、证据 guard | 默认 dry-run；时间窗链接标 candidate | skill 蒸馏；Entire hook；写入 OVP Crystal |
 
 M3 完成后再开 M4。M5 可复用 dsh-involute `export/track-calendar-view.html` 的数据形状，不必复用 DSH 面板代码。
@@ -158,8 +169,10 @@ M3 完成后再开 M4。M5 可复用 dsh-involute `export/track-calendar-view.ht
 
 ```
 src/sessions.ts     catalog：发现、文件头解析、titleify、与 usage 聚合
+src/repos.ts        cwd → git root / origin URL（项目身份）
+src/graph.ts        session / requirement / project 关系图（observed only）
 src/transcript.ts   只读 JSONL 流式正文（有上限）
-src/resume.ts       PATH 上探测 CLI，macOS Terminal 启动
+src/resume.ts       家目录候选路径探测 CLI，macOS Terminal 启动
 src/db.ts           sessions 表 CRUD（现有 Store，不加第二个库）
 src/usage.ts        collectUsageReport 末尾调用 collectSessionCatalog；不复制 walk
 src/server.ts       /api/sessions*

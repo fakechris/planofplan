@@ -125,7 +125,7 @@ function buildPlanOverview(store: Store, plan: PlanConfig, now: number): Overvie
 
   // 高峰/低谷注解：仅在「全局开关 + per-plan 开关」都打开时打。
   // tier 是「当前时间」的属性，db 不持久化，每次 buildOverview 重算。
-  const tierEnabled = isTierPricingEnabled() && planWantsTierPricing(plan.extra);
+  const tierEnabled = isTierPricingEnabled() && planWantsTierPricing(plan.extra, plan.adapter);
   const tier = tierEnabled ? getTier(plan.adapter, now) : null;
   const annotated = tierEnabled
     ? annotateWindowsWithTier(plan.adapter, visibleWindows, now)

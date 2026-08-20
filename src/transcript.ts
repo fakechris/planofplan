@@ -6,6 +6,7 @@ import { createReadStream, existsSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { spawn } from 'node:child_process';
 import { dirname, join } from 'node:path';
+import { Database } from 'bun:sqlite';
 import type { SessionRecord, SessionTranscript, TranscriptTurn } from './types.ts';
 import { textOf } from './sessions.ts';
 import { resumeFor } from './resume.ts';
@@ -189,8 +190,44 @@ function sourcePathFor(session: SessionRecord): string | null {
   return session.sourceFile;
 }
 
+function turnsFromZcodeDb(path: string, nativeId: string): TranscriptTurn[] {
+  const turns: TranscriptTurn[] = [];
+  let db: Database | null = null;
+  try {
+    db = new Database(path, { readonly: true });
+    const rows = db.query(
+      `SELECT m.data AS message, p.data AS part
+       FROM part p JOIN message m ON m.id = p.message_id
+       WHERE p.session_id = ?
+       ORDER BY m.time_created, p.sequence, p.time_created`,
+    ).all(nativeId) as Array<{ message: string; part: string }>;
+    for (const row of rows) {
+      try {
+        const message = JSON.parse(row.message) as { role?: string };
+        const part = JSON.parse(row.part) as { type?: string; text?: string; name?: string };
+        const role = message.role === 'user' ? 'user' : message.role === 'assistant' ? 'assistant' : 'tool';
+        if (part.type === 'text' && part.text) pushTurn(turns, role === 'tool' ? 'assistant' : role, part.text);
+        else if (part.type === 'tool' || part.type === 'tool-call') {
+          pushTurn(turns, 'tool', part.text ?? part.name ?? '', part.name);
+        }
+      } catch {
+        /* skip */
+      }
+    }
+  } catch {
+    return turns;
+  } finally {
+    db?.close();
+  }
+  return turns;
+}
+
 export async function readTranscript(session: SessionRecord): Promise<SessionTranscript> {
   const resume = resumeFor(session);
+  if (session.provider === 'zcode' && session.sourceFile?.endsWith('.sqlite')) {
+    const turns = turnsFromZcodeDb(session.sourceFile, session.nativeId);
+    return { session, turns: turns.slice(0, MAX_TURNS), truncated: turns.length > MAX_TURNS, resume };
+  }
   const path = sourcePathFor(session);
   if (!path || !existsSync(path)) {
     return { session, turns: [], truncated: false, resume };

@@ -28,6 +28,7 @@ let latestSessions = null;
 let openSessionId = null;
 let sessionVisibleCount = 40;
 let sessionIndexPollTimer = null;
+let sessionView = 'list';
 
 function fmtTime(ms, withSeconds = false) {
   if (ms == null) return '--';
@@ -153,9 +154,14 @@ async function load() {
   return { overview, buildInfo, usage, sessions };
 }
 
-function sessionProjectName(cwd) {
-  if (!cwd) return '(unknown)';
-  return cwd.replace(/[/\\]+$/, '').split(/[/\\]/).pop() || cwd;
+function sessionProjectName(session) {
+  if (typeof session === 'string' || session == null) {
+    if (!session) return '(unknown)';
+    return String(session).replace(/[/\\]+$/, '').split(/[/\\]/).pop() || session;
+  }
+  if (session.gitName) return session.gitName;
+  if (!session.cwd) return '(unknown)';
+  return session.cwd.replace(/[/\\]+$/, '').split(/[/\\]/).pop() || session.cwd;
 }
 
 function fillSessionFilters(list) {
@@ -184,10 +190,14 @@ function filteredSessions(list) {
     const untitled = !title.trim();
     if (hideUntitled && untitled) return false;
     if (provider && session.provider !== provider) return false;
-    if (project && sessionProjectName(session.cwd) !== project) return false;
+    if (project && sessionProjectName(session) !== project) return false;
     if (query) {
-      const hay = `${session.provider} ${title} ${session.cwd || ''} ${sessionProjectName(session.cwd)}`.toLowerCase();
-      if (!hay.includes(query)) return false;
+      const hay = [
+        session.provider, title, session.cwd || '', sessionProjectName(session),
+        session.gitRoot || '', session.gitUrl || '', session.nativeId || '',
+      ].join(' ').toLowerCase();
+      const tokens = query.split(/\s+/).filter(Boolean);
+      if (!tokens.every((token) => hay.includes(token))) return false;
     }
     return true;
   });
@@ -226,15 +236,11 @@ function renderSessions(list) {
     return;
   }
   const visible = sessions.slice(0, sessionVisibleCount);
-  const open = sessions.find((session) => session.id === openSessionId);
-  listEl.innerHTML = visible.map((session) => `
-    <button type="button" class="session-item${session.id === openSessionId ? ' active' : ''}" data-session-id="${escapeHtml(session.id)}">
-      <strong>${escapeHtml(session.title || '无标题')}</strong>
-      <span>${escapeHtml(session.provider)} · ${escapeHtml(sessionProjectName(session.cwd))} · ${fmtAgo(session.updatedAt, Date.now())}${session.totalTokens ? ` · ${fmtTokens(session.totalTokens)}` : ''}</span>
-    </button>
-  `).join('') + (sessions.length > visible.length
-    ? `<button type="button" class="session-more" data-more>还有 ${sessions.length - visible.length} 条，显示更多</button>`
-    : '');
+  const open = sessions.find((session) => session.id === openSessionId)
+    || (latestSessions?.sessions || []).find((session) => session.id === openSessionId);
+  listEl.innerHTML = sessionView === 'projects'
+    ? projectListHtml(visible, sessions.length)
+    : sessionListHtml(visible, sessions.length);
   listEl.querySelectorAll('[data-session-id]').forEach((row) => {
     row.addEventListener('click', () => {
       openSessionId = row.getAttribute('data-session-id');
@@ -245,8 +251,15 @@ function renderSessions(list) {
     sessionVisibleCount += 40;
     renderSessions(latestSessions);
   });
+  listEl.querySelectorAll('[data-filter-project]').forEach((row) => {
+    row.addEventListener('click', () => {
+      const projectSel = document.getElementById('sessionProject');
+      if (projectSel) projectSel.value = row.getAttribute('data-filter-project') || '';
+      resetSessionFilters();
+    });
+  });
   if (open) {
-    readerEl.innerHTML = sessionDetailHtml(open);
+    readerEl.innerHTML = sessionDetailHtml(open, sessions);
     readerEl.querySelector('[data-reveal]')?.addEventListener('click', async (event) => {
       event.stopPropagation();
       const id = event.currentTarget.getAttribute('data-reveal');
@@ -257,15 +270,62 @@ function renderSessions(list) {
         showToast(error.message, true);
       }
     });
+    readerEl.querySelectorAll('[data-related]').forEach((row) => {
+      row.addEventListener('click', () => {
+        openSessionId = row.getAttribute('data-related');
+        renderSessions(latestSessions);
+      });
+    });
     void loadSessionTranscript(open.id);
   } else {
     readerEl.innerHTML = `
       <div class="usage-empty">
-        <strong>从左边选一条对话</strong>
-        <span>这里读正文。有 CLI 时可以 Resume 接着做。</span>
+        <strong>${sessionView === 'projects' ? '从左边选一个项目里的需求' : '从左边选一条对话'}</strong>
+        <span>需求来自首条用户请求，项目来自 git 仓库。有 CLI 时可以 Resume。</span>
       </div>
     `;
   }
+}
+
+function sessionItemHtml(session) {
+  return `
+    <button type="button" class="session-item${session.id === openSessionId ? ' active' : ''}" data-session-id="${escapeHtml(session.id)}">
+      <strong>${escapeHtml(session.title || '无标题')}</strong>
+      <span>${escapeHtml(session.provider)} · ${escapeHtml(sessionProjectName(session))} · ${fmtAgo(session.updatedAt, Date.now())}${session.totalTokens ? ` · ${fmtTokens(session.totalTokens)}` : ''}</span>
+    </button>
+  `;
+}
+
+function sessionListHtml(visible, total) {
+  return visible.map(sessionItemHtml).join('') + (total > visible.length
+    ? `<button type="button" class="session-more" data-more>还有 ${total - visible.length} 条，显示更多</button>`
+    : '');
+}
+
+function projectListHtml(visible, total) {
+  const groups = [];
+  const byName = new Map();
+  for (const session of visible) {
+    const name = sessionProjectName(session);
+    let group = byName.get(name);
+    if (!group) {
+      group = { name, sessions: [] };
+      byName.set(name, group);
+      groups.push(group);
+    }
+    group.sessions.push(session);
+  }
+  return groups.map((group) => `
+    <div class="session-group">
+      <button type="button" class="session-group-head" data-filter-project="${escapeHtml(group.name)}">
+        <strong>${escapeHtml(group.name)}</strong>
+        <span>${group.sessions.length} 条需求</span>
+      </button>
+      ${group.sessions.map(sessionItemHtml).join('')}
+    </div>
+  `).join('') + (total > visible.length
+    ? `<button type="button" class="session-more" data-more>还有 ${total - visible.length} 条，显示更多</button>`
+    : '');
 }
 
 async function loadSessionTranscript(id) {
@@ -279,7 +339,7 @@ async function loadSessionTranscript(id) {
       event.stopPropagation();
       try {
         await request(`/api/sessions/${encodeURIComponent(id)}/resume`, { method: 'POST' });
-        showToast('已在 Terminal 中 resume');
+        showToast(data.resume?.kind === 'url' || data.resume?.kind === 'app' ? '已打开' : '已在 Terminal 中 resume');
       } catch (error) {
         showToast(error.message, true);
       }
@@ -297,7 +357,7 @@ function transcriptHtml(data) {
     return `<div class="turn turn-${escapeHtml(turn.role)}"><span>${escapeHtml(label)}</span><p>${escapeHtml(turn.text || '')}</p></div>`;
   }).join('');
   const resume = data.resume?.available
-    ? `<button class="button-primary" type="button" data-resume>Resume</button>`
+    ? `<button class="button-primary" type="button" data-resume>${escapeHtml(data.resume.label || 'Resume')}</button>`
     : `<span class="muted">${escapeHtml(data.resume?.reason || '此来源不能 resume')}</span>`;
   return `
     <div class="session-actions">${resume}</div>
@@ -306,17 +366,35 @@ function transcriptHtml(data) {
   `;
 }
 
-function sessionDetailHtml(session) {
+function sessionDetailHtml(session, pool) {
+  const related = (pool || []).filter((row) => (
+    row.id !== session.id && sessionProjectName(row) === sessionProjectName(session)
+  )).slice(0, 8);
+  const relatedHtml = related.length
+    ? `<div class="session-related">
+        <h3>同项目其它需求</h3>
+        ${related.map((row) => `
+          <button type="button" data-related="${escapeHtml(row.id)}">
+            ${escapeHtml(row.title || '无标题')}
+            <span>${escapeHtml(row.provider)} · ${fmtAgo(row.updatedAt, Date.now())}</span>
+          </button>
+        `).join('')}
+      </div>`
+    : '';
   return `
     <div class="session-detail-grid">
+      <dt>需求</dt><dd>${escapeHtml(session.title || '（未抽出）')}</dd>
+      <dt>项目</dt><dd>${escapeHtml(sessionProjectName(session))}</dd>
       <dt>Id</dt><dd>${escapeHtml(session.id)}</dd>
       <dt>cwd</dt><dd>${escapeHtml(session.cwd || '--')}</dd>
+      <dt>git</dt><dd>${escapeHtml(session.gitRoot || '--')}</dd>
       <dt>日志</dt><dd>${escapeHtml(session.sourceFile || '--')}</dd>
       <dt>开始</dt><dd>${session.startedAt ? fmtTime(session.startedAt, true) : '--'}</dd>
     </div>
     <div class="session-actions">
       ${session.sourceFile ? `<button class="secondary-btn" type="button" data-reveal="${escapeHtml(session.id)}">在 Finder 中显示</button>` : ''}
     </div>
+    ${relatedHtml}
     <div id="sessionTranscript" class="session-transcript"></div>
   `;
 }
@@ -867,6 +945,15 @@ document.getElementById('sessionProvider')?.addEventListener('change', resetSess
 document.getElementById('sessionProject')?.addEventListener('change', resetSessionFilters);
 document.getElementById('sessionHideUntitled')?.addEventListener('change', resetSessionFilters);
 document.getElementById('sessionSearch')?.addEventListener('input', resetSessionFilters);
+document.querySelectorAll('[data-session-view]').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    sessionView = btn.getAttribute('data-session-view') || 'list';
+    document.querySelectorAll('[data-session-view]').forEach((other) => {
+      other.setAttribute('aria-pressed', String(other === btn));
+    });
+    resetSessionFilters();
+  });
+});
 
 function currentTab() {
   const hash = (location.hash || '#plans').replace('#', '');

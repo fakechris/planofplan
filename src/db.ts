@@ -94,7 +94,10 @@ CREATE TABLE IF NOT EXISTS sessions (
   output_tokens INTEGER NOT NULL DEFAULT 0,
   total_tokens INTEGER NOT NULL DEFAULT 0,
   estimated_cost_usd REAL,
-  seen_at INTEGER NOT NULL
+  seen_at INTEGER NOT NULL,
+  git_root TEXT,
+  git_url TEXT,
+  git_name TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_native ON sessions(provider, native_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);
@@ -158,6 +161,14 @@ export class Store {
     } catch {
       // Existing databases already have the column, or were created by the current schema.
     }
+    for (const column of ['git_root TEXT', 'git_url TEXT', 'git_name TEXT']) {
+      try {
+        db.exec(`ALTER TABLE sessions ADD COLUMN ${column}`);
+      } catch {
+        // Existing databases already have the column, or were created by the current schema.
+      }
+    }
+    db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_git_name ON sessions(git_name)');
   }
 
   /** 配置 → db plans 表（INSERT OR IGNORE；已存在时只更新非运行时字段） */
@@ -789,13 +800,17 @@ export class Store {
     const stmt = this.db.query(
       `INSERT INTO sessions (
          id, provider, native_id, cwd, title, source_file, started_at, updated_at,
-         input_tokens, output_tokens, total_tokens, estimated_cost_usd, seen_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         input_tokens, output_tokens, total_tokens, estimated_cost_usd, seen_at,
+         git_root, git_url, git_name
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          cwd = COALESCE(excluded.cwd, sessions.cwd),
          title = COALESCE(excluded.title, sessions.title),
          source_file = COALESCE(excluded.source_file, sessions.source_file),
          started_at = COALESCE(excluded.started_at, sessions.started_at),
+         git_root = COALESCE(excluded.git_root, sessions.git_root),
+         git_url = COALESCE(excluded.git_url, sessions.git_url),
+         git_name = COALESCE(excluded.git_name, sessions.git_name),
          updated_at = excluded.updated_at,
          seen_at = excluded.seen_at`,
     );
@@ -816,6 +831,9 @@ export class Store {
           row.totalTokens,
           row.estimatedCostUsd,
           row.seenAt,
+          row.gitRoot ?? null,
+          row.gitUrl ?? null,
+          row.gitName ?? null,
         );
       }
       this.db.exec('COMMIT');
@@ -853,7 +871,8 @@ export class Store {
   listSessionRows(): SessionRecord[] {
     const rows = this.db.query(
       `SELECT id, provider, native_id, cwd, title, source_file, started_at, updated_at,
-              input_tokens, output_tokens, total_tokens, estimated_cost_usd, seen_at
+              input_tokens, output_tokens, total_tokens, estimated_cost_usd, seen_at,
+              git_root, git_url, git_name
        FROM sessions`,
     ).all() as Array<{
       id: string;
@@ -869,6 +888,9 @@ export class Store {
       total_tokens: number;
       estimated_cost_usd: number | null;
       seen_at: number;
+      git_root: string | null;
+      git_url: string | null;
+      git_name: string | null;
     }>;
     return rows.map(sessionFromRow);
   }
@@ -876,7 +898,8 @@ export class Store {
   getSession(id: string): SessionRecord | null {
     const row = this.db.query(
       `SELECT id, provider, native_id, cwd, title, source_file, started_at, updated_at,
-              input_tokens, output_tokens, total_tokens, estimated_cost_usd, seen_at
+              input_tokens, output_tokens, total_tokens, estimated_cost_usd, seen_at,
+              git_root, git_url, git_name
        FROM sessions WHERE id = ?`,
     ).get(id) as {
       id: string;
@@ -892,6 +915,9 @@ export class Store {
       total_tokens: number;
       estimated_cost_usd: number | null;
       seen_at: number;
+      git_root: string | null;
+      git_url: string | null;
+      git_name: string | null;
     } | null;
     return row ? sessionFromRow(row) : null;
   }
@@ -942,6 +968,9 @@ function sessionFromRow(row: {
   total_tokens: number;
   estimated_cost_usd: number | null;
   seen_at: number;
+  git_root?: string | null;
+  git_url?: string | null;
+  git_name?: string | null;
 }): SessionRecord {
   return {
     id: row.id,
@@ -957,6 +986,9 @@ function sessionFromRow(row: {
     totalTokens: row.total_tokens,
     estimatedCostUsd: row.estimated_cost_usd,
     seenAt: row.seen_at,
+    gitRoot: row.git_root ?? null,
+    gitUrl: row.git_url ?? null,
+    gitName: row.git_name ?? null,
   };
 }
 

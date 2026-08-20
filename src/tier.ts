@@ -282,7 +282,17 @@ export function isTierPricingEnabled(): boolean {
   return raw !== '0' && raw.toLowerCase() !== 'false';
 }
 
-/** 每 plan 开关：plan.extra.peakPricing === 'true' 启用。 */
-export function planWantsTierPricing(planExtra: Record<string, string> | undefined): boolean {
-  return planExtra?.peakPricing === 'true';
+/**
+ * 每 plan 开关。显式 peakPricing=false 关闭；true 打开。
+ * 未写开关时：已注册高峰规则的 adapter（glm / deepseek）默认打开，
+ * 避免 GLM 默认 extra 漏了 flag 就整卡不显示 ☀ 高峰。
+ */
+export function planWantsTierPricing(
+  planExtra: Record<string, string> | undefined,
+  adapter?: string,
+): boolean {
+  const flag = planExtra?.peakPricing;
+  if (flag === 'false' || flag === '0') return false;
+  if (flag === 'true') return true;
+  return adapter != null && RULE_BY_PROVIDER.has(adapter);
 }

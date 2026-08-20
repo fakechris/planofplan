@@ -21,6 +21,8 @@ describe('dashboard shell', () => {
       'sessionSearch',
       'sessionProvider',
       'sessionProject',
+      'sessionViewList',
+      'sessionViewProjects',
       'grid',
     ]) {
       expect(html).toContain(`id="${id}"`);

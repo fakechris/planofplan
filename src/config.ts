@@ -1,11 +1,12 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { existsSync, mkdirSync, readFileSync, chmodSync } from 'node:fs';
-import type { PlanConfig } from './types.ts';
+import type { PlanConfig, ResumeConfig } from './types.ts';
 
 export interface AppConfig {
   port: number;
   plans: PlanConfig[];
+  resume?: ResumeConfig;
 }
 
 const DEFAULT_PLANS: PlanConfig[] = [
@@ -25,7 +26,7 @@ const DEFAULT_PLANS: PlanConfig[] = [
     enabled: true,
     pollIntervalSec: 60,
     credRef: null,
-    extra: {},
+    extra: { peakPricing: 'true' },
   },
   {
     slug: 'codex',
@@ -110,6 +111,12 @@ export function configPath(): string {
   return join(ensureHome(), 'config.json');
 }
 
+/** DSH is the web GUI on 3080, not TUI. ZCode is the GUI app. Claude wrapper is optional. */
+export const DEFAULT_RESUME: ResumeConfig = {
+  dsh: { kind: 'url', url: 'http://127.0.0.1:3080/' },
+  zcode: { kind: 'app', app: 'ZCode' },
+};
+
 export function loadConfig(): AppConfig {
   const file = configPath();
   let user: Partial<AppConfig> = {};
@@ -126,6 +133,7 @@ export function loadConfig(): AppConfig {
   return {
     port: envPort() ?? user.port ?? 9288,
     plans,
+    resume: { ...DEFAULT_RESUME, ...(user.resume ?? {}) },
   };
 }
 

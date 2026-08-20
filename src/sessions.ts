@@ -17,7 +17,10 @@ import {
 import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
+import { Database } from 'bun:sqlite';
 import type { Store } from './db.ts';
+import { buildWorkGraph } from './graph.ts';
+import { repoRefOf, sessionProject } from './repos.ts';
 import type { SessionList, SessionRecord } from './types.ts';
 
 /** Subset of usage collect options — kept here to avoid a usage.ts cycle. */
@@ -71,10 +74,34 @@ export function titleify(text: string, maxLen = TITLE_MAX): string {
   return cleaned.length > maxLen ? `${cleaned.slice(0, maxLen)}…` : cleaned;
 }
 
-function projectName(cwd: string | null): string {
-  if (!cwd) return '(unknown)';
-  const base = basename(cwd.replace(/[/\\]+$/, ''));
-  return base || cwd;
+export { sessionProject } from './repos.ts';
+
+export function attachGit(session: SessionRecord): SessionRecord {
+  if (!session.cwd) {
+    return { ...session, gitRoot: session.gitRoot ?? null, gitUrl: session.gitUrl ?? null, gitName: session.gitName ?? null };
+  }
+  const repo = repoRefOf(session.cwd);
+  if (!repo) {
+    return { ...session, gitRoot: null, gitUrl: null, gitName: null };
+  }
+  return { ...session, gitRoot: repo.root, gitUrl: repo.url, gitName: repo.name };
+}
+
+export function searchSessions(sessions: SessionRecord[], query: string): SessionRecord[] {
+  const tokens = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return sessions;
+  return sessions.filter((session) => {
+    const hay = [
+      session.title,
+      session.cwd,
+      session.gitName,
+      session.gitRoot,
+      session.gitUrl,
+      session.provider,
+      session.nativeId,
+    ].filter(Boolean).join('\n').toLowerCase();
+    return tokens.every((token) => hay.includes(token));
+  });
 }
 
 function parseTimestamp(value: unknown, fallback: number): number {
@@ -409,6 +436,46 @@ function extractFactory(path: string, mtimeMs: number): SessionRecord | null {
   };
 }
 
+function extractZcodeDb(path: string, mtimeMs: number): SessionRecord[] {
+  if (!existsSync(path)) return [];
+  let db: Database | null = null;
+  try {
+    db = new Database(path, { readonly: true });
+    const rows = db.query(
+      `SELECT id, title, directory, path, time_created, time_updated, parent_id
+       FROM session
+       WHERE parent_id IS NULL OR parent_id = ''`,
+    ).all() as Array<{
+      id: string;
+      title: string | null;
+      directory: string | null;
+      path: string | null;
+      time_created: number;
+      time_updated: number;
+      parent_id: string | null;
+    }>;
+    return rows.map((row) => ({
+      id: sessionKey('zcode', row.id),
+      provider: 'zcode',
+      nativeId: row.id,
+      cwd: row.directory || row.path || null,
+      title: titleify(row.title ?? '') || null,
+      sourceFile: path,
+      startedAt: row.time_created || null,
+      updatedAt: row.time_updated || mtimeMs,
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
+      estimatedCostUsd: null,
+      seenAt: Date.now(),
+    }));
+  } catch {
+    return [];
+  } finally {
+    db?.close();
+  }
+}
+
 export function extractSessionFile(provider: string, path: string, mtimeMs: number): SessionRecord | null {
   switch (provider) {
     case 'claude':
@@ -426,6 +493,12 @@ export function extractSessionFile(provider: string, path: string, mtimeMs: numb
     default:
       return null;
   }
+}
+
+export function extractSessionRecords(provider: string, path: string, mtimeMs: number): SessionRecord[] {
+  if (provider === 'zcode') return extractZcodeDb(path, mtimeMs);
+  const row = extractSessionFile(provider, path, mtimeMs);
+  return row ? [row] : [];
 }
 
 export interface SessionScanFile {
@@ -485,6 +558,13 @@ export function discoverSessionFiles(options: SessionCollectOptions, since: numb
         (name) => name.endsWith('.jsonl') && !name.includes('.settings.'),
       ),
     },
+    {
+      provider: 'zcode',
+      files: (() => {
+        const root = options.zcodeRoot ?? process.env.ZCODE_HOME ?? join(home, '.zcode', 'cli');
+        return [join(root, 'db', 'db.sqlite'), join(root, 'db.sqlite')].filter((path) => existsSync(path));
+      })(),
+    },
   ];
   return groups.flatMap(({ provider, files }) => files.flatMap((path) => {
     try {
@@ -501,8 +581,9 @@ export function collectSessionCatalog(store: Store, options: SessionCollectOptio
   const discovered = discoverSessionFiles(options, since);
   const rows: SessionRecord[] = [];
   for (const file of discovered) {
-    const row = extractSessionFile(file.provider, file.path, file.mtimeMs);
-    if (row) rows.push(row);
+    for (const row of extractSessionRecords(file.provider, file.path, file.mtimeMs)) {
+      rows.push(attachGit(row));
+    }
   }
   store.upsertSessions(rows);
   store.upsertSessions(sessionStubsFromUsage(store, since, until, new Set(rows.map((row) => row.id))));
@@ -525,7 +606,7 @@ function sessionStubsFromUsage(
     const existing = stubs.get(id);
     const updatedAt = Math.max(existing?.updatedAt ?? 0, record.timestamp);
     const startedAt = Math.min(existing?.startedAt ?? record.timestamp, record.timestamp);
-    stubs.set(id, {
+    stubs.set(id, attachGit({
       id,
       provider,
       nativeId: record.sessionId,
@@ -539,7 +620,7 @@ function sessionStubsFromUsage(
       totalTokens: 0,
       estimatedCostUsd: null,
       seenAt: Date.now(),
-    });
+    }));
   }
   return [...stubs.values()];
 }
@@ -614,9 +695,10 @@ export function buildSessionList(
   const byProject = new Map<string, number>();
   for (const session of inWindow) {
     byProvider.set(session.provider, (byProvider.get(session.provider) ?? 0) + 1);
-    const project = projectName(session.cwd);
+    const project = sessionProject(session);
     byProject.set(project, (byProject.get(project) ?? 0) + 1);
   }
+  const sorted = inWindow.sort((a, b) => b.updatedAt - a.updatedAt);
   let indexedAt: number | null = null;
   for (const session of sessions) {
     if (indexedAt == null || session.seenAt > indexedAt) indexedAt = session.seenAt;
@@ -625,13 +707,14 @@ export function buildSessionList(
     generatedAt: options.generatedAt ?? Date.now(),
     since: options.since,
     until: options.until,
-    sessions: inWindow.sort((a, b) => b.updatedAt - a.updatedAt),
+    sessions: sorted,
     byProvider: [...byProvider.entries()]
       .map(([provider, count]) => ({ provider, count }))
       .sort((a, b) => b.count - a.count || a.provider.localeCompare(b.provider)),
     byProject: [...byProject.entries()]
       .map(([project, count]) => ({ project, count }))
       .sort((a, b) => b.count - a.count || a.project.localeCompare(b.project)),
+    graph: buildWorkGraph(sorted),
     indexedAt,
     indexStatus: 'idle',
   };

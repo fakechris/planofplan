@@ -48,17 +48,21 @@
       <div>
         <p class="eyebrow">LOCAL SESSIONS</p>
         <h1>对话</h1>
-        <p class="hero-copy">本机 Claude / Codex / Grok / DSH 等对话目录。点一条读正文；装了对应 CLI 就能 Resume。只读磁盘上的日志，不会拷走。</p>
+        <p class="hero-copy">先搜现有对话里的用户需求和 git 项目，再按项目看关系。Resume 跳回对应 CLI。用对话来搜下一步再做。</p>
       </div>
     </section>
     <div class="session-toolbar">
-      <input id="sessionSearch" type="search" placeholder="搜索标题、项目、来源" aria-label="搜索对话" />
+      <input id="sessionSearch" type="search" placeholder="搜索需求、git 项目、来源" aria-label="搜索对话" />
       <select id="sessionProvider" aria-label="按来源过滤">
         <option value="">全部来源</option>
       </select>
       <select id="sessionProject" aria-label="按项目过滤">
         <option value="">全部项目</option>
       </select>
+      <div class="session-view-toggle" role="group" aria-label="视图">
+        <button type="button" id="sessionViewList" data-session-view="list" aria-pressed="true">对话</button>
+        <button type="button" id="sessionViewProjects" data-session-view="projects" aria-pressed="false">项目</button>
+      </div>
       <label class="session-check">
         <input id="sessionHideUntitled" type="checkbox" checked />
         隐藏无标题

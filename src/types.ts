@@ -135,6 +135,53 @@ export interface SessionRecord {
   totalTokens: number;
   estimatedCostUsd: number | null;
   seenAt: number;
+  /** Enclosing git root of cwd, when one exists. */
+  gitRoot?: string | null;
+  /** origin URL, or git root when origin is missing. */
+  gitUrl?: string | null;
+  /** Display name from origin tail / root basename. */
+  gitName?: string | null;
+}
+
+export interface WorkRequirement {
+  id: string;
+  sessionId: string;
+  text: string;
+  provider: string;
+  project: string;
+  updatedAt: number;
+}
+
+export interface WorkProject {
+  id: string;
+  name: string;
+  root: string | null;
+  url: string | null;
+  sessionCount: number;
+  providers: string[];
+  requirements: WorkRequirement[];
+}
+
+export interface WorkNode {
+  id: string;
+  kind: 'session' | 'project' | 'requirement';
+  label: string;
+  provider?: string;
+  sessionId?: string;
+}
+
+export interface WorkEdge {
+  from: string;
+  to: string;
+  kind: 'in-project' | 'has-requirement';
+  /** Filesystem / log observation. Semantic links stay candidate and are not written here. */
+  evidenceKind: 'observed';
+}
+
+export interface WorkGraph {
+  projects: WorkProject[];
+  nodes: WorkNode[];
+  edges: WorkEdge[];
 }
 
 export interface TranscriptTurn {
@@ -143,10 +190,31 @@ export interface TranscriptTurn {
   toolName?: string;
 }
 
+export type ResumeKind = 'cli' | 'url' | 'app';
+
+/** Per-provider resume override in ~/.planofplan/config.json → resume.<provider>. */
+export interface ResumeOverride {
+  kind?: ResumeKind;
+  /** CLI path or name. `~` is expanded. Example: ~/.local/bin/claude.sh */
+  bin?: string;
+  /** Extra argv after the binary; `{id}` is replaced with the native session id. */
+  args?: string[];
+  /** Extra env for Terminal launch. Prefer a wrapper script over putting secrets here. */
+  env?: Record<string, string>;
+  /** URL jump; `{id}` and `{cwd}` are interpolated. */
+  url?: string;
+  /** macOS app name for `open -a`, e.g. ZCode. */
+  app?: string;
+}
+
+export type ResumeConfig = Record<string, ResumeOverride>;
+
 export interface SessionResume {
   available: boolean;
   command: string | null;
   reason?: string;
+  kind?: ResumeKind;
+  label?: string;
 }
 
 export interface SessionTranscript {
@@ -163,6 +231,7 @@ export interface SessionList {
   sessions: SessionRecord[];
   byProvider: Array<{ provider: string; count: number }>;
   byProject: Array<{ project: string; count: number }>;
+  graph: WorkGraph;
   indexedAt: number | null;
   indexStatus: 'idle' | 'running';
 }
