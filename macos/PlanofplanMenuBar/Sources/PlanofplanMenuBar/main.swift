@@ -561,6 +561,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var didBootstrapBrowserSessions = false
     private var safariPermissionState: SafariPermissionState = .unknown
     private var safariPermissionTimer: Timer?
+    /// daemon 内部每 60s 刷新 provider，menubar 也按 60s 拉取 /api/overview，
+    /// 否则卡片数据停留在启动时（web 每 30s 轮询所以永远是新的）。
+    private var pollTimer: Timer?
+    private var isMenuOpen = false
+    private var pendingMenuRebuild = false
 
     func applicationDidFinishLaunching(_: Notification) {
         NSApplication.shared.setActivationPolicy(.accessory)
@@ -572,16 +577,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         ensureDaemon()
         refreshOverview()
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refreshOverview() }
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             self?.startSafariPermissionOnboardingIfNeeded()
         }
     }
 
     func applicationWillTerminate(_: Notification) {
+        pollTimer?.invalidate()
         safariPermissionTimer?.invalidate()
         if let daemon, daemon.isRunning {
             daemon.terminate()
         }
+    }
+
+    /** 数据到达后的安全刷新：菜单打开时只标记待重建，关闭后补上。 */
+    private func refreshUISafely() {
+        if isMenuOpen {
+            pendingMenuRebuild = true
+            return
+        }
+        rebuildMenu()
+        updateMenuBarIcon()
     }
 
     private func rebuildMenu() {
@@ -895,7 +914,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         request(path: "/api/usage?days=30", method: "GET") { [weak self] data, _ in
             guard let self, let data else { return }
             self.usageSummary = try? JSONDecoder().decode(UsageSummary.self, from: data)
-            self.rebuildMenu()
+            self.refreshUISafely()
         }
     }
 
@@ -910,8 +929,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             } catch {
                 NSLog("planofplan: invalid overview response: \(error)")
             }
-            self.rebuildMenu()
-            self.updateMenuBarIcon()
+            self.refreshUISafely()
             self.fetchUsageSummary()
             self.startSafariPermissionOnboardingIfNeeded()
             self.bootstrapBrowserSessions()
@@ -1403,6 +1421,20 @@ extension AppDelegate: NSMenuDelegate {
     /// 每次打开下拉都重填：倒计时/状态取打开瞬间的实时值。
     func menuNeedsUpdate(_ menu: NSMenu) {
         refillMenu(menu)
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        isMenuOpen = true
+        Task { @MainActor in self.refreshOverview() }
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        isMenuOpen = false
+        if pendingMenuRebuild {
+            pendingMenuRebuild = false
+            rebuildMenu()
+            updateMenuBarIcon()
+        }
     }
 }
 
