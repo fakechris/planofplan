@@ -617,6 +617,10 @@ export function buildSessionList(
     const project = projectName(session.cwd);
     byProject.set(project, (byProject.get(project) ?? 0) + 1);
   }
+  let indexedAt: number | null = null;
+  for (const session of sessions) {
+    if (indexedAt == null || session.seenAt > indexedAt) indexedAt = session.seenAt;
+  }
   return {
     generatedAt: options.generatedAt ?? Date.now(),
     since: options.since,
@@ -628,5 +632,7 @@ export function buildSessionList(
     byProject: [...byProject.entries()]
       .map(([project, count]) => ({ project, count }))
       .sort((a, b) => b.count - a.count || a.project.localeCompare(b.project)),
+    indexedAt,
+    indexStatus: 'idle',
   };
 }

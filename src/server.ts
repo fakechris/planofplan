@@ -24,6 +24,7 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
   let usageRefreshProcess: Bun.Subprocess | null = null;
   let usageRefreshStartedAt: number | null = null;
   let usageRefreshError: string | null = null;
+  let sessionIndexProcess: Bun.Subprocess | null = null;
   // usage 报表缓存：usage_records 只随扫描子进程 / 手动 CLI 写入变化，聚合
   // 十几万行是秒级同步 CPU+IO 工作，前端 30s 一次的轮询不应每次重算。
   // 扫描完成时整体失效；TTL 兜底覆盖外部 CLI 的直写。
@@ -147,13 +148,31 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     });
   });
 
+  const startSessionIndex = (days: number): void => {
+    if (sessionIndexProcess) return;
+    sessionIndexProcess = Bun.spawn([
+      process.execPath,
+      join(import.meta.dir, 'cli.ts'),
+      'sessions',
+      '--refresh',
+      '--days',
+      String(days),
+    ], { stdout: 'ignore', stderr: 'ignore' });
+    void sessionIndexProcess.exited.finally(() => {
+      sessionIndexProcess = null;
+    });
+  };
+
   app.get('/api/sessions', (c) => {
     const days = Math.min(365, Math.max(1, Number(c.req.query('days') ?? 30) || 30));
     const provider = c.req.query('provider')?.trim() || null;
     const project = c.req.query('project')?.trim() || null;
+    const refresh = c.req.query('refresh') === '1';
     const now = Date.now();
     const since = now - days * 86_400_000;
-    let rows = store.listSessionRows();
+    const allRows = store.listSessionRows();
+    if (refresh || allRows.length === 0) startSessionIndex(days);
+    let rows = allRows;
     if (provider) rows = rows.filter((row) => row.provider === provider);
     if (project) {
       rows = rows.filter((row) => {
@@ -161,7 +180,11 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
         return name === project;
       });
     }
-    return c.json(buildSessionList(rows, { since, until: now, generatedAt: now }));
+    const list = buildSessionList(rows, { since, until: now, generatedAt: now });
+    return c.json({
+      ...list,
+      indexStatus: sessionIndexProcess ? 'running' : 'idle',
+    });
   });
 
   app.get('/api/sessions/:id', (c) => {

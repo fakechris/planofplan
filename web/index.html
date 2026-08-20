@@ -15,6 +15,11 @@
         <div class="brand-caption">quota command center</div>
       </div>
     </div>
+    <nav class="tabs" role="tablist">
+      <button type="button" role="tab" data-tab="plans" aria-selected="true">额度</button>
+      <button type="button" role="tab" data-tab="sessions" aria-selected="false">对话</button>
+      <button type="button" role="tab" data-tab="usage" aria-selected="false">Token</button>
+    </nav>
     <div class="header-meta">
       <span id="buildIdentity" class="build-identity" title="当前运行构建"></span>
       <span id="connectionState" class="connection"><i></i> live</span>
@@ -25,22 +30,58 @@
     </div>
   </header>
 
-  <section class="hero">
-    <div>
-      <p class="eyebrow">SUBSCRIPTION TELEMETRY</p>
-      <h1>额度运行态</h1>
-      <p class="hero-copy">在一个视图里监控所有 coding plans 的消耗、凭据和恢复窗口。</p>
-    </div>
-    <div id="heroClock" class="hero-clock"></div>
+  <section id="panel-plans" class="tab-panel" data-panel="plans">
+    <section class="hero">
+      <div>
+        <p class="eyebrow">SUBSCRIPTION TELEMETRY</p>
+        <h1>额度运行态</h1>
+        <p class="hero-copy">各 coding plan 还剩多少、何时恢复。凭据和窗口都在这页。</p>
+      </div>
+      <div id="heroClock" class="hero-clock"></div>
+    </section>
+    <section id="summary" class="summary"></section>
+    <main id="grid" class="grid"></main>
   </section>
 
-  <section id="summary" class="summary"></section>
+  <section id="panel-sessions" class="tab-panel" data-panel="sessions" hidden>
+    <section class="hero">
+      <div>
+        <p class="eyebrow">LOCAL SESSIONS</p>
+        <h1>对话</h1>
+        <p class="hero-copy">本机 Claude / Codex / Grok / DSH 等对话目录。点一条读正文；装了对应 CLI 就能 Resume。只读磁盘上的日志，不会拷走。</p>
+      </div>
+    </section>
+    <div class="session-toolbar">
+      <input id="sessionSearch" type="search" placeholder="搜索标题、项目、来源" aria-label="搜索对话" />
+      <select id="sessionProvider" aria-label="按来源过滤">
+        <option value="">全部来源</option>
+      </select>
+      <select id="sessionProject" aria-label="按项目过滤">
+        <option value="">全部项目</option>
+      </select>
+      <label class="session-check">
+        <input id="sessionHideUntitled" type="checkbox" checked />
+        隐藏无标题
+      </label>
+    </div>
+    <p id="sessionFoot" class="session-foot">daemon 启动时会自动索引本机目录，不用定时手扫。Token 消耗请到 Token 页。</p>
+    <div class="session-workbench">
+      <div id="sessionList" class="session-list"></div>
+      <div id="sessionReader" class="session-reader">
+        <div class="usage-empty">
+          <strong>从左边选一条对话</strong>
+          <span>这里读正文。有 CLI 时可以 Resume 接着做。</span>
+        </div>
+      </div>
+    </div>
+  </section>
 
-  <section class="usage-section">
-    <div class="section-head">
+  <section id="panel-usage" class="tab-panel" data-panel="usage" hidden>
+    <section class="hero">
       <div>
         <p class="eyebrow">USAGE &amp; SPEND</p>
-        <h2>Token 消耗</h2>
+        <h1>Token 消耗</h1>
+        <p class="hero-copy">从本地日志估算花了多少 token。和上面的额度百分比不是同一件事。大目录才需要点扫描，日常打开不用扫。</p>
       </div>
       <div class="usage-actions">
         <button id="usageScanBtn" class="secondary-btn" type="button">扫描本地日志</button>
@@ -53,33 +94,12 @@
           </select>
         </label>
       </div>
+    </section>
+    <div class="usage-section usage-section-flush">
+      <div id="usageReport" class="usage-report"></div>
     </div>
-    <div id="usageReport" class="usage-report"></div>
   </section>
 
-  <section class="usage-section" id="sessionsSection">
-    <div class="section-head">
-      <div>
-        <p class="eyebrow">SESSION CATALOG</p>
-        <h2>Session 目录</h2>
-      </div>
-      <div class="usage-actions">
-        <label class="usage-range">来源
-          <select id="sessionProvider" aria-label="Session provider 过滤">
-            <option value="">全部</option>
-          </select>
-        </label>
-        <label class="usage-range">项目
-          <select id="sessionProject" aria-label="Session 项目过滤">
-            <option value="">全部</option>
-          </select>
-        </label>
-      </div>
-    </div>
-    <div id="sessionReport" class="usage-report"></div>
-  </section>
-
-  <main id="grid" class="grid"></main>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
   <template id="winTpl">

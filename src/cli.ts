@@ -12,7 +12,7 @@ import { readFactoryCliAuth } from './factory-cli-auth.ts';
 import type { Store } from './db.ts';
 import type { QuotaWindow } from './types.ts';
 import { buildUsageReport, collectUsageReport } from './usage.ts';
-import { buildSessionList } from './sessions.ts';
+import { buildSessionList, collectSessionCatalog } from './sessions.ts';
 
 const argv = process.argv.slice(2);
 
@@ -36,7 +36,7 @@ function help(): void {
   planofplan serve [--demo] [--port N]     启动守护进程 + Web dashboard（http://localhost:9288）
   planofplan usage [--json] [--provider sl] 全 plan 用量输出
   planofplan tokens [--json] [--days N] [--provider sl] token usage & spend 报表
-  planofplan sessions [--json] [--days N] [--provider sl] 本地 session 目录
+  planofplan sessions [--json] [--days N] [--provider sl] [--refresh] 本地 session 目录
   planofplan status                         各 plan 调度/凭据/最近抓取状态
   planofplan refresh [slug]                 手动刷新一个/全部 plan
   planofplan browser-auth                  读取 Safari kimi-auth 并刷新 Kimi
@@ -47,12 +47,13 @@ function help(): void {
 `);
 }
 
-function flags(): { demo: boolean; port: number | null; json: boolean; provider: string | null; key: string | null; auto: boolean; browser: KimiBrowser | null; days: number; official: boolean; db: string | null } {
-  const f = { demo: false, port: null as number | null, json: false, provider: null as string | null, key: null as string | null, auto: false, browser: null as KimiBrowser | null, days: 30, official: true, db: null as string | null };
+function flags(): { demo: boolean; port: number | null; json: boolean; provider: string | null; key: string | null; auto: boolean; browser: KimiBrowser | null; days: number; official: boolean; db: string | null; refresh: boolean } {
+  const f = { demo: false, port: null as number | null, json: false, provider: null as string | null, key: null as string | null, auto: false, browser: null as KimiBrowser | null, days: 30, official: true, db: null as string | null, refresh: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === '--demo') f.demo = true;
     else if (a === '--json') f.json = true;
+    else if (a === '--refresh') f.refresh = true;
     else if (a === '--auto') f.auto = true;
     else if (a === '--port') f.port = Number(argv[++i]);
     else if (a === '--key') f.key = argv[++i] ?? null;
@@ -99,8 +100,10 @@ async function tokenUsage(): Promise<void> {
 function sessionsCmd(): void {
   const f = flags();
   const store = openDb(f.db ?? join(ensureHome(), 'planofplan.db'));
+  syncStore(store, loadConfig());
   const now = Date.now();
   const since = now - f.days * 86_400_000;
+  if (f.refresh) collectSessionCatalog(store, { since, until: now });
   let rows = store.listSessionRows();
   if (f.provider) rows = rows.filter((row) => row.provider === f.provider);
   const list = buildSessionList(rows, { since, until: now, generatedAt: now });
@@ -121,9 +124,13 @@ function sessionsCmd(): void {
 }
 
 function formatTokens(value: number): string {
-  if (value < 1_000) return String(value);
-  if (value < 1_000_000) return `${(value / 1_000).toFixed(1)}K`;
-  return `${(value / 1_000_000).toFixed(2)}M`;
+  if (!Number.isFinite(value) || value <= 0) return '0';
+  const grouped = (n: number, digits: number): string =>
+    n.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits });
+  if (value < 1_000) return Math.round(value).toLocaleString('en-US');
+  if (value < 1_000_000) return `${grouped(value / 1_000, value >= 10_000 ? 0 : 1)}K`;
+  if (value < 1_000_000_000) return `${grouped(value / 1_000_000, value >= 10_000_000 ? 1 : 2)}M`;
+  return `${grouped(value / 1_000_000_000, 2)}B`;
 }
 
 // ── serve ──────────────────────────────────────────────────────────
@@ -143,6 +150,13 @@ async function serve(): Promise<void> {
   Bun.serve({ port, fetch: server.fetch });
   console.log(`planofplan 已启动: http://localhost:${port}${f.demo ? '  (demo 数据，内存库，不落盘)' : ''}`);
   if (f.demo) console.log('提示：demo 模式用内置示例数据预览界面；真实数据请配置 MINIMAX_CODING_API_KEY 后去掉 --demo 启动。');
+  if (!f.demo) {
+    const since = Date.now() - 90 * 86_400_000;
+    void Promise.resolve()
+      .then(() => collectSessionCatalog(store, { since, until: Date.now() }))
+      .then((count) => console.log(`[sessions] indexed ${count} local session files`))
+      .catch((error) => console.error('[sessions] index failed:', error));
+  }
 }
 
 // ── usage ───────────────────────────────────────────────────────────

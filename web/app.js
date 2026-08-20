@@ -26,6 +26,8 @@ let latestBuildInfo = null;
 let latestUsage = null;
 let latestSessions = null;
 let openSessionId = null;
+let sessionVisibleCount = 40;
+let sessionIndexPollTimer = null;
 
 function fmtTime(ms, withSeconds = false) {
   if (ms == null) return '--';
@@ -57,7 +59,13 @@ function fmtAgo(ms, now) {
   const m = Math.round(diff / 60_000);
   if (m < 1) return '刚刚';
   if (m < 60) return `${m} 分钟前`;
-  return `${Math.round(m / 60)} 小时前`;
+  const h = Math.round(m / 60);
+  if (h < 48) return `${h} 小时前`;
+  return `${Math.round(h / 24)} 天前`;
+}
+
+function groupedNumber(n, digits) {
+  return n.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits });
 }
 
 function levelClass(percentage) {
@@ -156,90 +164,108 @@ function fillSessionFilters(list) {
   if (!providerSel || !projectSel || !list) return;
   const provider = providerSel.value;
   const project = projectSel.value;
-  providerSel.innerHTML = '<option value="">全部</option>' + (list.byProvider || []).map((row) => (
+  providerSel.innerHTML = '<option value="">全部来源</option>' + (list.byProvider || []).map((row) => (
     `<option value="${escapeHtml(row.provider)}">${escapeHtml(row.provider)} (${row.count})</option>`
   )).join('');
-  projectSel.innerHTML = '<option value="">全部</option>' + (list.byProject || []).map((row) => (
+  projectSel.innerHTML = '<option value="">全部项目</option>' + (list.byProject || []).map((row) => (
     `<option value="${escapeHtml(row.project)}">${escapeHtml(row.project)} (${row.count})</option>`
   )).join('');
   if ([...providerSel.options].some((option) => option.value === provider)) providerSel.value = provider;
   if ([...projectSel.options].some((option) => option.value === project)) projectSel.value = project;
 }
 
-function renderSessions(list) {
-  const el = document.getElementById('sessionReport');
-  if (!el) return;
-  fillSessionFilters(list);
+function filteredSessions(list) {
   const provider = document.getElementById('sessionProvider')?.value || '';
   const project = document.getElementById('sessionProject')?.value || '';
-  const sessions = (list?.sessions || []).filter((session) => {
+  const query = (document.getElementById('sessionSearch')?.value || '').trim().toLowerCase();
+  const hideUntitled = document.getElementById('sessionHideUntitled')?.checked;
+  return (list?.sessions || []).filter((session) => {
+    const title = session.title || '';
+    const untitled = !title.trim();
+    if (hideUntitled && untitled) return false;
     if (provider && session.provider !== provider) return false;
     if (project && sessionProjectName(session.cwd) !== project) return false;
+    if (query) {
+      const hay = `${session.provider} ${title} ${session.cwd || ''} ${sessionProjectName(session.cwd)}`.toLowerCase();
+      if (!hay.includes(query)) return false;
+    }
     return true;
   });
+}
+
+function renderSessions(list) {
+  const listEl = document.getElementById('sessionList');
+  const readerEl = document.getElementById('sessionReader');
+  const foot = document.getElementById('sessionFoot');
+  if (!listEl || !readerEl) return;
+  fillSessionFilters(list);
+  const indexing = list?.indexStatus === 'running';
+  const indexedLabel = list?.indexedAt ? `上次索引 ${fmtAgo(list.indexedAt, Date.now())}` : '尚未索引';
+  if (foot) {
+    foot.textContent = indexing
+      ? '正在索引本机对话目录… 不用盯着扫。编好后会出现在左边。'
+      : `${indexedLabel} · 本机只读 ~/.claude / ~/.codex / ~/.grok / ~/.dsh 等目录 · daemon 启动时自动更新，不用定时手扫 · Token 数字请看 Token 页`;
+  }
   if (!list || list.sessions.length === 0) {
-    el.innerHTML = `
+    listEl.innerHTML = `
       <div class="usage-empty">
-        <strong>还没有 session 目录</strong>
-        <span>点击“扫描本地日志”读取 Claude、Codex、Grok、DSH（及其它本地 jsonl）。原始文件不会被复制。</span>
+        <strong>${indexing ? '正在建立目录' : '还没有对话'}</strong>
+        <span>${indexing ? '第一次大约几十秒，之后只扫有改动的文件。' : '确认 daemon 在跑。打开这页或重启 planofplan 会自动索引。'}</span>
       </div>
     `;
     return;
   }
+  const sessions = filteredSessions(list);
   if (sessions.length === 0) {
-    el.innerHTML = `
+    listEl.innerHTML = `
       <div class="usage-empty">
-        <strong>没有匹配的 session</strong>
-        <span>换一个来源或项目过滤。</span>
+        <strong>没有匹配的对话</strong>
+        <span>试试关掉「隐藏无标题」，或清空搜索。</span>
       </div>
     `;
     return;
   }
-  const rows = sessions.map((session) => `
-    <tr class="session-row" data-session-id="${escapeHtml(session.id)}">
-      <td>${escapeHtml(session.provider)}</td>
-      <td>${escapeHtml(session.title || '(untitled)')}</td>
-      <td>${escapeHtml(sessionProjectName(session.cwd))}</td>
-      <td>${fmtTime(session.updatedAt)}</td>
-      <td>${fmtTokens(session.totalTokens)}</td>
-    </tr>
-  `).join('');
+  const visible = sessions.slice(0, sessionVisibleCount);
   const open = sessions.find((session) => session.id === openSessionId);
-  el.innerHTML = `
-    <div class="usage-topline" style="grid-template-columns: repeat(3, minmax(100px, 1fr));">
-      <div class="usage-metric"><span>Sessions</span><strong>${sessions.length}</strong></div>
-      <div class="usage-metric"><span>来源</span><strong>${list.byProvider.length}</strong></div>
-      <div class="usage-metric"><span>项目</span><strong>${list.byProject.length}</strong></div>
-    </div>
-    <div class="usage-panel usage-table-panel">
-      <div class="table-scroll">
-        <table>
-          <thead><tr><th>Provider</th><th>标题</th><th>项目</th><th>更新</th><th>Tokens</th></tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
-      </div>
-    </div>
-    <div id="sessionDetail" class="session-detail${open ? ' open' : ''}">
-      ${open ? sessionDetailHtml(open) : ''}
-    </div>
-  `;
-  el.querySelectorAll('[data-session-id]').forEach((row) => {
+  listEl.innerHTML = visible.map((session) => `
+    <button type="button" class="session-item${session.id === openSessionId ? ' active' : ''}" data-session-id="${escapeHtml(session.id)}">
+      <strong>${escapeHtml(session.title || '无标题')}</strong>
+      <span>${escapeHtml(session.provider)} · ${escapeHtml(sessionProjectName(session.cwd))} · ${fmtAgo(session.updatedAt, Date.now())}${session.totalTokens ? ` · ${fmtTokens(session.totalTokens)}` : ''}</span>
+    </button>
+  `).join('') + (sessions.length > visible.length
+    ? `<button type="button" class="session-more" data-more>还有 ${sessions.length - visible.length} 条，显示更多</button>`
+    : '');
+  listEl.querySelectorAll('[data-session-id]').forEach((row) => {
     row.addEventListener('click', () => {
       openSessionId = row.getAttribute('data-session-id');
       renderSessions(latestSessions);
     });
   });
-  el.querySelector('[data-reveal]')?.addEventListener('click', async (event) => {
-    event.stopPropagation();
-    const id = event.currentTarget.getAttribute('data-reveal');
-    try {
-      await request(`/api/sessions/${encodeURIComponent(id)}/reveal`, { method: 'POST' });
-      showToast('已在 Finder 中显示日志');
-    } catch (error) {
-      showToast(error.message, true);
-    }
+  listEl.querySelector('[data-more]')?.addEventListener('click', () => {
+    sessionVisibleCount += 40;
+    renderSessions(latestSessions);
   });
-  if (open) void loadSessionTranscript(open.id);
+  if (open) {
+    readerEl.innerHTML = sessionDetailHtml(open);
+    readerEl.querySelector('[data-reveal]')?.addEventListener('click', async (event) => {
+      event.stopPropagation();
+      const id = event.currentTarget.getAttribute('data-reveal');
+      try {
+        await request(`/api/sessions/${encodeURIComponent(id)}/reveal`, { method: 'POST' });
+        showToast('已在 Finder 中显示日志');
+      } catch (error) {
+        showToast(error.message, true);
+      }
+    });
+    void loadSessionTranscript(open.id);
+  } else {
+    readerEl.innerHTML = `
+      <div class="usage-empty">
+        <strong>从左边选一条对话</strong>
+        <span>这里读正文。有 CLI 时可以 Resume 接着做。</span>
+      </div>
+    `;
+  }
 }
 
 async function loadSessionTranscript(id) {
@@ -297,9 +323,11 @@ function sessionDetailHtml(session) {
 
 function fmtTokens(value) {
   const n = Number(value || 0);
-  if (n < 1000) return String(n);
-  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}K`;
-  return `${(n / 1_000_000).toFixed(2)}M`;
+  if (!Number.isFinite(n) || n <= 0) return '0';
+  if (n < 1000) return Math.round(n).toLocaleString('en-US');
+  if (n < 1_000_000) return `${groupedNumber(n / 1000, n >= 10_000 ? 0 : 1)}K`;
+  if (n < 1_000_000_000) return `${groupedNumber(n / 1_000_000, n >= 10_000_000 ? 1 : 2)}M`;
+  return `${groupedNumber(n / 1_000_000_000, 2)}B`;
 }
 
 function fmtUsd(value) {
@@ -748,6 +776,7 @@ async function render() {
     renderSummary(latestOverview);
     renderUsage(latestUsage);
     renderSessions(latestSessions);
+    maybePollSessionIndex(latestSessions);
     const grid = document.getElementById('grid');
     const nextGrid = document.createDocumentFragment();
     for (const p of latestOverview.plans) nextGrid.appendChild(renderPlan(p, now));
@@ -830,12 +859,53 @@ setInterval(tickClock, 1000);
 setInterval(render, 30_000);
 
 document.getElementById('usageDays')?.addEventListener('change', () => { void render(); });
-document.getElementById('sessionProvider')?.addEventListener('change', () => {
+function resetSessionFilters() {
+  sessionVisibleCount = 40;
   if (latestSessions) renderSessions(latestSessions);
+}
+document.getElementById('sessionProvider')?.addEventListener('change', resetSessionFilters);
+document.getElementById('sessionProject')?.addEventListener('change', resetSessionFilters);
+document.getElementById('sessionHideUntitled')?.addEventListener('change', resetSessionFilters);
+document.getElementById('sessionSearch')?.addEventListener('input', resetSessionFilters);
+
+function currentTab() {
+  const hash = (location.hash || '#plans').replace('#', '');
+  return ['plans', 'sessions', 'usage'].includes(hash) ? hash : 'plans';
+}
+
+function showTab(name) {
+  if (!['plans', 'sessions', 'usage'].includes(name)) name = 'plans';
+  const hash = `#${name}`;
+  if (location.hash !== hash) location.hash = hash;
+  document.querySelectorAll('[data-tab]').forEach((btn) => {
+    btn.setAttribute('aria-selected', String(btn.getAttribute('data-tab') === name));
+  });
+  document.querySelectorAll('.tab-panel').forEach((panel) => {
+    panel.hidden = panel.getAttribute('data-panel') !== name;
+  });
+}
+
+document.querySelectorAll('[data-tab]').forEach((btn) => {
+  btn.addEventListener('click', () => showTab(btn.getAttribute('data-tab')));
 });
-document.getElementById('sessionProject')?.addEventListener('change', () => {
-  if (latestSessions) renderSessions(latestSessions);
-});
+window.addEventListener('hashchange', () => showTab(currentTab()));
+showTab(currentTab());
+
+function maybePollSessionIndex(list) {
+  if (list?.indexStatus !== 'running') return;
+  if (sessionIndexPollTimer != null) return;
+  sessionIndexPollTimer = setTimeout(async () => {
+    sessionIndexPollTimer = null;
+    try {
+      const days = document.getElementById('usageDays')?.value || '30';
+      latestSessions = await request(`/api/sessions?days=${encodeURIComponent(days)}`);
+      renderSessions(latestSessions);
+      maybePollSessionIndex(latestSessions);
+    } catch {
+      /* daemon restarting */
+    }
+  }, 1500);
+}
 
 let usageScanPollTimer = null;
 

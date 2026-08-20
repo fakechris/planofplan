@@ -163,6 +163,8 @@ export interface SessionList {
   sessions: SessionRecord[];
   byProvider: Array<{ provider: string; count: number }>;
   byProject: Array<{ project: string; count: number }>;
+  indexedAt: number | null;
+  indexStatus: 'idle' | 'running';
 }
 
 export interface UsageScanFile {
