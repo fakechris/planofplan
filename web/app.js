@@ -140,7 +140,7 @@ async function load() {
     request('/api/overview'),
     request('/api/build-info'),
     request(`/api/usage?days=${encodeURIComponent(days)}`),
-    request(`/api/sessions?days=${encodeURIComponent(days)}`),
+    request(`/api/sessions?days=${encodeURIComponent(days)}`).catch(() => null),
   ]);
   return { overview, buildInfo, usage, sessions };
 }
