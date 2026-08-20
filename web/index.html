@@ -57,6 +57,28 @@
     <div id="usageReport" class="usage-report"></div>
   </section>
 
+  <section class="usage-section" id="sessionsSection">
+    <div class="section-head">
+      <div>
+        <p class="eyebrow">SESSION CATALOG</p>
+        <h2>Session 目录</h2>
+      </div>
+      <div class="usage-actions">
+        <label class="usage-range">来源
+          <select id="sessionProvider" aria-label="Session provider 过滤">
+            <option value="">全部</option>
+          </select>
+        </label>
+        <label class="usage-range">项目
+          <select id="sessionProject" aria-label="Session 项目过滤">
+            <option value="">全部</option>
+          </select>
+        </label>
+      </div>
+    </div>
+    <div id="sessionReport" class="usage-report"></div>
+  </section>
+
   <main id="grid" class="grid"></main>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 

@@ -24,6 +24,8 @@ const BROWSER_NAMES = {
 let latestOverview = null;
 let latestBuildInfo = null;
 let latestUsage = null;
+let latestSessions = null;
+let openSessionId = null;
 
 function fmtTime(ms, withSeconds = false) {
   if (ms == null) return '--';
@@ -134,12 +136,121 @@ async function request(path, options = {}) {
 
 async function load() {
   const days = document.getElementById('usageDays')?.value || '30';
-  const [overview, buildInfo, usage] = await Promise.all([
+  const [overview, buildInfo, usage, sessions] = await Promise.all([
     request('/api/overview'),
     request('/api/build-info'),
     request(`/api/usage?days=${encodeURIComponent(days)}`),
+    request(`/api/sessions?days=${encodeURIComponent(days)}`),
   ]);
-  return { overview, buildInfo, usage };
+  return { overview, buildInfo, usage, sessions };
+}
+
+function sessionProjectName(cwd) {
+  if (!cwd) return '(unknown)';
+  return cwd.replace(/[/\\]+$/, '').split(/[/\\]/).pop() || cwd;
+}
+
+function fillSessionFilters(list) {
+  const providerSel = document.getElementById('sessionProvider');
+  const projectSel = document.getElementById('sessionProject');
+  if (!providerSel || !projectSel || !list) return;
+  const provider = providerSel.value;
+  const project = projectSel.value;
+  providerSel.innerHTML = '<option value="">全部</option>' + (list.byProvider || []).map((row) => (
+    `<option value="${escapeHtml(row.provider)}">${escapeHtml(row.provider)} (${row.count})</option>`
+  )).join('');
+  projectSel.innerHTML = '<option value="">全部</option>' + (list.byProject || []).map((row) => (
+    `<option value="${escapeHtml(row.project)}">${escapeHtml(row.project)} (${row.count})</option>`
+  )).join('');
+  if ([...providerSel.options].some((option) => option.value === provider)) providerSel.value = provider;
+  if ([...projectSel.options].some((option) => option.value === project)) projectSel.value = project;
+}
+
+function renderSessions(list) {
+  const el = document.getElementById('sessionReport');
+  if (!el) return;
+  fillSessionFilters(list);
+  const provider = document.getElementById('sessionProvider')?.value || '';
+  const project = document.getElementById('sessionProject')?.value || '';
+  const sessions = (list?.sessions || []).filter((session) => {
+    if (provider && session.provider !== provider) return false;
+    if (project && sessionProjectName(session.cwd) !== project) return false;
+    return true;
+  });
+  if (!list || list.sessions.length === 0) {
+    el.innerHTML = `
+      <div class="usage-empty">
+        <strong>还没有 session 目录</strong>
+        <span>点击“扫描本地日志”读取 Claude、Codex、Grok、DSH（及其它本地 jsonl）。原始文件不会被复制。</span>
+      </div>
+    `;
+    return;
+  }
+  if (sessions.length === 0) {
+    el.innerHTML = `
+      <div class="usage-empty">
+        <strong>没有匹配的 session</strong>
+        <span>换一个来源或项目过滤。</span>
+      </div>
+    `;
+    return;
+  }
+  const rows = sessions.map((session) => `
+    <tr class="session-row" data-session-id="${escapeHtml(session.id)}">
+      <td>${escapeHtml(session.provider)}</td>
+      <td>${escapeHtml(session.title || '(untitled)')}</td>
+      <td>${escapeHtml(sessionProjectName(session.cwd))}</td>
+      <td>${fmtTime(session.updatedAt)}</td>
+      <td>${fmtTokens(session.totalTokens)}</td>
+    </tr>
+  `).join('');
+  const open = sessions.find((session) => session.id === openSessionId);
+  el.innerHTML = `
+    <div class="usage-topline" style="grid-template-columns: repeat(3, minmax(100px, 1fr));">
+      <div class="usage-metric"><span>Sessions</span><strong>${sessions.length}</strong></div>
+      <div class="usage-metric"><span>来源</span><strong>${list.byProvider.length}</strong></div>
+      <div class="usage-metric"><span>项目</span><strong>${list.byProject.length}</strong></div>
+    </div>
+    <div class="usage-panel usage-table-panel">
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Provider</th><th>标题</th><th>项目</th><th>更新</th><th>Tokens</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </div>
+    <div id="sessionDetail" class="session-detail${open ? ' open' : ''}">
+      ${open ? sessionDetailHtml(open) : ''}
+    </div>
+  `;
+  el.querySelectorAll('[data-session-id]').forEach((row) => {
+    row.addEventListener('click', () => {
+      openSessionId = row.getAttribute('data-session-id');
+      renderSessions(latestSessions);
+    });
+  });
+  el.querySelector('[data-reveal]')?.addEventListener('click', async (event) => {
+    event.stopPropagation();
+    const id = event.currentTarget.getAttribute('data-reveal');
+    try {
+      await request(`/api/sessions/${encodeURIComponent(id)}/reveal`, { method: 'POST' });
+      showToast('已在 Finder 中显示日志');
+    } catch (error) {
+      showToast(error.message, true);
+    }
+  });
+}
+
+function sessionDetailHtml(session) {
+  return `
+    <div class="session-detail-grid">
+      <dt>Id</dt><dd>${escapeHtml(session.id)}</dd>
+      <dt>cwd</dt><dd>${escapeHtml(session.cwd || '--')}</dd>
+      <dt>日志</dt><dd>${escapeHtml(session.sourceFile || '--')}</dd>
+      <dt>开始</dt><dd>${session.startedAt ? fmtTime(session.startedAt, true) : '--'}</dd>
+    </div>
+    ${session.sourceFile ? `<div class="session-actions"><button class="secondary-btn" type="button" data-reveal="${escapeHtml(session.id)}">在 Finder 中显示</button></div>` : ''}
+  `;
 }
 
 function fmtTokens(value) {
@@ -582,6 +693,7 @@ async function render() {
     latestOverview = result.overview;
     latestBuildInfo = result.buildInfo;
     latestUsage = result.usage;
+    latestSessions = result.sessions;
     const now = Date.now();
     document.getElementById('connectionState').className = 'connection connected';
     document.getElementById('connectionState').innerHTML = '<i></i> live';
@@ -593,6 +705,7 @@ async function render() {
       : '当前运行构建';
     renderSummary(latestOverview);
     renderUsage(latestUsage);
+    renderSessions(latestSessions);
     const grid = document.getElementById('grid');
     const nextGrid = document.createDocumentFragment();
     for (const p of latestOverview.plans) nextGrid.appendChild(renderPlan(p, now));
@@ -675,6 +788,12 @@ setInterval(tickClock, 1000);
 setInterval(render, 30_000);
 
 document.getElementById('usageDays')?.addEventListener('change', () => { void render(); });
+document.getElementById('sessionProvider')?.addEventListener('change', () => {
+  if (latestSessions) renderSessions(latestSessions);
+});
+document.getElementById('sessionProject')?.addEventListener('change', () => {
+  if (latestSessions) renderSessions(latestSessions);
+});
 
 let usageScanPollTimer = null;
 

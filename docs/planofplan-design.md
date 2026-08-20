@@ -203,6 +203,19 @@ planofplan/
 
 > 建议 M1 先打通 MiniMax legacy（或 GLM legacy）：都是「单 5h 窗口」最简单模型，先验证窗口语义与 UI 闭环，再铺多窗口。
 
+### 8.1 工作谱系轨（第二条产品轨，2026-08-20 确认）
+
+额度轨（上表）不变。planofplan 同时是本机 session 指挥台：额度怎么烧，烧出来的工作落在哪。完整分层、证据纪律、跳转三档与里程碑见 [`work-graph-design.md`](./work-graph-design.md)。
+
+| 阶段 | 内容 | 验收 |
+|---|---|---|
+| **WG-M3 Session 目录** | `sessions` 表 + 文件头 catalog + 与 `usage.ts` 同趟扫描 + dashboard 列表 | Claude / Codex / Grok / DSH 能列出 |
+| **WG-M4 阅读 + Resume** | 应用内 transcript；有 CLI 才显示 Resume | 见谱系文档 |
+| **WG-M5 日历纱线** | 跨项目需求节点 | 见谱系文档 |
+| **WG-M6 谱系（可选）** | 需求候选 / commit 对齐，默认 dry-run | 见谱系文档 |
+
+WG-M3 与额度 M3 并行；实现时不要把授权/cookie 工作堵在 session 目录后面。
+
 ## 9. 开放问题
 
 1. **技术栈默认值（TS+Bun）需用户默认认可**，想走 Go（onWatch 照搬）说一声即可。

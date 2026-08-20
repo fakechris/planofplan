@@ -3,7 +3,7 @@
 本地 dashboard，管理多个 AI Coding Plan 订阅的用量/限额。
 展示形态参考 **CodexBar**（逐 plan 用量条 + 总览 dashboard），架构参考 **onWatch**（守护进程 + SQLite + localhost Web）。
 
-当前状态：**M2**（8 个 adapter 接入：MiniMax、GLM legacy/current、Codex、Kimi、Grok、Cursor、Claude、Factory Droid；其中 MiniMax/Codex/Cursor/Claude 已本机真机验证）。
+当前状态：**M2 额度轨** + **WG-M3 session 目录**（扫描本地 Claude / Codex / Grok / DSH 等日志，只读文件头，不复制原文。见 [`docs/work-graph-design.md`](docs/work-graph-design.md)）。
 
 ## 快速开始
 
@@ -27,6 +27,7 @@ bun run demo
 planofplan serve [--demo] [--port N]    启动守护进程 + Web dashboard
 planofplan usage [--json] [--provider sl] 全 plan 配额输出
 planofplan tokens [--json] [--days N] [--provider sl] token usage & spend 报表
+planofplan sessions [--json] [--days N] [--provider sl] 本地 session 目录（Claude/Codex/Grok/DSH…）
 planofplan status                        各 plan 调度/凭据/最近抓取状态
 planofplan refresh [slug]                手动刷新一个/全部 plan
 planofplan browser-auth                  只读取 Safari kimi-auth 并刷新 Kimi
@@ -192,6 +193,7 @@ src/db.ts         SQLite：plans / snapshots / plan_state / usage_records
 src/auth.ts       manual key 存取（0600）+ env 读取
 src/adapters/     每 plan 一个 adapter：detectCredentials -> fetchUsage -> QuotaWindow[]
 src/usage.ts      本地 JSONL scanner、token 去重、日期/model/provider 聚合
+src/sessions.ts   session 目录（文件头 catalog + 与 usage 同趟扫描）
 src/official-usage.ts  Anthropic / Factory Analytics + 可选 Codex app-server usage
 web/              静态前端（无构建，vanilla JS + CSS）
 ```

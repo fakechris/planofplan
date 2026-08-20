@@ -13,6 +13,7 @@ import type {
   UsageSource,
 } from './types.ts';
 import { fetchOfficialUsage } from './official-usage.ts';
+import { collectSessionCatalog } from './sessions.ts';
 
 const DAY_MS = 86_400_000;
 
@@ -460,6 +461,7 @@ function parseDshRecord(
     usageFromCamelCase(data.usage as Record<string, unknown>),
     'local',
     'measured',
+    { sessionId: file.replace(/[/\\][^/\\]+$/, '').replace(/^.*[/\\]/, '') },
   );
 }
 
@@ -698,7 +700,7 @@ export function scanClaudeLogs(
         normalized,
         'local',
         'measured',
-        { project, sourceFile: file },
+        { project, sourceFile: file, sessionId: file.replace(/^.*[/\\]/, '').replace(/\.jsonl$/i, '') },
       );
       const previous = byMessage.get(dedupeKey);
       if (!previous || candidate.timestamp >= previous.timestamp) byMessage.set(dedupeKey, candidate);
@@ -1089,5 +1091,6 @@ export async function collectUsageReport(store: Store, options: CollectUsageOpti
   store.replaceUsageRecordsForFiles(replacements);
   const official = options.includeOfficial === false ? [] : await fetchOfficialUsage(range);
   store.upsertUsageRecords(official);
+  collectSessionCatalog(store, options);
   return store.getUsageReport(range.since, range.until);
 }

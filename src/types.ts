@@ -119,6 +119,33 @@ export interface UsageRecord {
   fetchedAt?: number;
 }
 
+/** Catalog row for one coding-agent session (work-graph M3). Token columns are
+ *  a projection of usage_records, not a second ledger. */
+export interface SessionRecord {
+  id: string;
+  provider: string;
+  nativeId: string;
+  cwd: string | null;
+  title: string | null;
+  sourceFile: string | null;
+  startedAt: number | null;
+  updatedAt: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  estimatedCostUsd: number | null;
+  seenAt: number;
+}
+
+export interface SessionList {
+  generatedAt: number;
+  since: number;
+  until: number;
+  sessions: SessionRecord[];
+  byProvider: Array<{ provider: string; count: number }>;
+  byProject: Array<{ project: string; count: number }>;
+}
+
 export interface UsageScanFile {
   path: string;
   provider: string;

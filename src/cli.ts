@@ -12,6 +12,7 @@ import { readFactoryCliAuth } from './factory-cli-auth.ts';
 import type { Store } from './db.ts';
 import type { QuotaWindow } from './types.ts';
 import { buildUsageReport, collectUsageReport } from './usage.ts';
+import { buildSessionList } from './sessions.ts';
 
 const argv = process.argv.slice(2);
 
@@ -35,6 +36,7 @@ function help(): void {
   planofplan serve [--demo] [--port N]     启动守护进程 + Web dashboard（http://localhost:9288）
   planofplan usage [--json] [--provider sl] 全 plan 用量输出
   planofplan tokens [--json] [--days N] [--provider sl] token usage & spend 报表
+  planofplan sessions [--json] [--days N] [--provider sl] 本地 session 目录
   planofplan status                         各 plan 调度/凭据/最近抓取状态
   planofplan refresh [slug]                 手动刷新一个/全部 plan
   planofplan browser-auth                  读取 Safari kimi-auth 并刷新 Kimi
@@ -92,6 +94,30 @@ async function tokenUsage(): Promise<void> {
   for (const model of report.models.slice(0, 12)) {
     console.log(`  ${model.provider}/${model.model}: ${formatTokens(model.totalTokens)} · $${model.estimatedCostUsd?.toFixed(4) ?? '--'}`);
   }
+}
+
+function sessionsCmd(): void {
+  const f = flags();
+  const store = openDb(f.db ?? join(ensureHome(), 'planofplan.db'));
+  const now = Date.now();
+  const since = now - f.days * 86_400_000;
+  let rows = store.listSessionRows();
+  if (f.provider) rows = rows.filter((row) => row.provider === f.provider);
+  const list = buildSessionList(rows, { since, until: now, generatedAt: now });
+  if (f.json) {
+    console.log(JSON.stringify(list, null, 2));
+    return;
+  }
+  console.log(`Sessions (${f.days} days) · ${list.sessions.length}`);
+  for (const group of list.byProvider) {
+    console.log(`  ${group.provider}: ${group.count}`);
+  }
+  for (const session of list.sessions.slice(0, 40)) {
+    const title = session.title || '(untitled)';
+    const project = session.cwd ? session.cwd.replace(/^.*[/\\]/, '') : '--';
+    console.log(`  ${session.provider}  ${title}  · ${project}  · ${formatTokens(session.totalTokens)}`);
+  }
+  if (list.sessions.length > 40) console.log(`  … ${list.sessions.length - 40} more`);
 }
 
 function formatTokens(value: number): string {
@@ -294,6 +320,38 @@ function seedDemo(store: Store): void {
   // 一条历史（-6h）
   const older: QuotaWindow = { ...f, used: 210, percentage: 21, resetAt: now - 6 * 3_600_000 };
   store.insertWindows('minimax', [older], now - 6 * 3_600_000);
+  store.upsertSessions([
+    {
+      id: 'codex:demo-session',
+      provider: 'codex',
+      nativeId: 'demo-session',
+      cwd: '/Users/demo/planofplan',
+      title: 'Wire session catalog into the dashboard',
+      sourceFile: '/tmp/demo-codex.jsonl',
+      startedAt: now - 3_600_000,
+      updatedAt: now - 60_000,
+      inputTokens: 1200,
+      outputTokens: 400,
+      totalTokens: 1600,
+      estimatedCostUsd: 0.02,
+      seenAt: now,
+    },
+    {
+      id: 'claude:demo-session',
+      provider: 'claude',
+      nativeId: 'demo-session',
+      cwd: '/Users/demo/dsh-involute',
+      title: 'Review dsh-track capture observer',
+      sourceFile: '/tmp/demo-claude.jsonl',
+      startedAt: now - 86_400_000,
+      updatedAt: now - 3_600_000,
+      inputTokens: 800,
+      outputTokens: 200,
+      totalTokens: 1000,
+      estimatedCostUsd: 0.01,
+      seenAt: now,
+    },
+  ]);
 }
 
 // ── main ────────────────────────────────────────────────────────────
@@ -309,6 +367,9 @@ switch (cmd) {
   case 'tokens':
   case 'token-usage':
     await tokenUsage();
+    break;
+  case 'sessions':
+    sessionsCmd();
     break;
   case 'status':
     status();

@@ -8,8 +8,11 @@ import { writeCredential, deleteCredential } from './auth.ts';
 import { acceptKimiBrowserCookies, refreshKimiBrowserSession } from './adapters/kimi.ts';
 import { KIMI_BROWSER, KIMI_BROWSERS, type KimiBrowser } from './browser-cookies.ts';
 import { acceptFactoryBrowserCookies } from './factory-session.ts';
+import { spawnSync } from 'node:child_process';
+import { basename } from 'node:path';
 import { getBuildInfo } from './build-info.ts';
 import { buildUsageReport } from './usage.ts';
+import { buildSessionList } from './sessions.ts';
 import { getStartupSettings, setLaunchOnStartup } from './startup.ts';
 
 const WEB_DIR = resolve(import.meta.dir, '../web');
@@ -140,6 +143,45 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
           ? { state: 'error', startedAt: null, error: usageRefreshError }
           : { state: 'idle', startedAt: null },
     });
+  });
+
+  app.get('/api/sessions', (c) => {
+    const days = Math.min(365, Math.max(1, Number(c.req.query('days') ?? 30) || 30));
+    const provider = c.req.query('provider')?.trim() || null;
+    const project = c.req.query('project')?.trim() || null;
+    const now = Date.now();
+    const since = now - days * 86_400_000;
+    let rows = store.listSessionRows();
+    if (provider) rows = rows.filter((row) => row.provider === provider);
+    if (project) {
+      rows = rows.filter((row) => {
+        const name = row.cwd ? basename(row.cwd.replace(/[/\\]+$/, '')) : '(unknown)';
+        return name === project;
+      });
+    }
+    return c.json(buildSessionList(rows, { since, until: now, generatedAt: now }));
+  });
+
+  app.get('/api/sessions/:id', (c) => {
+    const id = decodeURIComponent(c.req.param('id'));
+    const session = store.getSession(id);
+    if (!session) return c.json({ ok: false, error: 'unknown session' }, 404);
+    return c.json(session);
+  });
+
+  app.post('/api/sessions/:id/reveal', (c) => {
+    const id = decodeURIComponent(c.req.param('id'));
+    const session = store.getSession(id);
+    if (!session) return c.json({ ok: false, error: 'unknown session' }, 404);
+    if (!session.sourceFile) return c.json({ ok: false, error: 'session has no source_file' }, 404);
+    if (process.platform !== 'darwin') {
+      return c.json({ ok: false, error: 'Finder reveal is macOS-only' }, 501);
+    }
+    const result = spawnSync('open', ['-R', session.sourceFile], { encoding: 'utf8' });
+    if (result.status !== 0) {
+      return c.json({ ok: false, error: result.stderr.trim() || 'open -R failed' }, 500);
+    }
+    return c.json({ ok: true, path: session.sourceFile });
   });
 
   app.post('/api/plans/:slug/refresh', async (c) => {

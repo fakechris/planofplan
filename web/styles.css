@@ -199,6 +199,18 @@ td { font-variant-numeric: tabular-nums; }
 .usage-empty { display: flex; flex-direction: column; gap: 5px; padding: 24px 18px; color: var(--muted); font-size: 11px; }
 .usage-empty strong { color: var(--brand); font-size: 13px; }
 
+.session-row { cursor: pointer; }
+.session-row td:nth-child(2) { max-width: 420px; overflow: hidden; color: var(--brand); text-overflow: ellipsis; }
+.session-detail {
+  display: none; padding: 12px 18px 16px; border-top: 1px solid var(--border);
+  background: var(--surface-raised); color: var(--muted); font-size: 11px;
+}
+.session-detail.open { display: block; }
+.session-detail dt { color: var(--faint); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; }
+.session-detail dd { margin: 0 0 8px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--brand); word-break: break-all; }
+.session-detail-grid { display: grid; grid-template-columns: 88px 1fr; gap: 4px 12px; }
+.session-actions { display: flex; gap: 8px; margin-top: 10px; }
+
 /* ── plan cards ─────────────────────────────────────────── */
 
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 14px; padding-top: 14px; padding-bottom: 60px; }

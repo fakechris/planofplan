@@ -3,6 +3,7 @@ import type {
   PlanConfig,
   PlanStateRow,
   QuotaWindow,
+  SessionRecord,
   UsageRecord,
   UsageReport,
   UsageScanFile,
@@ -80,6 +81,24 @@ CREATE TABLE IF NOT EXISTS usage_scan_files (
   cursor_json TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_usage_scan_files_provider ON usage_scan_files(provider);
+CREATE TABLE IF NOT EXISTS sessions (
+  id TEXT PRIMARY KEY,
+  provider TEXT NOT NULL,
+  native_id TEXT NOT NULL,
+  cwd TEXT,
+  title TEXT,
+  source_file TEXT,
+  started_at INTEGER,
+  updated_at INTEGER NOT NULL,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  total_tokens INTEGER NOT NULL DEFAULT 0,
+  estimated_cost_usd REAL,
+  seen_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_native ON sessions(provider, native_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sessions_cwd ON sessions(cwd);
 `;
 
 interface SnapshotRow {
@@ -764,6 +783,118 @@ export class Store {
       generatedAt: Date.now(),
     });
   }
+
+  upsertSessions(rows: SessionRecord[]): void {
+    if (rows.length === 0) return;
+    const stmt = this.db.query(
+      `INSERT INTO sessions (
+         id, provider, native_id, cwd, title, source_file, started_at, updated_at,
+         input_tokens, output_tokens, total_tokens, estimated_cost_usd, seen_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         cwd = COALESCE(excluded.cwd, sessions.cwd),
+         title = COALESCE(excluded.title, sessions.title),
+         source_file = COALESCE(excluded.source_file, sessions.source_file),
+         started_at = COALESCE(excluded.started_at, sessions.started_at),
+         updated_at = excluded.updated_at,
+         seen_at = excluded.seen_at`,
+    );
+    this.db.exec('BEGIN');
+    try {
+      for (const row of rows) {
+        stmt.run(
+          row.id,
+          row.provider,
+          row.nativeId,
+          row.cwd,
+          row.title,
+          row.sourceFile,
+          row.startedAt,
+          row.updatedAt,
+          row.inputTokens,
+          row.outputTokens,
+          row.totalTokens,
+          row.estimatedCostUsd,
+          row.seenAt,
+        );
+      }
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  updateSessionTokens(patches: Array<{
+    id: string;
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+    estimatedCostUsd: number | null;
+  }>): void {
+    if (patches.length === 0) return;
+    const stmt = this.db.query(
+      `UPDATE sessions
+       SET input_tokens = ?, output_tokens = ?, total_tokens = ?, estimated_cost_usd = ?
+       WHERE id = ?`,
+    );
+    this.db.exec('BEGIN');
+    try {
+      for (const patch of patches) {
+        stmt.run(patch.inputTokens, patch.outputTokens, patch.totalTokens, patch.estimatedCostUsd, patch.id);
+      }
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  listSessionRows(): SessionRecord[] {
+    const rows = this.db.query(
+      `SELECT id, provider, native_id, cwd, title, source_file, started_at, updated_at,
+              input_tokens, output_tokens, total_tokens, estimated_cost_usd, seen_at
+       FROM sessions`,
+    ).all() as Array<{
+      id: string;
+      provider: string;
+      native_id: string;
+      cwd: string | null;
+      title: string | null;
+      source_file: string | null;
+      started_at: number | null;
+      updated_at: number;
+      input_tokens: number;
+      output_tokens: number;
+      total_tokens: number;
+      estimated_cost_usd: number | null;
+      seen_at: number;
+    }>;
+    return rows.map(sessionFromRow);
+  }
+
+  getSession(id: string): SessionRecord | null {
+    const row = this.db.query(
+      `SELECT id, provider, native_id, cwd, title, source_file, started_at, updated_at,
+              input_tokens, output_tokens, total_tokens, estimated_cost_usd, seen_at
+       FROM sessions WHERE id = ?`,
+    ).get(id) as {
+      id: string;
+      provider: string;
+      native_id: string;
+      cwd: string | null;
+      title: string | null;
+      source_file: string | null;
+      started_at: number | null;
+      updated_at: number;
+      input_tokens: number;
+      output_tokens: number;
+      total_tokens: number;
+      estimated_cost_usd: number | null;
+      seen_at: number;
+    } | null;
+    return row ? sessionFromRow(row) : null;
+  }
 }
 
 function stripGlmRegion(extra: Record<string, string>): Record<string, string> {
@@ -794,6 +925,38 @@ function planFromRow(row: {
     pollIntervalSec: row.poll_interval_sec,
     credRef: row.cred_ref ?? null,
     extra,
+  };
+}
+
+function sessionFromRow(row: {
+  id: string;
+  provider: string;
+  native_id: string;
+  cwd: string | null;
+  title: string | null;
+  source_file: string | null;
+  started_at: number | null;
+  updated_at: number;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  estimated_cost_usd: number | null;
+  seen_at: number;
+}): SessionRecord {
+  return {
+    id: row.id,
+    provider: row.provider,
+    nativeId: row.native_id,
+    cwd: row.cwd,
+    title: row.title,
+    sourceFile: row.source_file,
+    startedAt: row.started_at,
+    updatedAt: row.updated_at,
+    inputTokens: row.input_tokens,
+    outputTokens: row.output_tokens,
+    totalTokens: row.total_tokens,
+    estimatedCostUsd: row.estimated_cost_usd,
+    seenAt: row.seen_at,
   };
 }
 

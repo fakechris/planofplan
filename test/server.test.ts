@@ -50,6 +50,37 @@ describe('Kimi browser policy', () => {
     expect(body.scanStatus.state).toBe('idle');
   });
 
+  test('sessions API lists catalog rows without scanning', async () => {
+    const store = openMemoryDb();
+    for (const plan of DEFAULT_PLANS) store.syncPlan(plan);
+    const now = Date.now();
+    store.upsertSessions([{
+      id: 'codex:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+      provider: 'codex',
+      nativeId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+      cwd: '/tmp/planofplan',
+      title: 'Session catalog',
+      sourceFile: '/tmp/rollout.jsonl',
+      startedAt: now - 60_000,
+      updatedAt: now - 30_000,
+      inputTokens: 10,
+      outputTokens: 2,
+      totalTokens: 12,
+      estimatedCostUsd: null,
+      seenAt: now,
+    }]);
+    const response = await createServer(store, scheduler as never, { port: 9291, plans: DEFAULT_PLANS })
+      .request('http://localhost/api/sessions?days=7');
+    expect(response.status).toBe(200);
+    const body = await response.json() as {
+      sessions: Array<{ id: string; provider: string; title: string | null }>;
+      byProvider: Array<{ provider: string; count: number }>;
+    };
+    expect(body.sessions).toHaveLength(1);
+    expect(body.sessions[0]?.provider).toBe('codex');
+    expect(body.byProvider).toEqual([{ provider: 'codex', count: 1 }]);
+  });
+
   test('usage API caches the report between scans', async () => {
     const store = openMemoryDb();
     for (const plan of DEFAULT_PLANS) store.syncPlan(plan);

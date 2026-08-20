@@ -16,6 +16,9 @@ describe('dashboard shell', () => {
       'usageScanBtn',
       'usageDays',
       'usageReport',
+      'sessionReport',
+      'sessionProvider',
+      'sessionProject',
       'grid',
     ]) {
       expect(html).toContain(`id="${id}"`);
