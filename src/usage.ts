@@ -8,6 +8,7 @@ import type {
   UsageConfidence,
   UsageRecord,
   UsageReport,
+  PlanUsageSummary,
   UsageScanFile,
   UsageSource,
 } from './types.ts';
@@ -750,6 +751,53 @@ function sortAggregates(a: UsageAggregate, b: UsageAggregate): number {
     || a.model.localeCompare(b.model);
 }
 
+/**
+ * 本地 usage 的 provider/model → plan slug 归属。同一 usage provider 下的
+ * 模型可能属于不同 plan（claude provider 下有 glm/MiniMax 模型），因此
+ * 以模型名优先、provider 兜底。无法归属返回 null（不计入 byPlan）。
+ */
+export function usagePlanFor(provider: string, model: string): string | null {
+  const m = model.toLowerCase();
+  if (m.startsWith('kimi') || provider === 'kimi-cli') return 'kimi';
+  if (m.startsWith('glm') || provider === 'zcode') return 'glm';
+  if (m.includes('minimax')) return 'minimax';
+  if (m.startsWith('deepseek') || provider === 'dsh') return 'deepseek';
+  if (provider === 'grok-cli') return 'grok';
+  if (m.startsWith('claude') || provider === 'claude') return 'claude';
+  if (m.startsWith('gpt') || provider === 'codex') return 'codex';
+  return null;
+}
+
+function buildPlanUsageSummary(records: UsageRecord[]): PlanUsageSummary[] {
+  const byPlan = new Map<string, UsageRecord[]>();
+  for (const record of records) {
+    const plan = usagePlanFor(record.provider, record.model);
+    if (!plan) continue;
+    const bucket = byPlan.get(plan);
+    if (bucket) bucket.push(record);
+    else byPlan.set(plan, [record]);
+  }
+  return [...byPlan.entries()]
+    .map(([plan, bucket]) => {
+      const models = new Map<string, number>();
+      for (const record of bucket) {
+        models.set(record.model, (models.get(record.model) ?? 0) + record.totalTokens);
+      }
+      const cost = bucket.reduce((sum, record) => sum + (record.estimatedCostUsd ?? 0), 0);
+      const hasCost = bucket.some((record) => record.estimatedCostUsd != null);
+      return {
+        plan,
+        totalTokens: bucket.reduce((sum, record) => sum + record.totalTokens, 0),
+        estimatedCostUsd: hasCost ? cost : null,
+        topModels: [...models.entries()]
+          .map(([model, totalTokens]) => ({ model, totalTokens }))
+          .sort((a, b) => b.totalTokens - a.totalTokens)
+          .slice(0, 2),
+      };
+    })
+    .sort((a, b) => b.totalTokens - a.totalTokens);
+}
+
 export function buildUsageReport(
   input: UsageRecord[],
   options: { since: number; until: number; generatedAt?: number },
@@ -791,6 +839,7 @@ export function buildUsageReport(
   return {
     generatedAt: options.generatedAt ?? Date.now(),
     since: options.since,
+    byPlan: buildPlanUsageSummary(records),
     until: options.until,
     recordCount: records.length,
     totals: {

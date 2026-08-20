@@ -529,3 +529,31 @@ describe('usage report', () => {
       .toBe(130);
   });
 });
+
+describe('usage byPlan 归属', () => {
+  test('claude provider 下的 glm/MiniMax 模型归入对应 plan，top models 按量排序', () => {
+    const base = { day: '2026-08-19', source: 'local' as const, confidence: 'measured' as const,
+      inputTokens: 0, cachedInputTokens: 0, cacheCreationInputTokens: 0, outputTokens: 0,
+      reasoningOutputTokens: 0, billableTokens: null, estimatedCostUsd: null, sourceFile: null };
+    const now = Date.now();
+    const records = [
+      { ...base, id: 'a', timestamp: now, provider: 'claude', model: 'claude-opus-5', totalTokens: 100 },
+      { ...base, id: 'b', timestamp: now, provider: 'claude', model: 'claude-fable-5', totalTokens: 50 },
+      { ...base, id: 'c', timestamp: now, provider: 'claude', model: 'glm-5.2', totalTokens: 30 },
+      { ...base, id: 'd', timestamp: now, provider: 'zcode', model: 'GLM-5.3', totalTokens: 20 },
+      { ...base, id: 'e', timestamp: now, provider: 'claude', model: 'MiniMax-M3', totalTokens: 10 },
+      { ...base, id: 'f', timestamp: now, provider: 'codex', model: 'kimi-k3', totalTokens: 5 },
+      { ...base, id: 'g', timestamp: now, provider: 'dsh', model: 'deepseek-v4-flash', totalTokens: 200 },
+    ];
+    const report = buildUsageReport(records, { since: now - 1000, until: now + 1000 });
+    const plans = Object.fromEntries(report.byPlan.map((row) => [row.plan, row]));
+    expect(plans.claude.totalTokens).toBe(150);
+    expect(plans.claude.topModels.map((m) => m.model)).toEqual(['claude-opus-5', 'claude-fable-5']);
+    expect(plans.glm.totalTokens).toBe(50);          // claude/glm-5.2 + zcode/GLM-5.3
+    expect(plans.minimax.totalTokens).toBe(10);
+    expect(plans.kimi.totalTokens).toBe(5);           // codex provider 下的 kimi 模型
+    expect(plans.deepseek.totalTokens).toBe(200);
+    expect(report.byPlan[0]!.plan).toBe('deepseek');  // 按总量降序
+    expect(plans.factory).toBeUndefined();            // 无归属数据不计入
+  });
+});

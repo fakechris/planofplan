@@ -168,6 +168,16 @@ export interface UsageReport {
     estimatedCostUsd: number | null;
     fetchedAt: number | null;
   }>;
+  /** 按 plan 归属的用量汇总（usage provider/model → plan 映射），供 menubar
+   * 分页页脚显示当页 provider 的用量；与 totals 同源同缓存。 */
+  byPlan: PlanUsageSummary[];
+}
+
+export interface PlanUsageSummary {
+  plan: string;
+  totalTokens: number;
+  estimatedCostUsd: number | null;
+  topModels: Array<{ model: string; totalTokens: number }>;
 }
 
 /** 带错误分类的 adapter 异常，供 scheduler 判定 auth/network/api/parse */

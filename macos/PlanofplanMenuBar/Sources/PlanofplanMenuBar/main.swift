@@ -29,7 +29,8 @@ struct Window: Decodable {
     let note: String?
 }
 
-/// /api/usage 的最小子集：menubar 面板只展示 30 天总量、成本与 top providers。
+/// /api/usage 的最小子集：menubar 面板展示 30 天总量、成本、top providers
+/// 与按 plan 归属的用量（分页页脚用）。
 struct UsageSummary: Decodable {
     struct Totals: Decodable {
         let totalTokens: Double?
@@ -39,8 +40,23 @@ struct UsageSummary: Decodable {
         let provider: String
         let totalTokens: Double?
     }
+    struct TopModel: Decodable {
+        let model: String
+        let totalTokens: Double?
+    }
+    struct PlanUsageRow: Decodable {
+        let plan: String
+        let totalTokens: Double?
+        let estimatedCostUsd: Double?
+        let topModels: [TopModel]?
+    }
     let totals: Totals?
     let models: [ModelRow]?
+    let byPlan: [PlanUsageRow]?
+
+    func usage(forPlan slug: String) -> PlanUsageRow? {
+        byPlan?.first { $0.plan == slug }
+    }
 
     var providerTotals: [(provider: String, tokens: Double)] {
         let byProvider = Dictionary(grouping: models ?? []) { $0.provider }
@@ -199,7 +215,12 @@ final class PanelView: NSView {
             drawProviderPage(plans[i], top: headerBottom, contentLeft: contentLeft, contentWidth: contentWidth)
         }
 
-        drawUsageFooter(contentLeft: contentLeft, contentWidth: contentWidth)
+        let footerPlanSlug: String?
+        switch pages[page] {
+        case .index: footerPlanSlug = nil
+        case .provider(let i): footerPlanSlug = plans[i].slug
+        }
+        drawUsageFooter(contentLeft: contentLeft, contentWidth: contentWidth, planSlug: footerPlanSlug)
     }
 
     private func drawChevron(_ symbol: String, in rect: NSRect) {
@@ -242,11 +263,13 @@ final class PanelView: NSView {
                 rightText = "∞"
                 rightColor = okColor
             }
-            drawRightAligned(rightText, y: y - 1, right: cardRect.maxX - 62,
+            // 百分比固定占右侧 ~46pt；窗口标签在其左侧固定间距、超宽尾部截断，
+            // 避免「Standard Week」这类长标签与大数字叠在一起。
+            drawRightAligned(rightText, y: y - 1, right: cardRect.maxX - 16,
                              font: .monospacedDigitSystemFont(ofSize: 12, weight: .bold), color: rightColor)
             if let label = tight?.label {
-                drawRightAligned(label, y: y + 1, right: cardRect.maxX - 16,
-                                 font: .systemFont(ofSize: 9), color: textTertiary)
+                drawTruncatedRight(label, y: y + 1, right: cardRect.maxX - 64, maxWidth: 110,
+                                   font: .systemFont(ofSize: 9), color: textTertiary)
             }
 
             NSColor(white: 1, alpha: 0.05).setFill()
@@ -342,22 +365,44 @@ final class PanelView: NSView {
         }
     }
 
-    private func drawUsageFooter(contentLeft: CGFloat, contentWidth: CGFloat) {
+    /** 页脚：总览页显示全局用量，provider 页只显示当页 plan 的用量与 top models。 */
+    private func drawUsageFooter(contentLeft: CGFloat, contentWidth: CGFloat, planSlug: String?) {
         let y = cardRect.minY + 14
         NSColor(white: 1, alpha: 0.08).setFill()
         NSRect(x: contentLeft, y: y + 40, width: contentWidth, height: 1).fill()
-        drawText("TOKEN USAGE · 30 DAYS", at: NSPoint(x: contentLeft, y: y + 24),
-                 font: .systemFont(ofSize: 9, weight: .bold), color: textTertiary)
+
         let numberFont = NSFont.monospacedDigitSystemFont(ofSize: 11.5, weight: .semibold)
-        var main = "总量 " + PanelView.shortNumber(usage?.totals?.totalTokens ?? 0)
-        if let cost = usage?.totals?.estimatedCostUsd {
-            main += String(format: " · 估算 $%.2f", cost)
-        }
-        drawText(main, at: NSPoint(x: contentLeft, y: y + 6), font: numberFont, color: textPrimary)
-        let top = usage?.providerTotals.prefix(3).map { "\($0.provider) \(PanelView.shortNumber($0.tokens))" } ?? []
-        if !top.isEmpty {
-            drawText(top.joined(separator: " · "), at: NSPoint(x: contentLeft, y: y - 10),
-                     font: .systemFont(ofSize: 10), color: textSecondary)
+        if let planSlug, let planUsage = usage?.usage(forPlan: planSlug) {
+            drawText("THIS PLAN · 30 DAYS", at: NSPoint(x: contentLeft, y: y + 24),
+                     font: .systemFont(ofSize: 9, weight: .bold), color: textTertiary)
+            var main = "用量 " + PanelView.shortNumber(planUsage.totalTokens ?? 0)
+            if let cost = planUsage.estimatedCostUsd {
+                main += String(format: " · 估算 $%.2f", cost)
+            }
+            drawText(main, at: NSPoint(x: contentLeft, y: y + 6), font: numberFont, color: textPrimary)
+            let top = planUsage.topModels?.prefix(2).map { "\($0.model) \(PanelView.shortNumber($0.totalTokens ?? 0))" } ?? []
+            if !top.isEmpty {
+                drawText(top.joined(separator: " · "), at: NSPoint(x: contentLeft, y: y - 10),
+                         font: .systemFont(ofSize: 10), color: textSecondary)
+            }
+        } else if planSlug != nil {
+            drawText("THIS PLAN · 30 DAYS", at: NSPoint(x: contentLeft, y: y + 24),
+                     font: .systemFont(ofSize: 9, weight: .bold), color: textTertiary)
+            drawText("无本地用量记录", at: NSPoint(x: contentLeft, y: y + 6),
+                     font: .systemFont(ofSize: 11), color: textTertiary)
+        } else {
+            drawText("TOKEN USAGE · 30 DAYS", at: NSPoint(x: contentLeft, y: y + 24),
+                     font: .systemFont(ofSize: 9, weight: .bold), color: textTertiary)
+            var main = "总量 " + PanelView.shortNumber(usage?.totals?.totalTokens ?? 0)
+            if let cost = usage?.totals?.estimatedCostUsd {
+                main += String(format: " · 估算 $%.2f", cost)
+            }
+            drawText(main, at: NSPoint(x: contentLeft, y: y + 6), font: numberFont, color: textPrimary)
+            let top = usage?.providerTotals.prefix(3).map { "\($0.provider) \(PanelView.shortNumber($0.tokens))" } ?? []
+            if !top.isEmpty {
+                drawText(top.joined(separator: " · "), at: NSPoint(x: contentLeft, y: y - 10),
+                         font: .systemFont(ofSize: 10), color: textSecondary)
+            }
         }
     }
 
@@ -399,6 +444,17 @@ final class PanelView: NSView {
         let attr = NSAttributedString(string: string, attributes: [.font: font, .foregroundColor: color])
         let size = attr.size()
         attr.draw(at: NSPoint(x: right - size.width, y: y))
+    }
+
+    private func drawTruncatedRight(_ string: String, y: CGFloat, right: CGFloat, maxWidth: CGFloat,
+                                    font: NSFont, color: NSColor) {
+        let para = NSMutableParagraphStyle()
+        para.alignment = .right
+        para.lineBreakMode = .byTruncatingTail
+        let attr = NSAttributedString(string: string, attributes: [
+            .font: font, .foregroundColor: color, .paragraphStyle: para,
+        ])
+        attr.draw(in: NSRect(x: right - maxWidth, y: y, width: maxWidth, height: font.pointSize + 4))
     }
 
     private func color(forStatus status: String) -> NSColor {
