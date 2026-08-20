@@ -13,6 +13,8 @@ struct Plan: Decodable {
     let authStatus: String?
     let windows: [Window]
     let lastError: String?
+    let lastFetchedAt: Double?
+    let credentialHint: String?
     let browser: String?
     let browserSupported: Bool?
 }
@@ -47,145 +49,274 @@ struct UsageSummary: Decodable {
     }
 }
 
-/// 下拉面板里单个 plan 的卡片：名称/状态行 + 每个配额窗口一行
-/// （label · 百分比 · 迷你用量条 · used/total · 恢复倒计时）。纯 draw 绘制。
-final class PlanCardView: NSView {
-    private let plan: Plan
-    private let now: Date
-    static let width: CGFloat = 320
-    static let sidePadding: CGFloat = 12
+/// 下拉面板：CodexBar 式单 provider 大卡片 + ‹ › 左右切换。
+/// 自绘深色卡片、固定配色——不依赖菜单 vibrancy/系统外观，浅色模式下
+/// 同样保证对比度（此前用 secondaryLabelColor 在浅色菜单上几乎不可读）。
+final class PanelView: NSView {
+    private let plans: [Plan]
+    private var usage: UsageSummary?
+    private var index: Int
+    private let onSelect: (Int) -> Void
 
-    init(plan: Plan, now: Date) {
-        self.plan = plan
-        self.now = now
-        let height = PlanCardView.height(for: plan)
-        super.init(frame: NSRect(x: 0, y: 0, width: PlanCardView.width, height: height))
+    private let cardBG = NSColor(srgbRed: 0.055, green: 0.075, blue: 0.10, alpha: 1)
+    private let cardBorder = NSColor(white: 1, alpha: 0.09)
+    private let textPrimary = NSColor(srgbRed: 0.91, green: 0.93, blue: 0.96, alpha: 1)
+    private let textSecondary = NSColor(srgbRed: 0.60, green: 0.65, blue: 0.71, alpha: 1)
+    private let textTertiary = NSColor(srgbRed: 0.42, green: 0.47, blue: 0.53, alpha: 1)
+    private let okColor = NSColor(srgbRed: 0.31, green: 0.80, blue: 0.57, alpha: 1)
+    private let warnColor = NSColor(srgbRed: 0.91, green: 0.71, blue: 0.32, alpha: 1)
+    private let badColor = NSColor(srgbRed: 0.94, green: 0.44, blue: 0.44, alpha: 1)
+    private let accentColor = NSColor(srgbRed: 0.36, green: 0.84, blue: 0.90, alpha: 1)
+
+    static let panelWidth: CGFloat = 344
+    static let cardInset: CGFloat = 6
+
+    static func height(plans: [Plan]) -> CGFloat {
+        let maxWindows = CGFloat(max(1, plans.map { $0.windows.count }.max() ?? 1))
+        let switcher: CGFloat = 42
+        let statusBlock: CGFloat = 44
+        let windowBlock = maxWindows * 64
+        let usageFooter: CGFloat = 62
+        return cardInset + 10 + switcher + statusBlock + windowBlock + usageFooter + 10 + cardInset
+    }
+
+    init(plans: [Plan], usage: UsageSummary?, startIndex: Int, onSelect: @escaping (Int) -> Void = { _ in }) {
+        self.plans = plans
+        self.usage = usage
+        self.onSelect = onSelect
+        self.index = min(max(startIndex, 0), max(plans.count - 1, 0))
+        super.init(frame: NSRect(x: 0, y: 0, width: PanelView.panelWidth, height: PanelView.height(plans: plans)))
+
+        let buttonSize = NSSize(width: 30, height: 26)
+        let topY = PanelView.height(plans: plans) - PanelView.cardInset - 10 - 30
+        for (title, action, x) in [
+            ("‹", #selector(prevProvider), PanelView.cardInset + 10),
+            ("›", #selector(nextProvider), PanelView.panelWidth - PanelView.cardInset - 10 - 30),
+        ] {
+            let button = NSButton(title: title, target: self, action: action)
+            button.frame = NSRect(origin: NSPoint(x: x, y: topY), size: buttonSize)
+            button.bezelStyle = .shadowlessSquare
+            button.isBordered = false
+            button.font = NSFont.systemFont(ofSize: 16, weight: .semibold)
+            (button.cell as? NSButtonCell)?.backgroundColor = .clear
+            button.contentTintColor = NSColor(white: 1, alpha: 0.55)
+            addSubview(button)
+        }
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    static func height(for plan: Plan) -> CGFloat {
-        let nameRow: CGFloat = 22
-        let windowRows = CGFloat(max(plan.windows.count, 1)) * 20
-        let errorRow: CGFloat = plan.windows.isEmpty && plan.lastError != nil ? 30 : 0
-        return nameRow + windowRows + errorRow + 8
+    @objc private func prevProvider() { switchProvider(to: index - 1) }
+    @objc private func nextProvider() { switchProvider(to: index + 1) }
+
+    private func switchProvider(to next: Int) {
+        guard plans.count > 1 else { return }
+        index = ((next % plans.count) + plans.count) % plans.count
+        onSelect(index)
+        setNeedsDisplay(bounds)
+    }
+
+    private var cardRect: NSRect {
+        bounds.insetBy(dx: PanelView.cardInset, dy: PanelView.cardInset)
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let contentWidth = bounds.width - PlanCardView.sidePadding * 2
-        var y = bounds.height - 17
+        cardBG.setFill()
+        NSBezierPath(roundedRect: cardRect, xRadius: 12, yRadius: 12).fill()
+        cardBorder.setStroke()
+        let border = NSBezierPath(roundedRect: cardRect.insetBy(dx: 0.5, dy: 0.5), xRadius: 12, yRadius: 12)
+        border.lineWidth = 1
+        border.stroke()
 
-        // 名称行：状态 pip + 名称 +（右侧）凭据/浏览器标识
-        let statusColor = PlanCardView.statusColor(plan.status)
+        guard plans.indices.contains(index) else {
+            drawText("正在连接本地 daemon…", at: NSPoint(x: 20, y: bounds.midY),
+                     font: .systemFont(ofSize: 12), color: textSecondary)
+            return
+        }
+        let plan = plans[index]
+        let contentLeft = cardRect.minX + 16
+        let contentWidth = cardRect.width - 32
+        var y = cardRect.maxY - 30
+
+        // ── 切换行：名称 + 序号（‹ › 按钮在两侧）
+        let nameAttr = NSAttributedString(string: plan.name, attributes: [
+            .font: NSFont.systemFont(ofSize: 13.5, weight: .bold),
+            .foregroundColor: textPrimary,
+        ])
+        let indexAttr = NSAttributedString(string: "  \(index + 1)/\(plans.count)", attributes: [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .medium),
+            .foregroundColor: textTertiary,
+        ])
+        let nameSize = nameAttr.size()
+        let indexSize = indexAttr.size()
+        let totalWidth = nameSize.width + indexSize.width
+        nameAttr.draw(at: NSPoint(x: bounds.midX - totalWidth / 2, y: y - 3))
+        indexAttr.draw(at: NSPoint(x: bounds.midX - totalWidth / 2 + nameSize.width, y: y))
+        y -= 16
+
+        // 页点
+        if plans.count > 1 {
+            let dotGap: CGFloat = 9
+            let dotsWidth = CGFloat(plans.count - 1) * dotGap
+            var dotX = bounds.midX - dotsWidth / 2
+            for i in 0..<plans.count {
+                (i == index ? accentColor : NSColor(white: 1, alpha: 0.18)).setFill()
+                NSBezierPath(ovalIn: NSRect(x: dotX, y: y - 1, width: 3.5, height: 3.5)).fill()
+                dotX += dotGap
+            }
+        }
+        y -= 22
+
+        // ── 状态块
+        let statusColor = color(forStatus: plan.status)
         statusColor.setFill()
-        NSBezierPath(ovalIn: NSRect(x: PlanCardView.sidePadding, y: y - 2, width: 7, height: 7)).fill()
+        NSBezierPath(ovalIn: NSRect(x: contentLeft, y: y - 1, width: 7, height: 7)).fill()
+        var statusParts = [statusText(plan.status)]
+        if let auth = plan.authStatus { statusParts.append(authLabel(auth)) }
+        if let browser = plan.browser { statusParts.append(browser) }
+        drawText(statusParts.joined(separator: " · "), at: NSPoint(x: contentLeft + 13, y: y - 3),
+                 font: .systemFont(ofSize: 11, weight: .medium), color: textSecondary)
+        y -= 17
+        let updated = plan.lastFetchedAt.map { "更新于 " + PanelView.agoText($0) } ?? "暂无成功数据"
+        drawText(updated, at: NSPoint(x: contentLeft, y: y),
+                 font: .systemFont(ofSize: 10), color: textTertiary)
+        y -= 14
 
-        let nameAttrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 12.5, weight: .semibold),
-            .foregroundColor: NSColor.labelColor,
-        ]
-        let name = NSAttributedString(string: plan.name, attributes: nameAttrs)
-        name.draw(at: NSPoint(x: PlanCardView.sidePadding + 13, y: y - 3))
-
-        var badges: [String] = []
-        if let browser = plan.browser { badges.append(browser) }
-        if let auth = plan.authStatus, auth != "auto" { badges.append(auth) }
-        if !badges.isEmpty {
-            let badgeAttrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 9.5),
-                .foregroundColor: NSColor.tertiaryLabelColor,
-            ]
-            let badge = NSAttributedString(string: badges.prefix(2).joined(separator: " · "), attributes: badgeAttrs)
-            let size = badge.size()
-            badge.draw(at: NSPoint(x: bounds.width - PlanCardView.sidePadding - size.width, y: y))
-        }
-        y -= 24
-
-        // 窗口行
-        let numberFont = NSFont.monospacedDigitSystemFont(ofSize: 11.5, weight: .semibold)
-        let secondaryFont = NSFont.systemFont(ofSize: 10)
-        let countdownFont = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .medium)
-        for window in plan.windows {
-            let pct = window.percentage
-            let remaining = pct.map { 100 - $0 } ?? nil
-            let levelColor = PlanCardView.levelColor(remaining: remaining)
-
-            let labelAttr = NSAttributedString(string: window.label, attributes: [
-                .font: secondaryFont, .foregroundColor: NSColor.secondaryLabelColor,
-            ])
-            labelAttr.draw(at: NSPoint(x: PlanCardView.sidePadding, y: y))
-
-            let pctText = pct == nil ? "--" : "\(Int((pct!).rounded()))%"
-            let pctAttr = NSAttributedString(string: pctText, attributes: [
-                .font: numberFont, .foregroundColor: levelColor,
-            ])
-            let pctSize = pctAttr.size()
-            let pctX = PlanCardView.sidePadding + 58
-            pctAttr.draw(at: NSPoint(x: pctX + 40 - pctSize.width, y: y - 1))
-
-            // 迷你用量条
-            let barX = pctX + 48
-            let barWidth: CGFloat = 84
-            let barRect = NSRect(x: barX, y: y + 3, width: barWidth, height: 4)
-            NSColor.quaternaryLabelColor.setFill()
-            NSBezierPath(roundedRect: barRect, xRadius: 2, yRadius: 2).fill()
-            if let pct, pct > 0 {
-                levelColor.setFill()
-                let fillWidth = max(4, barWidth * min(max(pct, 0), 100) / 100)
-                NSBezierPath(roundedRect: NSRect(x: barX, y: y + 3, width: fillWidth, height: 4), xRadius: 2, yRadius: 2).fill()
-            }
-
-            // used/total
-            var fraction = ""
-            if let used = window.used, let total = window.total {
-                fraction = PlanCardView.shortNumber(used) + "/" + PlanCardView.shortNumber(total)
-            } else if let used = window.used {
-                fraction = PlanCardView.shortNumber(used)
-            }
-            if !fraction.isEmpty {
-                NSAttributedString(string: fraction, attributes: [
-                    .font: secondaryFont, .foregroundColor: NSColor.tertiaryLabelColor,
-                ]).draw(at: NSPoint(x: barX + barWidth + 6, y: y))
-            }
-
-            // 倒计时（右对齐）
-            if let countdown = window.resetAt.map({ PlanCardView.countdownText(until: $0, now: now) }) {
-                let attr = NSAttributedString(string: countdown, attributes: [
-                    .font: countdownFont, .foregroundColor: NSColor.labelColor,
-                ])
-                let size = attr.size()
-                attr.draw(at: NSPoint(x: bounds.width - PlanCardView.sidePadding - size.width, y: y))
-            }
-            y -= 20
-        }
-
-        // 无窗口：错误/提示文案
+        // ── 窗口块（每个窗口 64px：label+恢复时间 / 大数字%+条+倒计时）
         if plan.windows.isEmpty {
-            let text = plan.lastError ?? "暂无数据"
-            let attr = NSAttributedString(string: text, attributes: [
-                .font: secondaryFont,
-                .foregroundColor: plan.status == "auth_error" || plan.status == "error"
-                    ? NSColor.systemRed
-                    : NSColor.tertiaryLabelColor,
-            ])
-            attr.draw(in: NSRect(x: PlanCardView.sidePadding, y: y - 6, width: contentWidth - 8, height: 30))
+            let message = plan.status == "not_configured"
+                ? (plan.credentialHint ?? "暂无数据")
+                : (plan.lastError ?? "暂无数据")
+            drawText(message, at: NSPoint(x: contentLeft, y: y - 6),
+                     font: .systemFont(ofSize: 11),
+                     color: (plan.status == "auth_error" || plan.status == "error") ? badColor : textTertiary,
+                     maxWidth: contentWidth, maxLines: 2)
+            y -= 50
+        } else {
+            for window in plan.windows {
+                let pct = window.percentage
+                let remaining = pct.map { 100 - $0 }
+                let levelColor = color(forRemaining: remaining)
+
+                drawText(window.label, at: NSPoint(x: contentLeft, y: y),
+                         font: .systemFont(ofSize: 11, weight: .semibold), color: textSecondary)
+                if let resetAt = window.resetAt {
+                    let resetText = "恢复 " + PanelView.shortDateTime(resetAt)
+                    drawRightAligned(resetText, y: y, right: cardRect.maxX - 16,
+                                     font: .systemFont(ofSize: 9.5), color: textTertiary)
+                }
+                y -= 21
+
+                let pctText = pct == nil ? "--%" : "\(Int(pct!.rounded()))%"
+                let pctAttr = NSAttributedString(string: pctText, attributes: [
+                    .font: NSFont.monospacedDigitSystemFont(ofSize: 19, weight: .bold),
+                    .foregroundColor: levelColor,
+                ])
+                pctAttr.draw(at: NSPoint(x: contentLeft, y: y - 3))
+                let pctWidth = pctAttr.size().width
+
+                var fraction = ""
+                if let used = window.used, let total = window.total {
+                    fraction = PanelView.shortNumber(used) + " / " + PanelView.shortNumber(total)
+                } else if let used = window.used {
+                    fraction = PanelView.shortNumber(used)
+                }
+                if !fraction.isEmpty {
+                    drawText(fraction, at: NSPoint(x: contentLeft + pctWidth + 8, y: y + 2),
+                             font: .systemFont(ofSize: 10), color: textTertiary)
+                }
+
+                if let countdown = window.resetAt.map({ PanelView.countdownText(until: $0) }) {
+                    drawRightAligned(countdown, y: y, right: cardRect.maxX - 16,
+                                     font: .monospacedDigitSystemFont(ofSize: 11, weight: .semibold),
+                                     color: textPrimary)
+                }
+
+                let barX = contentLeft
+                let barWidth = contentWidth
+                let barRect = NSRect(x: barX, y: y - 12, width: barWidth, height: 5)
+                NSColor(white: 1, alpha: 0.10).setFill()
+                NSBezierPath(roundedRect: barRect, xRadius: 2.5, yRadius: 2.5).fill()
+                if let pct, pct > 0 {
+                    levelColor.setFill()
+                    let fillWidth = max(5, barWidth * min(max(pct, 0), 100) / 100)
+                    NSBezierPath(roundedRect: NSRect(x: barX, y: y - 12, width: fillWidth, height: 5),
+                                 xRadius: 2.5, yRadius: 2.5).fill()
+                }
+
+                if let note = window.note, !note.isEmpty {
+                    drawText(note, at: NSPoint(x: barX, y: y - 26),
+                             font: .systemFont(ofSize: 9.5), color: textTertiary)
+                    y -= 64
+                } else {
+                    y -= 50
+                }
+            }
+        }
+
+        // ── usage 页脚
+        y = cardRect.minY + 14
+        NSColor(white: 1, alpha: 0.08).setFill()
+        let sepRect = NSRect(x: contentLeft, y: y + 40, width: contentWidth, height: 1)
+        sepRect.fill()
+
+        drawText("TOKEN USAGE · 30 DAYS", at: NSPoint(x: contentLeft, y: y + 24),
+                 font: .systemFont(ofSize: 9, weight: .bold), color: textTertiary)
+        let numberFont = NSFont.monospacedDigitSystemFont(ofSize: 11.5, weight: .semibold)
+        var main = "总量 " + PanelView.shortNumber(usage?.totals?.totalTokens ?? 0)
+        if let cost = usage?.totals?.estimatedCostUsd {
+            main += String(format: " · 估算 $%.2f", cost)
+        }
+        drawText(main, at: NSPoint(x: contentLeft, y: y + 6), font: numberFont, color: textPrimary)
+        let top = usage?.providerTotals.prefix(3).map { "\($0.provider) \(PanelView.shortNumber($0.tokens))" } ?? []
+        if !top.isEmpty {
+            drawText(top.joined(separator: " · "), at: NSPoint(x: contentLeft, y: y - 10),
+                     font: .systemFont(ofSize: 10), color: textSecondary)
         }
     }
 
-    static func statusColor(_ status: String) -> NSColor {
+    private func drawText(_ string: String, at point: NSPoint, font: NSFont, color: NSColor,
+                          maxWidth: CGFloat? = nil, maxLines: Int = 1) {
+        let attr = NSAttributedString(string: string, attributes: [.font: font, .foregroundColor: color])
+        if let maxWidth {
+            attr.draw(in: NSRect(x: point.x, y: point.y, width: maxWidth, height: CGFloat(maxLines) * (font.pointSize + 4)))
+        } else {
+            attr.draw(at: point)
+        }
+    }
+
+    private func drawRightAligned(_ string: String, y: CGFloat, right: CGFloat, font: NSFont, color: NSColor) {
+        let attr = NSAttributedString(string: string, attributes: [.font: font, .foregroundColor: color])
+        let size = attr.size()
+        attr.draw(at: NSPoint(x: right - size.width, y: y))
+    }
+
+    private func color(forStatus status: String) -> NSColor {
         switch status {
-        case "ok": return NSColor.systemGreen
-        case "stale", "not_configured": return NSColor.systemOrange
-        case "error", "auth_error": return NSColor.systemRed
-        default: return NSColor.tertiaryLabelColor
+        case "ok": return okColor
+        case "stale", "not_configured": return warnColor
+        case "error", "auth_error": return badColor
+        default: return textTertiary
         }
     }
 
-    static func levelColor(remaining: Double?) -> NSColor {
-        guard let remaining else { return NSColor.tertiaryLabelColor }
-        if remaining > 50 { return NSColor.systemGreen }
-        if remaining > 10 { return NSColor.systemOrange }
-        return NSColor.systemRed
+    private func color(forRemaining remaining: Double?) -> NSColor {
+        guard let remaining else { return textTertiary }
+        if remaining > 50 { return okColor }
+        if remaining > 10 { return warnColor }
+        return badColor
+    }
+
+    private func statusText(_ status: String) -> String {
+        [
+            "ok": "正常运行", "stale": "数据过期", "error": "拉取失败",
+            "not_configured": "待配置", "auth_error": "凭据失效", "unavailable": "未接入",
+        ][status] ?? status
+    }
+
+    private func authLabel(_ auth: String) -> String {
+        ["manual": "手动 key", "auto": "自动凭据", "missing": "无凭据",
+         "invalid": "凭据失效", "unknown": "未检测"][auth] ?? auth
     }
 
     static func shortNumber(_ value: Double) -> String {
@@ -195,54 +326,26 @@ final class PlanCardView: NSView {
         return String(format: "%.0f", value)
     }
 
-    static func countdownText(until resetAtMs: Double, now: Date) -> String {
-        let interval = resetAtMs / 1000 - now.timeIntervalSince1970
+    static func countdownText(until resetAtMs: Double) -> String {
+        let interval = resetAtMs / 1000 - Date().timeIntervalSince1970
         if interval <= 0 { return "已恢复" }
         let minutes = max(1, Int((interval / 60).rounded(.up)))
         if minutes < 60 { return "\(minutes)分钟后" }
         return "\(minutes / 60)小时\(minutes % 60 > 0 ? " \(minutes % 60)分" : "")后"
     }
-}
 
-/// 下拉面板的 Usage & Spend 汇总卡：30 天总量、估算成本、top providers。
-final class UsageCardView: NSView {
-    private let usage: UsageSummary
-    static let width: CGFloat = 320
-
-    init(usage: UsageSummary) {
-        self.usage = usage
-        super.init(frame: NSRect(x: 0, y: 0, width: UsageCardView.width, height: 62))
+    static func shortDateTime(_ ms: Double) -> String {
+        let date = Date(timeIntervalSince1970: ms / 1000)
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MM/dd HH:mm"
+        return formatter.string(from: date)
     }
 
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    override func draw(_ dirtyRect: NSRect) {
-        let x = PlanCardView.sidePadding
-        var y = bounds.height - 14
-
-        NSAttributedString(string: "TOKEN USAGE · 30 DAYS", attributes: [
-            .font: NSFont.systemFont(ofSize: 9, weight: .bold),
-            .foregroundColor: NSColor.tertiaryLabelColor,
-        ]).draw(at: NSPoint(x: x, y: y))
-        y -= 18
-
-        let numberFont = NSFont.monospacedDigitSystemFont(ofSize: 11.5, weight: .semibold)
-        var main = "总量 \(PlanCardView.shortNumber(usage.totals?.totalTokens ?? 0))"
-        if let cost = usage.totals?.estimatedCostUsd {
-            main += String(format: " · 估算 $%.2f", cost)
-        }
-        NSAttributedString(string: main, attributes: [
-            .font: numberFont, .foregroundColor: NSColor.labelColor,
-        ]).draw(at: NSPoint(x: x, y: y))
-        y -= 17
-
-        let top = usage.providerTotals.prefix(4).map { "\($0.provider) \(PlanCardView.shortNumber($0.tokens))" }
-        if !top.isEmpty {
-            NSAttributedString(string: top.joined(separator: " · "), attributes: [
-                .font: NSFont.systemFont(ofSize: 10),
-                .foregroundColor: NSColor.secondaryLabelColor,
-            ]).draw(in: NSRect(x: x, y: y - 2, width: bounds.width - x * 2, height: 16))
-        }
+    static func agoText(_ ms: Double) -> String {
+        let seconds = Date().timeIntervalSince1970 - ms / 1000
+        if seconds < 60 { return "刚刚" }
+        if seconds < 3600 { return "\(Int(seconds / 60)) 分钟前" }
+        return "\(Int(seconds / 3600)) 小时前"
     }
 }
 
@@ -287,6 +390,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var daemon: Process?
     private var overview: Overview?
     private var usageSummary: UsageSummary?
+    private var selectedPlanIndex = 0
     private var didBootstrapBrowserSessions = false
     private var safariPermissionState: SafariPermissionState = .unknown
     private var safariPermissionTimer: Timer?
@@ -337,24 +441,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(build)
         menu.addItem(.separator())
 
-        if let overview {
-            for plan in overview.plans {
-                let item = NSMenuItem()
-                item.view = PlanCardView(plan: plan, now: Date())
-                item.isEnabled = false
-                item.toolTip = plan.lastError
-                menu.addItem(item)
+        if let overview, !overview.plans.isEmpty {
+            let item = NSMenuItem()
+            item.view = PanelView(
+                plans: overview.plans,
+                usage: usageSummary,
+                startIndex: selectedPlanIndex
+            ) { [weak self] idx in
+                self?.selectedPlanIndex = idx
             }
-        } else {
-            let item = NSMenuItem(title: "正在连接本地 daemon…", action: nil, keyEquivalent: "")
             item.isEnabled = false
             menu.addItem(item)
-        }
-
-        if let usageSummary {
-            menu.addItem(.separator())
-            let item = NSMenuItem()
-            item.view = UsageCardView(usage: usageSummary)
+        } else {
+            let item = NSMenuItem(title: "正在连接本地 daemon…", action: nil, keyEquivalent: "")
             item.isEnabled = false
             menu.addItem(item)
         }
