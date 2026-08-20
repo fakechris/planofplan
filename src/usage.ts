@@ -138,6 +138,11 @@ function stableModel(value: unknown): string {
   return typeof value === 'string' && value.trim() ? value.trim() : 'unknown';
 }
 
+/** dsh-track Web GUI 基址（deep-link-handoff.md：DSH_WEB_URL，默认 3080）。 */
+function dshWebBaseUrl(): string {
+  return (process.env.DSH_WEB_URL ?? 'http://127.0.0.1:3080').replace(/\/+$/, '');
+}
+
 /**
  * 家族级估算价格表（USD / MTok）。coding plan 场景下这是「折算金额」而非
  * 账单——按 API 牌价折算消耗当量，未知家族保持 null 而不是虚构精度。
@@ -822,6 +827,18 @@ function buildPlanUsageSummary(records: UsageRecord[]): PlanUsageSummary[] {
         entry.cost += record.estimatedCostUsd ?? 0;
         projects.set(record.project, entry);
       }
+      const sessions = new Map<string, { timestamp: number; project: string | null; provider: string }>();
+      for (const record of bucket) {
+        if (!record.sessionId) continue;
+        const existing = sessions.get(record.sessionId);
+        if (!existing || record.timestamp > existing.timestamp) {
+          sessions.set(record.sessionId, {
+            timestamp: record.timestamp,
+            project: record.project ?? null,
+            provider: record.provider,
+          });
+        }
+      }
       const dailyMap = new Map<string, { totalTokens: number; cost: number }>();
       for (const record of bucket) {
         const entry = dailyMap.get(record.day) ?? { totalTokens: 0, cost: 0 };
@@ -844,6 +861,16 @@ function buildPlanUsageSummary(records: UsageRecord[]): PlanUsageSummary[] {
         daily: [...dailyMap.entries()]
           .map(([day, value]) => ({ day, totalTokens: value.totalTokens, estimatedCostUsd: hasCost ? value.cost : null }))
           .sort((a, b) => a.day.localeCompare(b.day)),
+        recentSessions: [...sessions.entries()]
+          .map(([sessionId, info]) => ({
+            sessionId,
+            timestamp: info.timestamp,
+            project: info.project,
+            // dsh-track 深链：http://<DSH_WEB_URL>/s/<sessionId>（deep-link-handoff.md）
+            url: info.provider === 'dsh' ? `${dshWebBaseUrl()}/s/${encodeURIComponent(sessionId)}` : null,
+          }))
+          .sort((a, b) => b.timestamp - a.timestamp)
+          .slice(0, 3),
       };
     })
     .sort((a, b) => b.totalTokens - a.totalTokens);

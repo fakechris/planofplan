@@ -296,6 +296,8 @@ export interface PlanUsageSummary {
   estimatedCostUsd: number | null;
   topModels: Array<{ model: string; totalTokens: number }>;
   topProjects: Array<{ project: string; totalTokens: number; estimatedCostUsd: number | null }>;
+  /** 最近活跃会话（dsh 深链跳转用）；url 仅对有跳转目标的 provider 生成。 */
+  recentSessions: Array<{ sessionId: string; timestamp: number; project: string | null; url: string | null }>;
   /** 30 天逐日序列（今日/图表用），按 day 升序。 */
   daily: Array<{ day: string; totalTokens: number; estimatedCostUsd: number | null }>;
 }

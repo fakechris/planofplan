@@ -561,3 +561,27 @@ describe('usage byPlan 归属', () => {
     expect(plans.factory).toBeUndefined();            // 无归属数据不计入
   });
 });
+
+describe('byPlan recentSessions 与 dsh 深链', () => {
+  test('dsh 会话生成 /s/<sessionId> 深链，claude 会话无 url，按时间降序取 3', () => {
+    const base = { day: '2026-08-20', source: 'local' as const, confidence: 'measured' as const,
+      inputTokens: 0, cachedInputTokens: 0, cacheCreationInputTokens: 0, outputTokens: 0,
+      reasoningOutputTokens: 0, billableTokens: null, estimatedCostUsd: null, sourceFile: null, project: null };
+    const now = Date.now();
+    const records = [
+      { ...base, id: '1', timestamp: now - 1000, provider: 'dsh', model: 'deepseek-v4-flash', totalTokens: 10, sessionId: 'session-aaa' },
+      { ...base, id: '2', timestamp: now - 2000, provider: 'dsh', model: 'deepseek-v4-flash', totalTokens: 10, sessionId: 'session-aaa' },
+      { ...base, id: '3', timestamp: now - 3000, provider: 'dsh', model: 'deepseek-v4-flash', totalTokens: 10, sessionId: 'session-bbb' },
+      { ...base, id: '4', timestamp: now - 4000, provider: 'dsh', model: 'deepseek-v4-flash', totalTokens: 10, sessionId: 'session-ccc' },
+      { ...base, id: '5', timestamp: now - 4000, provider: 'dsh', model: 'deepseek-v4-flash', totalTokens: 10, sessionId: 'session-ddd' },
+      { ...base, id: '6', timestamp: now, provider: 'claude', model: 'claude-opus-5', totalTokens: 10, sessionId: '739f0942' },
+    ];
+    const { byPlan } = buildUsageReport(records, { since: now - 10_000, until: now + 1000 });
+    const dsh = byPlan.find((row) => row.plan === 'deepseek')!;
+    expect(dsh.recentSessions.map((s) => s.sessionId)).toEqual(['session-aaa', 'session-bbb', 'session-ccc']);
+    expect(dsh.recentSessions[0]!.url).toMatch(/\/s\/session-aaa$/);
+    expect(dsh.recentSessions[0]!.timestamp).toBe(now - 1000);
+    const claude = byPlan.find((row) => row.plan === 'claude')!;
+    expect(claude.recentSessions[0]!.url).toBeNull();
+  });
+});

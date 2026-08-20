@@ -345,6 +345,10 @@ td { font-variant-numeric: tabular-nums; }
 .win-reset { color: var(--faint); font-variant-numeric: tabular-nums; }
 .win-countdown { color: var(--brand); font-weight: 600; font-variant-numeric: tabular-nums; }
 .win-note { overflow: hidden; color: var(--faint); text-overflow: ellipsis; white-space: nowrap; }
+.session-jumps { display: flex; align-items: center; gap: 10px; margin-top: 12px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-raised); font-size: 11px; }
+.session-jumps .muted { font-size: 10px; letter-spacing: .06em; }
+.session-jump { color: var(--cyan); white-space: nowrap; }
+.session-jump:hover { text-decoration: underline; text-underline-offset: 3px; }
 .card-foot { justify-content: space-between; gap: 10px; padding-top: 12px; border-top: 1px solid var(--border); font-size: 10px; }
 .card-foot .muted { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .error-line { padding: 8px 11px; border-left: 2px solid var(--bad); border-radius: 0 6px 6px 0; color: var(--bad); font-size: 11px; word-break: break-word; background: color-mix(in srgb, var(--bad) 6%, transparent); }

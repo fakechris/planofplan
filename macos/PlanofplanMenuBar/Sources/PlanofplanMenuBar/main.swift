@@ -55,12 +55,19 @@ struct UsageSummary: Decodable {
             let totalTokens: Double
             let estimatedCostUsd: Double?
         }
+        struct SessionEntry: Decodable {
+            let sessionId: String
+            let timestamp: Double
+            let project: String?
+            let url: String?
+        }
         let plan: String
         let totalTokens: Double?
         let estimatedCostUsd: Double?
         let topModels: [TopModel]?
         let topProjects: [ProjectEntry]?
         let daily: [DailyEntry]?
+        let recentSessions: [SessionEntry]?
     }
     let totals: Totals?
     let models: [ModelRow]?
@@ -96,6 +103,7 @@ final class PanelView: NSView {
     private var chevronLeftRect = NSRect.zero
     private var chevronRightRect = NSRect.zero
     private var indexRowRects: [(rect: NSRect, planIndex: Int)] = []
+    private var sessionRowRects: [(rect: NSRect, url: URL)] = []
 
     private let cardBG = NSColor(srgbRed: 0.055, green: 0.075, blue: 0.10, alpha: 1)
     private let cardBorder = NSColor(white: 1, alpha: 0.09)
@@ -114,7 +122,7 @@ final class PanelView: NSView {
     /// 面板固定高度：取 provider 页与 9 行总览页的较大者。
     static func height(plans: [Plan]) -> CGFloat {
         let maxWindows = CGFloat(max(1, plans.map { $0.windows.count }.max() ?? 1))
-        let providerHeight = 10 + 42 + 44 + maxWindows * 64 + 148 + 10
+        let providerHeight = 10 + 42 + 44 + maxWindows * 64 + 172 + 10
         let indexHeight = 10 + 42 + CGFloat(max(plans.count, 1)) * 30 + 62 + 10
         return 2 * cardInset + max(providerHeight, min(indexHeight, 480))
     }
@@ -174,6 +182,7 @@ final class PanelView: NSView {
         border.stroke()
 
         indexRowRects = []
+        sessionRowRects = []
         guard !pages.isEmpty else {
             drawText("正在连接本地 daemon…", at: NSPoint(x: 20, y: bounds.midY),
                      font: .systemFont(ofSize: 12), color: textSecondary)
@@ -383,7 +392,7 @@ final class PanelView: NSView {
         NSColor(white: 1, alpha: 0.08).setFill()
         // provider 页的分隔线画在富块顶部；index 页保持原位
         if let planSlug, usage?.usage(forPlan: planSlug) != nil {
-            NSRect(x: contentLeft, y: cardRect.minY + 148 + 4, width: contentWidth, height: 1).fill()
+            NSRect(x: contentLeft, y: cardRect.minY + 172 + 4, width: contentWidth, height: 1).fill()
         } else {
             NSRect(x: contentLeft, y: y + 40, width: contentWidth, height: 1).fill()
         }
@@ -392,7 +401,7 @@ final class PanelView: NSView {
         if let planSlug, let planUsage = usage?.usage(forPlan: planSlug) {
             // 富用量块自上而下排布，全部锚定在页脚区域顶部（148px 高），
             // 旧实现自底向上画导致柱状图/项目行落在卡片外不可见。
-            let top = cardRect.minY + 148
+            let top = cardRect.minY + 172
             drawText("USAGE · 30 DAYS", at: NSPoint(x: contentLeft, y: top - 12),
                      font: .systemFont(ofSize: 9, weight: .bold), color: textTertiary)
 
@@ -451,6 +460,21 @@ final class PanelView: NSView {
                 drawTruncatedRight("模型 " + models.joined(separator: " · "), y: projectY, right: cardRect.maxX - 16,
                                    maxWidth: contentWidth, font: .systemFont(ofSize: 9.5), color: textTertiary)
             }
+
+            // dsh-track 深链（deep-link-handoff.md）：可点击的最近会话行
+            let sessions = (planUsage.recentSessions ?? []).filter { $0.url != nil }.prefix(2)
+            var sessionY = cardRect.minY + 30
+            sessionRowRects = []
+            for session in sessions {
+                let name = PanelView.projectDisplayName(session.project ?? session.sessionId)
+                drawTruncatedRight("↗ " + name, y: sessionY, right: cardRect.maxX - 66, maxWidth: 200,
+                                   font: .systemFont(ofSize: 10), color: accentColor)
+                drawRightAligned(PanelView.agoText(session.timestamp), y: sessionY, right: cardRect.maxX - 16,
+                                 font: .monospacedDigitSystemFont(ofSize: 9.5, weight: .medium), color: textTertiary)
+                sessionRowRects.append((rect: NSRect(x: contentLeft, y: sessionY - 4, width: contentWidth, height: 16),
+                                        url: URL(string: session.url!)!))
+                sessionY -= 16
+            }
         } else if planSlug != nil {
             drawText("THIS PLAN · 30 DAYS", at: NSPoint(x: contentLeft, y: y + 24),
                      font: .systemFont(ofSize: 9, weight: .bold), color: textTertiary)
@@ -481,6 +505,10 @@ final class PanelView: NSView {
         }
         if chevronRightRect.contains(point) {
             goNext()
+            return
+        }
+        for row in sessionRowRects where row.rect.contains(point) {
+            NSWorkspace.shared.open(row.url)
             return
         }
         for row in indexRowRects where row.rect.contains(point) {

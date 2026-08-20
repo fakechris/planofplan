@@ -154,14 +154,24 @@ async function load() {
   return { overview, buildInfo, usage, sessions };
 }
 
-function sessionProjectName(session) {
+function sessionRepos(session, role) {
+  return (session?.repos || []).filter((repo) => !role || repo.role === role);
+}
+
+function sessionProjectNames(session) {
+  const touch = sessionRepos(session, 'touch').map((repo) => repo.name).filter(Boolean);
+  if (touch.length > 0) return [...new Set(touch)];
   if (typeof session === 'string' || session == null) {
-    if (!session) return '(unknown)';
-    return String(session).replace(/[/\\]+$/, '').split(/[/\\]/).pop() || session;
+    if (!session) return ['(unknown)'];
+    return [String(session).replace(/[/\\]+$/, '').split(/[/\\]/).pop() || session];
   }
-  if (session.gitName) return session.gitName;
-  if (!session.cwd) return '(unknown)';
-  return session.cwd.replace(/[/\\]+$/, '').split(/[/\\]/).pop() || session.cwd;
+  if (session.gitName) return [session.gitName];
+  if (!session.cwd) return ['(unknown)'];
+  return [session.cwd.replace(/[/\\]+$/, '').split(/[/\\]/).pop() || session.cwd];
+}
+
+function sessionProjectName(session) {
+  return sessionProjectNames(session).join(', ');
 }
 
 function fillSessionFilters(list) {
@@ -190,11 +200,12 @@ function filteredSessions(list) {
     const untitled = !title.trim();
     if (hideUntitled && untitled) return false;
     if (provider && session.provider !== provider) return false;
-    if (project && sessionProjectName(session) !== project) return false;
+    if (project && !sessionProjectNames(session).includes(project)) return false;
     if (query) {
       const hay = [
         session.provider, title, session.cwd || '', sessionProjectName(session),
         session.gitRoot || '', session.gitUrl || '', session.nativeId || '',
+        ...(session.repos || []).flatMap((repo) => [repo.name, repo.url, repo.root, repo.role]),
       ].join(' ').toLowerCase();
       const tokens = query.split(/\s+/).filter(Boolean);
       if (!tokens.every((token) => hay.includes(token))) return false;
@@ -306,14 +317,15 @@ function projectListHtml(visible, total) {
   const groups = [];
   const byName = new Map();
   for (const session of visible) {
-    const name = sessionProjectName(session);
-    let group = byName.get(name);
-    if (!group) {
-      group = { name, sessions: [] };
-      byName.set(name, group);
-      groups.push(group);
+    for (const name of sessionProjectNames(session)) {
+      let group = byName.get(name);
+      if (!group) {
+        group = { name, sessions: [] };
+        byName.set(name, group);
+        groups.push(group);
+      }
+      group.sessions.push(session);
     }
-    group.sessions.push(session);
   }
   return groups.map((group) => `
     <div class="session-group">
@@ -367,8 +379,9 @@ function transcriptHtml(data) {
 }
 
 function sessionDetailHtml(session, pool) {
+  const mine = new Set(sessionProjectNames(session));
   const related = (pool || []).filter((row) => (
-    row.id !== session.id && sessionProjectName(row) === sessionProjectName(session)
+    row.id !== session.id && sessionProjectNames(row).some((name) => mine.has(name))
   )).slice(0, 8);
   const relatedHtml = related.length
     ? `<div class="session-related">
@@ -384,7 +397,9 @@ function sessionDetailHtml(session, pool) {
   return `
     <div class="session-detail-grid">
       <dt>需求</dt><dd>${escapeHtml(session.title || '（未抽出）')}</dd>
-      <dt>项目</dt><dd>${escapeHtml(sessionProjectName(session))}</dd>
+      <dt>需求项目</dt><dd>${escapeHtml(sessionRepos(session, 'touch').map((repo) => repo.name).join(', ') || '（未触碰仓库）')}</dd>
+      <dt>工作 git</dt><dd>${escapeHtml(sessionRepos(session, 'work').map((repo) => repo.name).join(', ') || session.gitName || '--')}</dd>
+      <dt>提交 git</dt><dd>${escapeHtml(sessionRepos(session, 'commit').map((repo) => `${repo.name} (${repo.evidenceKind})`).join(', ') || '--')}</dd>
       <dt>Id</dt><dd>${escapeHtml(session.id)}</dd>
       <dt>cwd</dt><dd>${escapeHtml(session.cwd || '--')}</dd>
       <dt>git</dt><dd>${escapeHtml(session.gitRoot || '--')}</dd>
@@ -619,6 +634,19 @@ function renderBrowserSettings(card, p) {
   `;
 }
 
+/** dsh-track 深链跳转（docs/deep-link-handoff.md）：plan 卡片展示最近活跃会话，
+ * 点击打开 http://<DSH_WEB_URL>/s/<sessionId>。url 由 daemon 按 DSH_WEB_URL 生成。 */
+function renderSessionJumps(p, now) {
+  const byPlan = latestUsage?.byPlan?.find((row) => row.plan === p.slug);
+  const sessions = (byPlan?.recentSessions ?? []).filter((s) => s.url);
+  if (sessions.length === 0) return '';
+  const links = sessions.map((s) =>
+    `<a class="session-jump" href="${escapeHtml(s.url)}" target="_blank" rel="noreferrer"
+        title="${escapeHtml(s.project ?? s.sessionId)}">↗ ${escapeHtml(fmtAgo(s.timestamp, now))}</a>`)
+    .join('');
+  return `<div class="session-jumps"><span class="muted">最近会话</span>${links}</div>`;
+}
+
 function renderPlan(p, now) {
   const card = document.createElement('article');
   card.className = `card status-${p.status}`;
@@ -642,6 +670,7 @@ function renderPlan(p, now) {
     </div>
     <div class="card-body">
       <div class="wins"></div>
+      ${renderSessionJumps(p, now)}
       <div class="card-foot">
         <span class="muted">${p.lastFetchedAt ? `更新于 ${fmtAgo(p.lastFetchedAt, now)} · ${fmtTime(p.lastFetchedAt, true)}` : '暂无成功数据'}</span>
         <button type="button" class="inline-action" data-refresh>刷新 provider</button>
