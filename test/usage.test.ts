@@ -583,5 +583,10 @@ describe('byPlan recentSessions 与 dsh 深链', () => {
     expect(dsh.recentSessions[0]!.timestamp).toBe(now - 1000);
     const claude = byPlan.find((row) => row.plan === 'claude')!;
     expect(claude.recentSessions[0]!.url).toBeNull();
+    const raw = buildUsageReport(
+      [{ ...base, id: '9', timestamp: now, provider: 'dsh', model: 'deepseek-v4-flash', totalTokens: 1, sessionId: '739f0942' }],
+      { since: now - 1000, until: now + 1000 },
+    );
+    expect(raw.byPlan[0]!.recentSessions[0]!.url).toBeNull(); // 缺 session- 前缀不生成深链
   });
 });

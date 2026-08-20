@@ -867,7 +867,9 @@ function buildPlanUsageSummary(records: UsageRecord[]): PlanUsageSummary[] {
             timestamp: info.timestamp,
             project: info.project,
             // dsh-track 深链：http://<DSH_WEB_URL>/s/<sessionId>（deep-link-handoff.md）
-            url: info.provider === 'dsh' ? `${dshWebBaseUrl()}/s/${encodeURIComponent(sessionId)}` : null,
+            url: info.provider === 'dsh' && /^session-/.test(sessionId)
+              ? `${dshWebBaseUrl()}/s/${encodeURIComponent(sessionId)}`
+              : null,
           }))
           .sort((a, b) => b.timestamp - a.timestamp)
           .slice(0, 3),
