@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative, sep } from 'node:path';
 import type { Store } from './db.ts';
 import type {
   UsageAggregate,
@@ -138,17 +138,33 @@ function stableModel(value: unknown): string {
   return typeof value === 'string' && value.trim() ? value.trim() : 'unknown';
 }
 
+/**
+ * 家族级估算价格表（USD / MTok）。coding plan 场景下这是「折算金额」而非
+ * 账单——按 API 牌价折算消耗当量，未知家族保持 null 而不是虚构精度。
+ * 数值可按各家公示价随时调整。
+ */
+const MODEL_PRICE_FAMILIES: Array<{
+  match: RegExp;
+  input: number;
+  cached: number;
+  cacheCreation: number;
+  output: number;
+}> = [
+  { match: /opus/, input: 15, cached: 1.5, cacheCreation: 18.75, output: 75 },
+  { match: /sonnet/, input: 3, cached: 0.3, cacheCreation: 3.75, output: 15 },
+  { match: /haiku/, input: 1, cached: 0.1, cacheCreation: 1.25, output: 5 },
+  { match: /fable/, input: 3, cached: 0.3, cacheCreation: 3.75, output: 15 },
+  { match: /^gpt-5/, input: 1.25, cached: 0.125, cacheCreation: 1.25, output: 10 },
+  { match: /deepseek.*flash/, input: 0.1, cached: 0.01, cacheCreation: 0.13, output: 0.4 },
+  { match: /deepseek/, input: 0.5, cached: 0.05, cacheCreation: 0.63, output: 2 },
+  { match: /^glm-?5/, input: 0.6, cached: 0.06, cacheCreation: 0.75, output: 2.2 },
+  { match: /kimi/, input: 0.6, cached: 0.06, cacheCreation: 0.75, output: 2.2 },
+  { match: /minimax-m/i, input: 0.6, cached: 0.06, cacheCreation: 0.75, output: 2.2 },
+];
+
 function costFor(model: string, usage: NumericUsage): number | null {
-  // Prices are deliberately conservative and only cover stable public model ids.
-  // Unknown or future models stay unpriced instead of presenting false precision.
   const normalized = model.toLowerCase();
-  const price = normalized.includes('sonnet')
-    ? { input: 3, cached: 0.3, cacheCreation: 3.75, output: 15 }
-    : normalized.includes('haiku')
-      ? { input: 1, cached: 0.1, cacheCreation: 1.25, output: 5 }
-      : normalized === 'gpt-5'
-        ? { input: 1.25, cached: 0.125, cacheCreation: 1.25, output: 10 }
-        : null;
+  const price = MODEL_PRICE_FAMILIES.find((family) => family.match.test(normalized));
   if (!price) return null;
   const billableInput = normalized.includes('claude')
     ? usage.inputTokens
@@ -520,6 +536,7 @@ interface CodexCursor {
   turnId: string | null;
   previous: NumericUsage | null;
   eventIndex: number;
+  cwd: string | null;
 }
 
 function emptyCodexCursor(): CodexCursor {
@@ -530,6 +547,7 @@ function emptyCodexCursor(): CodexCursor {
     turnId: null,
     previous: null,
     eventIndex: 0,
+    cwd: null,
   };
 }
 
@@ -557,6 +575,7 @@ function parseCodexCursor(value: string | null | undefined): CodexCursor | null 
       sessionId: typeof parsed.sessionId === 'string' ? parsed.sessionId : null,
       model: stableModel(parsed.model),
       turnId: typeof parsed.turnId === 'string' ? parsed.turnId : null,
+      cwd: typeof parsed.cwd === 'string' ? parsed.cwd : null,
       previous,
       eventIndex: Math.max(0, parsed.eventIndex),
     };
@@ -609,6 +628,9 @@ function scanCodexFile(
       cursor.model = stableModel(payloadRecord.model);
       cursor.turnId = typeof payloadRecord.turn_id === 'string' ? payloadRecord.turn_id : null;
       cursor.previous = null;
+      if (typeof payloadRecord.cwd === 'string' && payloadRecord.cwd.trim()) {
+        cursor.cwd = payloadRecord.cwd.trim();
+      }
     }
     if (rootRecord.type !== 'event_msg' || payloadRecord.type !== 'token_count') continue;
     const info = payloadRecord.info;
@@ -630,7 +652,7 @@ function scanCodexFile(
       delta,
       'local',
       'measured',
-      { sessionId: cursor.sessionId, project: null, sourceFile: file },
+      { sessionId: cursor.sessionId, project: cursor.cwd, sourceFile: file },
     ));
   }
   cursor.parsedBytes = start + consumed;
@@ -787,6 +809,21 @@ function buildPlanUsageSummary(records: UsageRecord[]): PlanUsageSummary[] {
       }
       const cost = bucket.reduce((sum, record) => sum + (record.estimatedCostUsd ?? 0), 0);
       const hasCost = bucket.some((record) => record.estimatedCostUsd != null);
+      const projects = new Map<string, { totalTokens: number; cost: number }>();
+      for (const record of bucket) {
+        if (!record.project) continue;
+        const entry = projects.get(record.project) ?? { totalTokens: 0, cost: 0 };
+        entry.totalTokens += record.totalTokens;
+        entry.cost += record.estimatedCostUsd ?? 0;
+        projects.set(record.project, entry);
+      }
+      const dailyMap = new Map<string, { totalTokens: number; cost: number }>();
+      for (const record of bucket) {
+        const entry = dailyMap.get(record.day) ?? { totalTokens: 0, cost: 0 };
+        entry.totalTokens += record.totalTokens;
+        entry.cost += record.estimatedCostUsd ?? 0;
+        dailyMap.set(record.day, entry);
+      }
       return {
         plan,
         totalTokens: bucket.reduce((sum, record) => sum + record.totalTokens, 0),
@@ -794,7 +831,14 @@ function buildPlanUsageSummary(records: UsageRecord[]): PlanUsageSummary[] {
         topModels: [...models.entries()]
           .map(([model, totalTokens]) => ({ model, totalTokens }))
           .sort((a, b) => b.totalTokens - a.totalTokens)
-          .slice(0, 2),
+          .slice(0, 3),
+        topProjects: [...projects.entries()]
+          .map(([project, value]) => ({ project, totalTokens: value.totalTokens, estimatedCostUsd: hasCost ? value.cost : null }))
+          .sort((a, b) => b.totalTokens - a.totalTokens)
+          .slice(0, 3),
+        daily: [...dailyMap.entries()]
+          .map(([day, value]) => ({ day, totalTokens: value.totalTokens, estimatedCostUsd: hasCost ? value.cost : null }))
+          .sort((a, b) => a.day.localeCompare(b.day)),
       };
     })
     .sort((a, b) => b.totalTokens - a.totalTokens);
@@ -952,7 +996,13 @@ function localScanFiles(options: CollectUsageOptions, since: number): LocalScanF
   ].filter(Boolean);
   const roots: Array<{ provider: string; files: string[]; project?: string | null }> = [
     { provider: 'codex', files: jsonlFiles(codexRoot, since) },
-    ...claudeRoots.map((root) => ({ provider: 'claude', files: jsonlFiles(root, since), project: null })),
+    // Claude projects 目录的第一层路径段就是编码后的项目路径
+    // （-Users-chris-workspace-planofplan）。解码为路径用于聚合与展示。
+    ...claudeRoots.flatMap((root) => jsonlFiles(root, since).map((path) => {
+      const segment = relative(root, path).split(sep)[0] ?? '';
+      const decoded = segment.replace(/^-+/, '').replaceAll('-', '/');
+      return { provider: 'claude', files: [path], project: decoded || null };
+    })),
     {
       provider: 'zcode',
       files: filesForRoot(

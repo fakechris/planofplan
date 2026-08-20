@@ -295,6 +295,9 @@ export interface PlanUsageSummary {
   totalTokens: number;
   estimatedCostUsd: number | null;
   topModels: Array<{ model: string; totalTokens: number }>;
+  topProjects: Array<{ project: string; totalTokens: number; estimatedCostUsd: number | null }>;
+  /** 30 天逐日序列（今日/图表用），按 day 升序。 */
+  daily: Array<{ day: string; totalTokens: number; estimatedCostUsd: number | null }>;
 }
 
 /** 带错误分类的 adapter 异常，供 scheduler 判定 auth/network/api/parse */

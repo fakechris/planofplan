@@ -48,8 +48,8 @@ function help(): void {
 `);
 }
 
-function flags(): { demo: boolean; port: number | null; json: boolean; provider: string | null; key: string | null; auto: boolean; browser: KimiBrowser | null; days: number; official: boolean; db: string | null; refresh: boolean; search: string | null } {
-  const f = { demo: false, port: null as number | null, json: false, provider: null as string | null, key: null as string | null, auto: false, browser: null as KimiBrowser | null, days: 30, official: true, db: null as string | null, refresh: false, search: null as string | null };
+function flags(): { demo: boolean; port: number | null; json: boolean; provider: string | null; key: string | null; auto: boolean; browser: KimiBrowser | null; days: number; official: boolean; db: string | null; refresh: boolean; search: string | null; rescan: boolean } {
+  const f = { demo: false, port: null as number | null, json: false, provider: null as string | null, key: null as string | null, auto: false, browser: null as KimiBrowser | null, days: 30, official: true, db: null as string | null, refresh: false, search: null as string | null, rescan: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === '--demo') f.demo = true;
@@ -62,6 +62,7 @@ function flags(): { demo: boolean; port: number | null; json: boolean; provider:
     else if (a === '--search' || a === '-q') f.search = argv[++i] ?? null;
     else if (a === '--days') f.days = Math.min(365, Math.max(1, Number(argv[++i] ?? 30) || 30));
     else if (a === '--no-official') f.official = false;
+    else if (a === '--rescan') f.rescan = true;
     else if (a === '--db') f.db = argv[++i] ?? null;
     else if (a === '--browser') {
       const browser = argv[++i];
@@ -78,6 +79,11 @@ async function tokenUsage(): Promise<void> {
   syncStore(store, cfg);
   const now = Date.now();
   const since = now - f.days * 86_400_000;
+  if (f.rescan) {
+    // 丢弃增量游标与本地记录后全量重扫：scanner 升级（补 project/cost 字段）
+    // 后用于回填历史。
+    store.clearLocalUsageRecords();
+  }
   await collectUsageReport(store, { since, until: now, includeOfficial: f.official });
   const records = f.provider
     ? store.getUsageRecords(since, now).filter((record) => record.provider === f.provider)

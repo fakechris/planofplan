@@ -45,10 +45,22 @@ struct UsageSummary: Decodable {
         let totalTokens: Double?
     }
     struct PlanUsageRow: Decodable {
+        struct DailyEntry: Decodable {
+            let day: String
+            let totalTokens: Double
+            let estimatedCostUsd: Double?
+        }
+        struct ProjectEntry: Decodable {
+            let project: String
+            let totalTokens: Double
+            let estimatedCostUsd: Double?
+        }
         let plan: String
         let totalTokens: Double?
         let estimatedCostUsd: Double?
         let topModels: [TopModel]?
+        let topProjects: [ProjectEntry]?
+        let daily: [DailyEntry]?
     }
     let totals: Totals?
     let models: [ModelRow]?
@@ -102,7 +114,7 @@ final class PanelView: NSView {
     /// 面板固定高度：取 provider 页与 9 行总览页的较大者。
     static func height(plans: [Plan]) -> CGFloat {
         let maxWindows = CGFloat(max(1, plans.map { $0.windows.count }.max() ?? 1))
-        let providerHeight = 10 + 42 + 44 + maxWindows * 64 + 62 + 10
+        let providerHeight = 10 + 42 + 44 + maxWindows * 64 + 148 + 10
         let indexHeight = 10 + 42 + CGFloat(max(plans.count, 1)) * 30 + 62 + 10
         return 2 * cardInset + max(providerHeight, min(indexHeight, 480))
     }
@@ -373,17 +385,63 @@ final class PanelView: NSView {
 
         let numberFont = NSFont.monospacedDigitSystemFont(ofSize: 11.5, weight: .semibold)
         if let planSlug, let planUsage = usage?.usage(forPlan: planSlug) {
-            drawText("THIS PLAN · 30 DAYS", at: NSPoint(x: contentLeft, y: y + 24),
+            drawText("USAGE · 30 DAYS", at: NSPoint(x: contentLeft, y: y + 24),
                      font: .systemFont(ofSize: 9, weight: .bold), color: textTertiary)
-            var main = "用量 " + PanelView.shortNumber(planUsage.totalTokens ?? 0)
-            if let cost = planUsage.estimatedCostUsd {
-                main += String(format: " · 估算 $%.2f", cost)
+
+            // 今日 / 30 天双栏（今日取 daily 最后一天与本地今天匹配的条目）
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy-MM-dd"
+            let today = formatter.string(from: Date())
+            let todayEntry = planUsage.daily?.first { $0.day == today }
+            var todayText = "今日 " + PanelView.shortNumber(todayEntry?.totalTokens ?? 0)
+            if let cost = todayEntry?.estimatedCostUsd {
+                todayText += String(format: " · $%.2f", cost)
             }
-            drawText(main, at: NSPoint(x: contentLeft, y: y + 6), font: numberFont, color: textPrimary)
-            let top = planUsage.topModels?.prefix(2).map { "\($0.model) \(PanelView.shortNumber($0.totalTokens ?? 0))" } ?? []
-            if !top.isEmpty {
-                drawText(top.joined(separator: " · "), at: NSPoint(x: contentLeft, y: y - 10),
-                         font: .systemFont(ofSize: 10), color: textSecondary)
+            drawText(todayText, at: NSPoint(x: contentLeft, y: y + 4), font: numberFont, color: textPrimary)
+            var monthText = "30天 " + PanelView.shortNumber(planUsage.totalTokens ?? 0)
+            if let cost = planUsage.estimatedCostUsd {
+                monthText += String(format: " · $%.2f", cost)
+            }
+            drawRightAligned(monthText, y: y + 4, right: cardRect.maxX - 16,
+                             font: numberFont, color: textPrimary)
+
+            // 最近 14 天迷你柱状图
+            let bars = planUsage.daily?.suffix(14) ?? []
+            if bars.count > 1 {
+                let chartTop = y - 12
+                let chartHeight: CGFloat = 26
+                let gap: CGFloat = 2
+                let barWidth = (contentWidth - CGFloat(bars.count - 1) * gap) / CGFloat(bars.count)
+                let peak = max(bars.map { $0.totalTokens }.max() ?? 0, 1)
+                for (index, entry) in bars.enumerated() {
+                    let height = max(2, chartHeight * entry.totalTokens / peak)
+                    let rect = NSRect(x: contentLeft + CGFloat(index) * (barWidth + gap),
+                                      y: chartTop - chartHeight + (chartHeight - height),
+                                      width: barWidth, height: height)
+                    (entry.day == today ? accentColor : NSColor(white: 1, alpha: 0.22)).setFill()
+                    NSBezierPath(roundedRect: rect, xRadius: 1, yRadius: 1).fill()
+                }
+            }
+
+            // Top 项目（路径取最后两段）
+            var projectY = y - 18
+            for project in planUsage.topProjects?.prefix(3) ?? [] {
+                let name = PanelView.projectDisplayName(project.project)
+                drawTruncatedRight(name, y: projectY, right: cardRect.maxX - 74, maxWidth: 190,
+                                   font: .systemFont(ofSize: 10), color: textSecondary)
+                var tokens = PanelView.shortNumber(project.totalTokens)
+                if let cost = project.estimatedCostUsd {
+                    tokens += String(format: " · $%.1f", cost)
+                }
+                drawRightAligned(tokens, y: projectY, right: cardRect.maxX - 16,
+                                 font: .monospacedDigitSystemFont(ofSize: 10, weight: .medium), color: textTertiary)
+                projectY -= 14
+            }
+
+            let models = planUsage.topModels?.prefix(3).map { $0.model } ?? []
+            if !models.isEmpty {
+                drawTruncatedRight("模型 " + models.joined(separator: " · "), y: projectY, right: cardRect.maxX - 16,
+                                   maxWidth: contentWidth, font: .systemFont(ofSize: 9.5), color: textTertiary)
             }
         } else if planSlug != nil {
             drawText("THIS PLAN · 30 DAYS", at: NSPoint(x: contentLeft, y: y + 24),
@@ -483,6 +541,11 @@ final class PanelView: NSView {
     private func authLabel(_ auth: String) -> String {
         ["manual": "手动 key", "auto": "自动凭据", "missing": "无凭据",
          "invalid": "凭据失效", "unknown": "未检测"][auth] ?? auth
+    }
+
+    static func projectDisplayName(_ path: String) -> String {
+        let parts = path.split(separator: "/").filter { !$0.isEmpty }
+        return parts.count > 2 ? parts.suffix(2).joined(separator: "/") : path
     }
 
     static func shortNumber(_ value: Double) -> String {
