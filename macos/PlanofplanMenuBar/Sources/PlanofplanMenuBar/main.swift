@@ -834,72 +834,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(quit)
     }
 
-    // CodexBar 风格的 menubar 用量表：全 plan 最紧张的两个配额窗口画成
-    // 迷你分段条，填充比例 = 已用百分比，颜色按余量分级；无数据时灰化。
+    // Lumen 规范 menubar icon：18×18pt template，单色随系统反色，不显示数字。
+    // 三态：daemon 运行 100% opacity，停止 40%，刷新中脉冲 1.6s。
     private func updateMenuBarIcon() {
-        statusItem.button?.image = renderUsageMeterIcon(for: overview)
+        statusItem.button?.image = renderTemplateIcon()
         statusItem.button?.imagePosition = .imageOnly
+        statusItem.button?.alphaValue = overview == nil ? 0.4 : 1.0
     }
 
-    private func renderUsageMeterIcon(for overview: Overview?) -> NSImage {
-        let meters = tightUsageMeters(from: overview)
-        let size = NSSize(width: 20, height: meters.isEmpty ? 8 : 11)
+    private func renderTemplateIcon() -> NSImage {
+        let size = NSSize(width: 18, height: 18)
         let icon = NSImage(size: size)
         icon.lockFocus()
-        let trackColor = NSColor.systemGray.withAlphaComponent(0.32)
-        NSColor.clear.setFill()
+        NSColor.black.setFill()
 
-        func color(level: Int) -> NSColor {
-            switch level {
-            case 0: return NSColor(srgbRed: 0.31, green: 0.80, blue: 0.57, alpha: 1)
-            case 1: return NSColor(srgbRed: 0.91, green: 0.71, blue: 0.32, alpha: 1)
-            default: return NSColor(srgbRed: 0.94, green: 0.44, blue: 0.44, alpha: 1)
-            }
-        }
-        func drawRoundedRect(_ rect: NSRect) {
-            NSBezierPath(roundedRect: rect, xRadius: rect.height / 2, yRadius: rect.height / 2).fill()
-        }
+        // 半圆轨道：r 5.5 @ (9, 10.5)，1.8px stroke
+        let track = NSBezierPath()
+        track.appendArc(
+            withCenter: NSPoint(x: 9, y: 10.5),
+            radius: 5.5,
+            startAngle: 0,
+            endAngle: 180,
+            clockwise: false
+        )
+        track.lineWidth = 1.8
+        track.lineCapStyle = .round
+        track.stroke()
 
-        if meters.isEmpty {
-            // 无数据：两条空轨道
-            for row in 0..<2 {
-                trackColor.setFill()
-                drawRoundedRect(NSRect(x: 1, y: CGFloat(3 - row * 4), width: 18, height: 3))
-            }
-        } else {
-            let barHeight: CGFloat = 3
-            let gap: CGFloat = 2
-            let width: CGFloat = 18
-            for (index, meter) in meters.prefix(2).enumerated() {
-                let y = size.height - barHeight - CGFloat(index) * (barHeight + gap)
-                trackColor.setFill()
-                drawRoundedRect(NSRect(x: 1, y: y - 1, width: width, height: barHeight))
-                color(level: meter.level).setFill()
-                drawRoundedRect(NSRect(x: 1, y: y - 1, width: max(barHeight, width * meter.fraction), height: barHeight))
-            }
-        }
+        // 指针：从圆心到右上 45°，1.6px stroke
+        let needle = NSBezierPath()
+        needle.move(to: NSPoint(x: 9, y: 10.5))
+        needle.line(to: NSPoint(x: 12.9, y: 6.6))
+        needle.lineWidth = 1.6
+        needle.lineCapStyle = .round
+        needle.stroke()
+
+        // 中心轴环
+        let hub = NSBezierPath(ovalIn: NSRect(x: 7.2, y: 8.7, width: 3.6, height: 3.6))
+        hub.lineWidth = 1.4
+        hub.stroke()
+
         icon.unlockFocus()
-        icon.isTemplate = false
+        icon.isTemplate = true
         return icon
-    }
-
-    /// 余量最紧张的两个窗口（已用百分比最高），按 (fraction, level) 返回。
-    private func tightUsageMeters(from overview: Overview?) -> [(fraction: CGFloat, level: Int)] {
-        guard let overview else { return [] }
-        let percentages = overview.plans
-            .filter { $0.status == "ok" || $0.status == "stale" }
-            .flatMap { plan in
-                plan.windows.compactMap { window -> Double? in
-                    guard let percentage = window.percentage else { return nil }
-                    return min(max(percentage, 0), 100)
-                }
-            }
-            .sorted(by: >)
-        return percentages.prefix(2).map { percentage in
-            let remaining = 100 - percentage
-            let level = remaining > 50 ? 0 : (remaining > 10 ? 1 : 2)
-            return (fraction: CGFloat(percentage / 100), level: level)
-        }
     }
 
     private func ensureDaemon() {        request(path: "/api/overview", method: "GET") { [weak self] result, _ in

@@ -22,6 +22,8 @@
   <string>development</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
+  <key>CFBundleIconFile</key>
+  <string>planofplan</string>
   <key>LSUIElement</key>
   <true/>
   <key>NSHighResolutionCapable</key>

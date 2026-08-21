@@ -63,6 +63,9 @@ swift build --package-path "$PACKAGE" -c release
 mkdir -p "$STAGED_APP/Contents/MacOS" "$STAGED_APP/Contents/Resources"
 cp "$PACKAGE/.build/arm64-apple-macosx/release/PlanofplanMenuBar" "$STAGED_APP/Contents/MacOS/PlanofplanMenuBar"
 cp "$PACKAGE/Info.plist" "$STAGED_APP/Contents/Info.plist"
+if [ -f "$PACKAGE/Resources/planofplan.icns" ]; then
+  cp "$PACKAGE/Resources/planofplan.icns" "$STAGED_APP/Contents/Resources/planofplan.icns"
+fi
 /usr/libexec/PlistBuddy -c "Set :PlanofplanCommitSHA $COMMIT_SHA" "$STAGED_APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :PlanofplanCommitShortSHA $SHORT_COMMIT_SHA" "$STAGED_APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :PlanofplanBuildTimestamp $BUILD_TIMESTAMP" "$STAGED_APP/Contents/Info.plist"

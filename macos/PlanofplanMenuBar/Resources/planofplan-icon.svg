@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <!-- Tile: 120×120 @ inset 4, radius 30, espresso #231a13 -->
+  <rect x="4" y="4" width="120" height="120" rx="30" fill="#231a13"/>
+  <!-- Keyline: 1.5px white 8%, rect 4.75/118.5/r29.25 -->
+  <rect x="4.75" y="4.75" width="118.5" height="118.5" rx="29.25" fill="none" stroke="rgba(255,255,255,0.08)" stroke-width="1.5"/>
+  <!-- Glyph: r30 半圆轨道 @ (64,78), 笔画 9, 指针 8, 圆头, teal #4fb8b0 -->
+  <path d="M34 78 A30 30 0 0 1 94 78" fill="none" stroke="#4fb8b0" stroke-width="9" stroke-linecap="round"/>
+  <path d="M64 78 L85 57" stroke="#4fb8b0" stroke-width="8" stroke-linecap="round"/>
+  <circle cx="64" cy="78" r="6" fill="#231a13" stroke="#4fb8b0" stroke-width="4"/>
+</svg>
