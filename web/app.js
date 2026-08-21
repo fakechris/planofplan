@@ -510,8 +510,12 @@ function usageSourceLabel(source, confidence) {
 
 function usageRangeLabel(report) {
   if (!report?.since || !report?.until) return '所选范围';
-  const format = (value) => new Date(value).toISOString().slice(0, 16).replace('T', ' ');
-  return `${format(report.since)} – ${format(report.until)} UTC`;
+  const pad = (n) => String(n).padStart(2, '0');
+  const format = (value) => {
+    const d = new Date(value);
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  };
+  return `${format(report.since)} – ${format(report.until)}`;
 }
 
 function renderUsage(report) {
@@ -571,7 +575,7 @@ function renderUsage(report) {
     </div>
     <div class="usage-grid">
       <div class="usage-panel">
-        <div class="panel-title">Daily activity <span>${usageRangeLabel(report)} · 按 UTC 日期</span></div>
+        <div class="panel-title">Daily activity <span>${usageRangeLabel(report)} · 按本地日期</span></div>
         <div class="daily-list">${dailyHtml || '<span class="muted">暂无日数据</span>'}</div>
       </div>
       <div class="usage-panel usage-table-panel">

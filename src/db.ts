@@ -198,6 +198,16 @@ export class Store {
     )`);
     db.exec('CREATE INDEX IF NOT EXISTS idx_session_repos_session ON session_repos(session_id)');
     db.exec('CREATE INDEX IF NOT EXISTS idx_session_repos_name ON session_repos(name)');
+
+    // v1：本地 usage 记录的 day 曾按 UTC 分桶，与 menubar/web 的「今日」（本地
+    // 日期）不一致。一次性按本地时区重算（official 记录保留 provider 原样日期）。
+    const version = (db.query('PRAGMA user_version').get() as { user_version: number }).user_version;
+    if (version < 1) {
+      db.exec(`UPDATE usage_records
+               SET day = strftime('%Y-%m-%d', timestamp / 1000, 'unixepoch', 'localtime')
+               WHERE source = 'local'`);
+      db.exec('PRAGMA user_version = 1');
+    }
   }
 
   /** 配置 → db plans 表（INSERT OR IGNORE；已存在时只更新非运行时字段） */
@@ -671,8 +681,10 @@ export class Store {
     if (files.length === 0) return;
     this.db.exec('BEGIN');
     try {
+      // 只删本次扫描窗口内的记录：轻量扫描（如启动时 3 天窗口）不应抹掉
+      // 该文件更早的历史记录。
       const deleteRecords = this.db.query(
-        `DELETE FROM usage_records WHERE source = 'local' AND source_file = ?`,
+        `DELETE FROM usage_records WHERE source = 'local' AND source_file = ? AND timestamp >= ?`,
       );
       const updateScan = this.db.query(
         `INSERT INTO usage_scan_files (
@@ -689,7 +701,7 @@ export class Store {
       );
       const scannedAt = Date.now();
       for (const item of files) {
-        deleteRecords.run(item.file.path);
+        deleteRecords.run(item.file.path, item.scannedSince);
         this.writeUsageRecords(item.records, scannedAt);
         updateScan.run(
           item.file.path,

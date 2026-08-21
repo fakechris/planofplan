@@ -59,7 +59,11 @@ function parseTimestamp(value: unknown, fallback: number): number {
 }
 
 function dayFor(timestamp: number): string {
-  return new Date(timestamp).toISOString().slice(0, 10);
+  // 本地时区分桶：daemon、web、menubar 同机运行，「今日」必须在三处一致。
+  const d = new Date(timestamp);
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${d.getFullYear()}-${month}-${day}`;
 }
 
 function usageFromRecord(value: Record<string, unknown>): NumericUsage {
@@ -534,7 +538,14 @@ export function scanDroidLogs(_root: string, _since = Date.now() - 30 * DAY_MS, 
   return [];
 }
 
+// cursor 版本：v1 错误地把 last_token_usage（每 turn 完整值）当累计值做差分，
+// 跨 turn 大幅少算。v2 改用 total_token_usage（session 级累计，实测单调递增）
+// 做差分。旧 cursor 解析失败 → 触发全量重扫，DB 里被低估的记录随
+// replaceUsageRecordsForFiles 自愈。
+const CODEX_CURSOR_VERSION = 2;
+
 interface CodexCursor {
+  v: number;
   parsedBytes: number;
   sessionId: string | null;
   model: string;
@@ -546,6 +557,7 @@ interface CodexCursor {
 
 function emptyCodexCursor(): CodexCursor {
   return {
+    v: CODEX_CURSOR_VERSION,
     parsedBytes: 0,
     sessionId: null,
     model: 'unknown',
@@ -561,7 +573,8 @@ function parseCodexCursor(value: string | null | undefined): CodexCursor | null 
   try {
     const parsed = JSON.parse(value) as Partial<CodexCursor>;
     if (
-      typeof parsed.parsedBytes !== 'number'
+      parsed.v !== CODEX_CURSOR_VERSION
+      || typeof parsed.parsedBytes !== 'number'
       || typeof parsed.eventIndex !== 'number'
       || typeof parsed.model !== 'string'
     ) return null;
@@ -576,6 +589,7 @@ function parseCodexCursor(value: string | null | undefined): CodexCursor | null 
       }
       : null;
     return {
+      v: CODEX_CURSOR_VERSION,
       parsedBytes: Math.max(0, parsed.parsedBytes),
       sessionId: typeof parsed.sessionId === 'string' ? parsed.sessionId : null,
       model: stableModel(parsed.model),
@@ -632,7 +646,6 @@ function scanCodexFile(
     if (rootRecord.type === 'turn_context') {
       cursor.model = stableModel(payloadRecord.model);
       cursor.turnId = typeof payloadRecord.turn_id === 'string' ? payloadRecord.turn_id : null;
-      cursor.previous = null;
       if (typeof payloadRecord.cwd === 'string' && payloadRecord.cwd.trim()) {
         cursor.cwd = payloadRecord.cwd.trim();
       }
@@ -640,7 +653,11 @@ function scanCodexFile(
     if (rootRecord.type !== 'event_msg' || payloadRecord.type !== 'token_count') continue;
     const info = payloadRecord.info;
     if (!info || typeof info !== 'object') continue;
-    const usageValue = (info as Record<string, unknown>).last_token_usage;
+    // total_token_usage 是 session 级累计值（实测文件内单调递增，重复
+    // token_count 事件差分为 0 自然去重）；last_token_usage 是每 turn 完整
+    // 值，不能跨事件做差分。旧 codex 版本缺 total 时退回 last。
+    const infoRecord = info as Record<string, unknown>;
+    const usageValue = infoRecord.total_token_usage ?? infoRecord.last_token_usage;
     if (!usageValue || typeof usageValue !== 'object') continue;
     const current = usageFromRecord(usageValue as Record<string, unknown>);
     const delta = subtractUsage(current, cursor.previous);

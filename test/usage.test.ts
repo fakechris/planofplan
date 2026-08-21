@@ -197,6 +197,13 @@ describe('local token usage scanners', () => {
           payload: {
             type: 'token_count',
             info: {
+              total_token_usage: {
+                input_tokens: 8,
+                cached_input_tokens: 2,
+                output_tokens: 2,
+                reasoning_output_tokens: 1,
+                total_tokens: 10,
+              },
               last_token_usage: {
                 input_tokens: 8,
                 cached_input_tokens: 2,
@@ -213,6 +220,13 @@ describe('local token usage scanners', () => {
           payload: {
             type: 'token_count',
             info: {
+              total_token_usage: {
+                input_tokens: 8,
+                cached_input_tokens: 2,
+                output_tokens: 2,
+                reasoning_output_tokens: 1,
+                total_tokens: 10,
+              },
               last_token_usage: {
                 input_tokens: 8,
                 cached_input_tokens: 2,
@@ -229,12 +243,19 @@ describe('local token usage scanners', () => {
           payload: {
             type: 'token_count',
             info: {
-              last_token_usage: {
+              total_token_usage: {
                 input_tokens: 15,
                 cached_input_tokens: 4,
                 output_tokens: 5,
                 reasoning_output_tokens: 2,
                 total_tokens: 20,
+              },
+              last_token_usage: {
+                input_tokens: 7,
+                cached_input_tokens: 2,
+                output_tokens: 3,
+                reasoning_output_tokens: 1,
+                total_tokens: 10,
               },
             },
           },
@@ -246,6 +267,13 @@ describe('local token usage scanners', () => {
           payload: {
             type: 'token_count',
             info: {
+              total_token_usage: {
+                input_tokens: 20,
+                cached_input_tokens: 4,
+                output_tokens: 6,
+                reasoning_output_tokens: 2,
+                total_tokens: 26,
+              },
               last_token_usage: {
                 input_tokens: 5,
                 cached_input_tokens: 0,
@@ -404,7 +432,7 @@ describe('usage report', () => {
       timestamp: `${DAY}T10:00:00.000Z`,
       payload: {
         type: 'token_count',
-        info: { last_token_usage: { input_tokens: inputTokens, output_tokens: outputTokens, total_tokens: inputTokens + outputTokens } },
+        info: { total_token_usage: { input_tokens: inputTokens, output_tokens: outputTokens, total_tokens: inputTokens + outputTokens } },
       },
     }) + '\n';
 
