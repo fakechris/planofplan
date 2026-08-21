@@ -165,6 +165,16 @@ async function serve(): Promise<void> {
       .then(() => collectSessionCatalog(store, { since, until: Date.now() }))
       .then((count) => console.log(`[sessions] indexed ${count} local session files`))
       .catch((error) => console.error('[sessions] index failed:', error));
+
+    // fable badge 依赖 usage_records 里的 model 时间戳；启动时补一个
+    // 3 天轻量本地扫描（无 official API），避免 badge 显示陈旧数据。
+    void Promise.resolve()
+      .then(() => collectUsageReport(store, {
+        since: Date.now() - 3 * 86_400_000,
+        until: Date.now(),
+        includeOfficial: false,
+      }))
+      .catch((error) => console.error('[usage] startup scan failed:', error));
   }
 }
 
