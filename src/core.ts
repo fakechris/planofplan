@@ -30,6 +30,16 @@ export function formatResetCountdown(resetAt: number | null, now: number): strin
   return `重置 ${formatDuration(diff)}后`;
 }
 
+/** 按窗口类型估算开始时间，用于时间进度参考线。 */
+function estimateWindowStart(windowId: string, resetAt: number | null): number | null {
+  if (resetAt == null) return null;
+  const id = windowId.toLowerCase();
+  if (id.includes('5h') || id.includes('session')) return resetAt - 5 * 3_600_000;
+  if (id.includes('week')) return resetAt - 7 * 86_400_000;
+  if (id.includes('month') || id.includes('credit') || id.includes('request')) return resetAt - 30 * 86_400_000;
+  return null;
+}
+
 /** 闲置阈值：Claude Code 超过这个时长没用 `claude-fable-5`，UI 显示醒目 badge。 */
 export const FABLE_IDLE_THRESHOLD_MS = 24 * 60 * 60 * 1000; // TODO: 配置化
 
@@ -133,13 +143,20 @@ function buildPlanOverview(store: Store, plan: PlanConfig, now: number): Overvie
   // not be presented as current usage. They remain available through history.
   const visibleWindows = status === 'auth_error' ? [] : windows;
 
+  // 为每个窗口估算 startedAt，供前端渲染时间进度参考线（WTD/MTD）。
+  //  provider 未返回时按窗口类型近似：5h→-5h，week→-7d，month/credits→-30d。
+  const withStart = visibleWindows.map((window) => ({
+    ...window,
+    startedAt: window.startedAt ?? estimateWindowStart(window.window, window.resetAt),
+  }));
+
   // 高峰/低谷注解：仅在「全局开关 + per-plan 开关」都打开时打。
   // tier 是「当前时间」的属性，db 不持久化，每次 buildOverview 重算。
   const tierEnabled = isTierPricingEnabled() && planWantsTierPricing(plan.extra, plan.adapter);
   const tier = tierEnabled ? getTier(plan.adapter, now) : null;
   const annotated = tierEnabled
-    ? annotateWindowsWithTier(plan.adapter, visibleWindows, now)
-    : visibleWindows;
+    ? annotateWindowsWithTier(plan.adapter, withStart, now)
+    : withStart;
 
   return {
     slug: plan.slug,

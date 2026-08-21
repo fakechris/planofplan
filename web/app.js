@@ -117,6 +117,16 @@ function levelClass(percentage) {
   return 'bad';
 }
 
+/** 时间进度百分比：窗口已过去的时间占比。 */
+function timePacePercentage(w, now) {
+  if (w.startedAt == null || w.resetAt == null) return null;
+  const total = w.resetAt - w.startedAt;
+  if (total <= 0) return null;
+  const elapsed = now - w.startedAt;
+  const pct = Math.round((elapsed / total) * 100);
+  return Math.max(0, Math.min(100, pct));
+}
+
 function authLabel(status) {
   return {
     manual: '手动 key',
@@ -783,6 +793,18 @@ function renderPlan(p, now) {
       const fill = node.querySelector('.fill');
       fill.className = `fill ${levelClass(w.percentage)}`;
       fill.style.width = `${w.percentage ?? 0}%`;
+      // 时间进度参考线：按窗口时长估算当前时间应到的位置。
+      const marker = node.querySelector('.pace-marker');
+      if (marker) {
+        const pace = timePacePercentage(w, now);
+        if (pace != null) {
+          marker.style.left = `${pace}%`;
+          marker.hidden = false;
+          marker.title = `时间进度 ${pace}%`;
+        } else {
+          marker.hidden = true;
+        }
+      }
       const reset = node.querySelector('.win-reset');
       reset.textContent = w.resetAt == null ? '恢复时间未知' : `恢复 ${fmtTime(w.resetAt)}`;
       const countdown = node.querySelector('.win-countdown');

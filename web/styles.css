@@ -514,16 +514,24 @@ td { font-variant-numeric: tabular-nums; }
 .empty-mark { display: grid; place-items: center; flex: 0 0 auto; width: 17px; height: 17px; border-radius: 50%; color: var(--bg); background: var(--warn); font-size: 11px; font-weight: var(--weight-bold); }
 
 /* QuotaWindow：标签 + 用量/总量 + 条 + 重置时刻/倒计时 */
+.win { position: relative; }
 .win-head { justify-content: space-between; gap: 10px; margin-bottom: 7px; font-size: var(--text-sm); }
 .win-label { color: var(--text); font-weight: var(--weight-semibold); }
 .win-meta { color: var(--muted); font-variant-numeric: tabular-nums; }
 .win-meta b { color: var(--text); font-size: var(--text-lg); font-weight: var(--weight-bold); letter-spacing: -0.01em; }
-.track { height: 7px; overflow: hidden; border-radius: var(--radius-pill); background: var(--surface-2); }
+.track { position: relative; height: 7px; border-radius: var(--radius-pill); background: var(--surface-2); }
 .fill { height: 100%; border-radius: inherit; transition: width 0.55s var(--ease); }
 .fill.ok { background: var(--accent); }
 .fill.warn { background: var(--warn); }
 .fill.bad { background: var(--danger); }
 .fill.unknown { background: var(--muted); }
+/* 时间进度参考线：垂直虚线标记「按时间应到的位置」，显示在进度条上方。 */
+.pace-marker {
+  position: absolute; top: -4px; width: 0; height: 15px;
+  border-left: 2px dashed var(--text);
+  opacity: 0.7; pointer-events: none;
+  z-index: 2;
+}
 .win-foot { justify-content: space-between; gap: 10px; margin-top: 7px; font-size: var(--text-xs); }
 .win-reset { color: var(--muted); font-variant-numeric: tabular-nums; }
 .win-countdown { color: var(--text); font-weight: var(--weight-semibold); font-variant-numeric: tabular-nums; }

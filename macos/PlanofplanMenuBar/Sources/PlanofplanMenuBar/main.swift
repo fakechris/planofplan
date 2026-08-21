@@ -122,12 +122,13 @@ final class PanelView: NSView {
     static let panelWidth: CGFloat = 380
     static let cardInset: CGFloat = 6
 
-    /// 面板固定高度：取 provider 页与 9 行总览页的较大者。
+    /// 面板固定高度：取 provider 页与总览页的较大者。
     static func height(plans: [Plan]) -> CGFloat {
         let maxWindows = CGFloat(max(1, plans.map { $0.windows.count }.max() ?? 1))
-        let providerHeight = 10 + 42 + 44 + maxWindows * 64 + 172 + 10
-        let indexHeight = 10 + 42 + CGFloat(max(plans.count, 1)) * 30 + 62 + 10
-        return 2 * cardInset + max(providerHeight, min(indexHeight, 480))
+        let providerHeight = 278 + maxWindows * 64
+        let indexHeight = CGFloat(324)
+        let cappedIndex = min(indexHeight, 480)
+        return 12 + max(providerHeight, cappedIndex)
     }
 
     init(plans: [Plan], usage: UsageSummary?, startPage: Int = 0, onSelect: @escaping (Int) -> Void = { _ in }) {
@@ -146,19 +147,8 @@ final class PanelView: NSView {
             pages = [.index(rows: [])]
             return
         }
-        // 总览行数容量：内容高度（去掉切换行/usage 页脚/内边距）/ 行高
-        let contentHeight = bounds.height - 2 * PanelView.cardInset - 42 - 62 - 22
-        let capacity = max(3, Int(contentHeight / 30))
-        var indexPages: [Page] = []
-        if plans.count > capacity {
-            var offset = 0
-            while offset < plans.count {
-                indexPages.append(.index(rows: Array(offset..<min(offset + capacity, plans.count))))
-                offset += capacity
-            }
-        } else {
-            indexPages = [.index(rows: Array(plans.indices))]
-        }
+        // 总览页只放最紧张的 3 个，其余折叠；不再拆多页总览。
+        let indexPages: [Page] = [.index(rows: Array(plans.indices))]
         pages = indexPages + plans.indices.map { .provider($0) }
     }
 
@@ -258,51 +248,82 @@ final class PanelView: NSView {
         attr.draw(in: NSRect(x: rect.minX, y: rect.minY - 2, width: rect.width, height: rect.height))
     }
 
-    /// 总览页：每 plan 一行——状态 pip、名称、最紧张窗口百分比与倒计时。
+    /// 总览页：按规范只展示最紧张的 3 个 plan 的完整窗口信息，其余折叠为摘要行。
     private func drawIndexPage(rows: [Int], top: CGFloat, contentLeft: CGFloat, contentWidth: CGFloat) {
         var y = top - 18
-        let rowHeight: CGFloat = 30
-        for planIndex in rows {
+
+        // 按最紧张窗口百分比排序，取前 3 个详细展示
+        let sorted = rows.sorted { a, b in
+            let pa = plans[a].windows.compactMap { $0.percentage }.max() ?? 0
+            let pb = plans[b].windows.compactMap { $0.percentage }.max() ?? 0
+            return pa > pb
+        }
+        let featured = Array(sorted.prefix(3))
+        let remainingCount = max(0, rows.count - featured.count)
+
+        for planIndex in featured {
             let plan = plans[planIndex]
-            let rowRect = NSRect(x: contentLeft, y: y - 6, width: contentWidth, height: rowHeight - 6)
-            indexRowRects.append((rect: rowRect, planIndex: planIndex))
-
-            let statusColor = color(forStatus: plan.status)
-            statusColor.setFill()
-            NSBezierPath(ovalIn: NSRect(x: contentLeft, y: y + 1, width: 6, height: 6)).fill()
-
-            drawText(plan.name, at: NSPoint(x: contentLeft + 14, y: y - 1),
-                     font: .systemFont(ofSize: 11.5, weight: .medium), color: textPrimary)
-
-            // 最紧张窗口（已用百分比最高）
             let tight = plan.windows.filter { $0.percentage != nil }
                 .max { ($0.percentage ?? 0) < ($1.percentage ?? 0) }
-            let unlimited = plan.windows.first { $0.note == "不限量" && $0.percentage == nil }
-            var rightText = "--"
-            var rightColor = textTertiary
-            if let tight {
-                rightText = "\(Int(tight.percentage!.rounded()))%"
-                rightColor = color(forRemaining: 100 - tight.percentage!)
-            } else if unlimited != nil {
-                rightText = "∞"
-                rightColor = okColor
-            }
-            // 百分比固定占右侧 ~46pt；窗口标签在其左侧固定间距、超宽尾部截断，
-            // 避免「Standard Week」这类长标签与大数字叠在一起。
-            drawRightAligned(rightText, y: y - 1, right: cardRect.maxX - 16,
-                             font: .monospacedDigitSystemFont(ofSize: 12, weight: .bold), color: rightColor)
+
+            let rowRect = NSRect(x: contentLeft, y: y - 52, width: contentWidth, height: 52)
+            indexRowRects.append((rect: rowRect, planIndex: planIndex))
+
+            // 第一行：pip + 名称 + 状态 badge
+            let statusColor = color(forStatus: plan.status)
+            statusColor.setFill()
+            NSBezierPath(ovalIn: NSRect(x: contentLeft, y: y - 1, width: 6, height: 6)).fill()
+            drawText(plan.name, at: NSPoint(x: contentLeft + 14, y: y - 3),
+                     font: .systemFont(ofSize: 11.5, weight: .semibold), color: textPrimary)
             if PanelView.fableIdleLabel(for: plan, nowMs: Date().timeIntervalSince1970 * 1000) != nil {
-                drawText("⚠", at: NSPoint(x: cardRect.maxX - 48, y: y - 2),
+                drawText("⚠", at: NSPoint(x: cardRect.maxX - 20, y: y - 3),
                          font: .systemFont(ofSize: 11, weight: .semibold), color: warnColor)
             }
-            if let label = tight?.label {
-                drawTruncatedRight(label, y: y + 1, right: cardRect.maxX - 64, maxWidth: 110,
-                                   font: .systemFont(ofSize: 9), color: textTertiary)
+            y -= 17
+
+            // 第二行：窗口标签 + 百分比 + 倒计时
+            if let tight {
+                let pct = Int(tight.percentage!.rounded())
+                let levelColor = color(forRemaining: 100 - tight.percentage!)
+                drawText(tight.label, at: NSPoint(x: contentLeft + 14, y: y),
+                         font: .systemFont(ofSize: 10, weight: .medium), color: textTertiary)
+                drawRightAligned("\(pct)%", y: y - 2, right: cardRect.maxX - 16,
+                                 font: .monospacedDigitSystemFont(ofSize: 15, weight: .bold), color: levelColor)
+                if let countdown = tight.resetAt.map({ PanelView.countdownText(until: $0) }) {
+                    drawRightAligned(countdown, y: y, right: cardRect.maxX - 64,
+                                     font: .systemFont(ofSize: 9.5), color: textTertiary)
+                }
+                y -= 15
+
+                // 第三行：用量/总量 + 重置时间
+                var detail = ""
+                if let used = tight.used, let total = tight.total {
+                    detail = PanelView.shortNumber(used) + " / " + PanelView.shortNumber(total)
+                } else if let used = tight.used {
+                    detail = PanelView.shortNumber(used)
+                }
+                if let resetAt = tight.resetAt {
+                    if !detail.isEmpty { detail += " · " }
+                    detail += "恢复 " + PanelView.shortDateTime(resetAt)
+                }
+                if !detail.isEmpty {
+                    drawText(detail, at: NSPoint(x: contentLeft + 14, y: y),
+                             font: .systemFont(ofSize: 9.5), color: textTertiary)
+                }
+                y -= 20
+            } else {
+                y -= 35
             }
 
             NSColor(white: 1, alpha: 0.05).setFill()
-            NSRect(x: contentLeft, y: y - 9, width: contentWidth, height: 1).fill()
-            y -= rowHeight
+            NSRect(x: contentLeft, y: y, width: contentWidth, height: 1).fill()
+            y -= 8
+        }
+
+        // 其余 plan 摘要
+        if remainingCount > 0 {
+            drawText("其余 \(remainingCount) 个 plan 正常", at: NSPoint(x: contentLeft, y: y - 4),
+                     font: .systemFont(ofSize: 10), color: textTertiary)
         }
     }
 
@@ -848,10 +869,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         icon.lockFocus()
         NSColor.black.setFill()
 
-        // 半圆轨道：r 5.5 @ (9, 10.5)，1.8px stroke
+        // 图形整体居中：轨道中心放在 canvas 几何中心 (9, 9)，而不是偏上。
+        // 半圆轨道：r 5.5 @ (9, 9)，1.8px stroke，顶部 y=14.5，底部 y=3.5。
+        let center = NSPoint(x: 9, y: 9)
         let track = NSBezierPath()
         track.appendArc(
-            withCenter: NSPoint(x: 9, y: 10.5),
+            withCenter: center,
             radius: 5.5,
             startAngle: 0,
             endAngle: 180,
@@ -863,14 +886,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // 指针：从圆心到右上 45°，1.6px stroke
         let needle = NSBezierPath()
-        needle.move(to: NSPoint(x: 9, y: 10.5))
-        needle.line(to: NSPoint(x: 12.9, y: 6.6))
+        needle.move(to: center)
+        needle.line(to: NSPoint(x: 12.9, y: 5.1))
         needle.lineWidth = 1.6
         needle.lineCapStyle = .round
         needle.stroke()
 
         // 中心轴环
-        let hub = NSBezierPath(ovalIn: NSRect(x: 7.2, y: 8.7, width: 3.6, height: 3.6))
+        let hub = NSBezierPath(ovalIn: NSRect(x: 7.2, y: 7.2, width: 3.6, height: 3.6))
         hub.lineWidth = 1.4
         hub.stroke()
 

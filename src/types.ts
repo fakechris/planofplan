@@ -14,6 +14,8 @@ export interface QuotaWindow {
   percentage: number | null;
   /** 重置时间 epoch ms；未知为 null */
   resetAt: number | null;
+  /** 窗口开始时间 epoch ms；由 server 根据窗口类型估算或 provider 返回。 */
+  startedAt?: number | null;
   /** 附加说明（如 "不限量"、"网页端可见"） */
   note: string | null;
   /** 抓取时间（由写入方填充） */
