@@ -817,8 +817,10 @@ function buildPlanUsageSummary(records: UsageRecord[]): PlanUsageSummary[] {
       for (const record of bucket) {
         models.set(record.model, (models.get(record.model) ?? 0) + record.totalTokens);
       }
-      const cost = bucket.reduce((sum, record) => sum + (record.estimatedCostUsd ?? 0), 0);
       const hasCost = bucket.some((record) => record.estimatedCostUsd != null);
+      const rawCost = bucket.reduce((sum, record) => sum + (record.estimatedCostUsd ?? 0), 0);
+      // 累计 USD 截到两位小数，避免 0.39999… 之类浮点尾巴漏到 UI
+      const cost = hasCost ? Math.round(rawCost * 100) / 100 : null;
       const projects = new Map<string, { totalTokens: number; cost: number }>();
       for (const record of bucket) {
         if (!record.project) continue;

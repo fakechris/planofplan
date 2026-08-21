@@ -300,6 +300,9 @@ td { font-variant-numeric: tabular-nums; }
   transition: border-color .2s var(--ease-out), transform .2s var(--ease-out), box-shadow .2s var(--ease-out);
 }
 .card:hover { border-color: var(--border-strong); transform: translateY(-2px); box-shadow: var(--shadow); }
+.card.dragging { opacity: .5; transform: scale(.98); cursor: grabbing; }
+.card.drop-before { box-shadow: 0 -2px 0 var(--cyan), var(--shadow); }
+.card.drop-after  { box-shadow: 0  2px 0 var(--cyan), var(--shadow); }
 .card.status-auth_error, .card.status-error { border-color: color-mix(in srgb, var(--bad) 32%, var(--border)); }
 .card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
 .provider-title { align-items: flex-start; gap: 10px; }
@@ -326,6 +329,8 @@ td { font-variant-numeric: tabular-nums; }
 .badge.tier-peak i { background: var(--warn); }
 .badge.tier-offpeak { color: var(--cyan); border-color: color-mix(in srgb, var(--cyan) 30%, var(--border-strong)); }
 .badge.tier-offpeak i { background: var(--cyan); }
+.badge.fable-idle { padding: 2px 7px; border: 1px solid color-mix(in srgb, var(--warn) 32%, var(--border-strong)); border-radius: 99px; color: var(--warn); font-size: 10px; }
+.badge.fable-idle i { background: var(--warn); }
 
 .card-body { display: flex; flex-direction: column; gap: 14px; margin-top: 22px; }
 .wins { display: flex; flex-direction: column; gap: 16px; }

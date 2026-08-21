@@ -15,6 +15,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { AdapterContext, Credential, PlanAdapter, QuotaWindow } from '../types.ts';
 import { AdapterError } from '../types.ts';
+import { clampPct } from './util.ts';
 
 const execFileAsync = promisify(execFile);
 const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
@@ -75,7 +76,7 @@ export function normalizeClaude(raw: unknown): QuotaWindow[] {
       used: num(w.used_dollars),
       total: num(w.limit_dollars),
       unit: 'percent',
-      percentage: Math.min(100, Math.max(0, utilization)),
+      percentage: clampPct(utilization),
       resetAt: resetTimeMs(w.resets_at),
       note: null,
     });
@@ -138,7 +139,11 @@ export function normalizeClaude(raw: unknown): QuotaWindow[] {
         used: usedCredits,
         total: monthlyLimit,
         unit: 'usd',
-        percentage: utilization ?? (monthlyLimit > 0 && usedCredits != null ? (usedCredits / monthlyLimit) * 100 : null),
+        percentage: utilization != null
+          ? clampPct(utilization)
+          : (monthlyLimit > 0 && usedCredits != null
+            ? clampPct((usedCredits / monthlyLimit) * 100)
+            : null),
         resetAt: null,
         note: 'extra usage',
       });

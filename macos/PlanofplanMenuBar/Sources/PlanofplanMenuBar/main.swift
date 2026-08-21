@@ -17,6 +17,8 @@ struct Plan: Decodable {
     let credentialHint: String?
     let browser: String?
     let browserSupported: Bool?
+    /// 上次本地 Claude Code 用 `claude-fable-5` 的 epoch ms；null/缺失表示从未用过。
+    let fableLastUsedAt: Double?
 }
 
 struct Window: Decodable {
@@ -288,6 +290,10 @@ final class PanelView: NSView {
             // 避免「Standard Week」这类长标签与大数字叠在一起。
             drawRightAligned(rightText, y: y - 1, right: cardRect.maxX - 16,
                              font: .monospacedDigitSystemFont(ofSize: 12, weight: .bold), color: rightColor)
+            if PanelView.fableIdleLabel(for: plan, nowMs: Date().timeIntervalSince1970 * 1000) != nil {
+                drawText("⚠", at: NSPoint(x: cardRect.maxX - 48, y: y - 2),
+                         font: .systemFont(ofSize: 11, weight: .semibold), color: warnColor)
+            }
             if let label = tight?.label {
                 drawTruncatedRight(label, y: y + 1, right: cardRect.maxX - 64, maxWidth: 110,
                                    font: .systemFont(ofSize: 9), color: textTertiary)
@@ -316,6 +322,12 @@ final class PanelView: NSView {
         drawText(updated, at: NSPoint(x: contentLeft, y: y),
                  font: .systemFont(ofSize: 10), color: textTertiary)
         y -= 14
+
+        if let label = PanelView.fableIdleLabel(for: plan, nowMs: Date().timeIntervalSince1970 * 1000) {
+            drawText("⚠ fable-5 空闲 \(label)", at: NSPoint(x: contentLeft, y: y),
+                     font: .systemFont(ofSize: 11, weight: .semibold), color: warnColor)
+            y -= 16
+        }
 
         if plan.windows.isEmpty {
             let message = plan.status == "not_configured"
@@ -412,12 +424,14 @@ final class PanelView: NSView {
             let todayEntry = planUsage.daily?.first { $0.day == today }
             var todayText = "今日 " + PanelView.shortNumber(todayEntry?.totalTokens ?? 0)
             if let cost = todayEntry?.estimatedCostUsd {
-                todayText += String(format: " · $%.2f", cost)
+                let snapped = (cost * 100).rounded() / 100
+                todayText += String(format: " · $%.2f", snapped)
             }
             drawText(todayText, at: NSPoint(x: contentLeft, y: top - 32), font: numberFont, color: textPrimary)
             var monthText = "30天 " + PanelView.shortNumber(planUsage.totalTokens ?? 0)
             if let cost = planUsage.estimatedCostUsd {
-                monthText += String(format: " · $%.2f", cost)
+                let snapped = (cost * 100).rounded() / 100
+                monthText += String(format: " · $%.2f", snapped)
             }
             drawRightAligned(monthText, y: top - 32, right: cardRect.maxX - 16,
                              font: numberFont, color: textPrimary)
@@ -485,7 +499,8 @@ final class PanelView: NSView {
                      font: .systemFont(ofSize: 9, weight: .bold), color: textTertiary)
             var main = "总量 " + PanelView.shortNumber(usage?.totals?.totalTokens ?? 0)
             if let cost = usage?.totals?.estimatedCostUsd {
-                main += String(format: " · 估算 $%.2f", cost)
+                let snapped = (cost * 100).rounded() / 100
+                main += String(format: " · 估算 $%.2f", snapped)
             }
             drawText(main, at: NSPoint(x: contentLeft, y: y + 6), font: numberFont, color: textPrimary)
             let top = usage?.providerTotals.prefix(3).map { "\($0.provider) \(PanelView.shortNumber($0.tokens))" } ?? []
@@ -585,10 +600,30 @@ final class PanelView: NSView {
     }
 
     static func shortNumber(_ value: Double) -> String {
-        if value >= 1_000_000_000 { return String(format: "%.1fB", value / 1_000_000_000) }
-        if value >= 1_000_000 { return String(format: "%.1fM", value / 1_000_000) }
-        if value >= 1_000 { return String(format: "%.0fK", value / 1_000) }
-        return String(format: "%.0f", value)
+        let abs = Swift.abs(value)
+        if abs >= 1_000_000_000 { return String(format: "%.1fB", (value / 1_000_000_000 * 10).rounded() / 10) }
+        if abs >= 1_000_000 { return String(format: "%.1fM", (value / 1_000_000 * 10).rounded() / 10) }
+        if abs >= 1_000 {
+            let f = NumberFormatter()
+            f.numberStyle = .decimal
+            f.usesGroupingSeparator = true
+            f.maximumFractionDigits = 0
+            return f.string(from: NSNumber(value: value / 1_000)) ?? "\(Int(value / 1_000))K"
+        }
+        let f = NumberFormatter()
+        f.numberStyle = .decimal
+        f.usesGroupingSeparator = true
+        f.maximumFractionDigits = 0
+        return f.string(from: NSNumber(value: value)) ?? "\(Int(value))"
+    }
+
+    /// Claude Code 闲置超过 24h 时返回 "25h" / "3d"，否则 nil。
+    static func fableIdleLabel(for plan: Plan, nowMs: Double) -> String? {
+        guard let last = plan.fableLastUsedAt else { return nil }
+        let idle = nowMs - last
+        if idle < 24 * 3600 * 1000 { return nil }
+        if idle < 48 * 3600 * 1000 { return "\(Int((idle / 3600000).rounded()))h" }
+        return "\(Int((idle / 86_400_000).rounded()))d"
     }
 
     static func countdownText(until resetAtMs: Double) -> String {

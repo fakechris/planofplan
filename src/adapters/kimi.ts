@@ -32,6 +32,7 @@ import { ensureHome } from '../config.ts';
 import { Database } from 'bun:sqlite';
 import type { AdapterContext, Credential, PlanAdapter, QuotaWindow } from '../types.ts';
 import { AdapterError } from '../types.ts';
+import { clampPct } from './util.ts';
 import {
   readBrowserKimiAuth,
   readSafariKimiWebTokens,
@@ -261,7 +262,7 @@ export function normalizeKimi(raw: unknown): QuotaWindow[] {
         used,
         total,
         unit: 'requests',
-        percentage: Math.min(100, Math.max(0, (used / total) * 100)),
+        percentage: clampPct((used / total) * 100),
         resetAt: parseResetTime(usage.resetTime),
         note: null,
       });
@@ -283,7 +284,7 @@ export function normalizeKimi(raw: unknown): QuotaWindow[] {
         used,
         total,
         unit: 'requests',
-        percentage: Math.min(100, Math.max(0, (used / total) * 100)),
+        percentage: clampPct((used / total) * 100),
         resetAt: parseResetTime(detail.resetTime),
         note: null,
       });
@@ -321,7 +322,7 @@ export function normalizeKimiMonthly(raw: unknown): QuotaWindow | null {
   const ratio = toNum(balance.amountUsedRatio ?? undefined);
   if (ratio == null) return null;
   // 正常为 0-1 系数 ×100；个别环境直接给百分比（>1.5）时不再放大
-  const percentage = Math.min(100, Math.max(0, ratio > 1.5 ? ratio : ratio * 100));
+  const percentage = clampPct(ratio > 1.5 ? ratio : ratio * 100);
   const resetAt = parseResetTime(balance.expireTime ?? undefined);
   return {
     window: 'monthly',

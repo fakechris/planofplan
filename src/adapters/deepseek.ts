@@ -16,6 +16,7 @@
  */
 import type { AdapterContext, Credential, PlanAdapter, QuotaWindow } from '../types.ts';
 import { AdapterError } from '../types.ts';
+import { clampPct } from './util.ts';
 
 const BALANCE_URL = 'https://api.deepseek.com/user/balance';
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -72,7 +73,7 @@ export function normalizeDeepseekBalance(
   const usedRaw = total - available;
   const used = Math.max(0, usedRaw);
   const percentage = total > 0
-    ? Math.min(100, Math.max(0, (used / total) * 100))
+    ? clampPct((used / total) * 100)
     : 0;
   const currency = first.currency ?? 'CNY';
   const extra = infos.length > 1 ? `（共 ${infos.length} 个币种账户）` : '';
@@ -83,7 +84,7 @@ export function normalizeDeepseekBalance(
       used: round(used),
       total: round(total),
       unit: 'usd',
-      percentage: Math.round(percentage * 10) / 10,
+      percentage: clampPct(percentage),
       resetAt: null,
       note: `${currency}  可用 ${available}${extra}`,
     },

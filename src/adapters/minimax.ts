@@ -15,6 +15,7 @@
  */
 import type { AdapterContext, Credential, PlanAdapter, QuotaWindow } from '../types.ts';
 import { AdapterError } from '../types.ts';
+import { clampPct } from './util.ts';
 
 const REMAINS_PATH = '/v1/api/openplatform/coding_plan/remains';
 
@@ -78,10 +79,6 @@ function num(v: unknown): number | null {
   return v;
 }
 
-function clamp(v: number, lo: number, hi: number): number {
-  return Math.min(hi, Math.max(lo, v));
-}
-
 interface LaneInput {
   window: string;
   label: string;
@@ -115,13 +112,13 @@ function pushLane(out: Lane[], input: LaneInput, now: number): void {
   let percentage: number | null = null;
   const rp = input.remainingPercent;
   if (rp != null) {
-    percentage = clamp(100 - rp, 0, 100);
+    percentage = clampPct(100 - rp);
     if (input.total != null && input.total > 0) {
       used = Math.round((percentage / 100) * input.total);
     }
   } else if (input.total != null && input.total > 0 && input.remaining != null) {
     used = Math.max(0, input.total - input.remaining);
-    percentage = clamp((used / input.total) * 100, 0, 100);
+    percentage = clampPct((used / input.total) * 100);
   }
 
   if (!input.force && percentage == null && used == null) return;

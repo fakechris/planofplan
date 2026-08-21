@@ -30,6 +30,14 @@ export function formatResetCountdown(resetAt: number | null, now: number): strin
   return `重置 ${formatDuration(diff)}后`;
 }
 
+/** 闲置阈值：Claude Code 超过这个时长没用 `claude-fable-5`，UI 显示醒目 badge。 */
+export const FABLE_IDLE_THRESHOLD_MS = 24 * 60 * 60 * 1000; // TODO: 配置化
+
+export function isFableIdle(plan: OverviewPlan, now: number): boolean {
+  return plan.fableLastUsedAt == null
+    || (now - plan.fableLastUsedAt) >= FABLE_IDLE_THRESHOLD_MS;
+}
+
 export type PlanStatus = 'ok' | 'stale' | 'error' | 'not_configured' | 'auth_error' | 'unavailable';
 
 export interface OverviewPlan {
@@ -50,6 +58,8 @@ export interface OverviewPlan {
   credentialHint: string | null;
   /** 高峰/低谷注解：仅当 plan 启用 peakPricing 时存在；UI 用来渲染轻量 pill。 */
   tier?: TierState | null;
+  /** 上次在本地 Claude Code 下使用 `claude-fable-5` 的 epoch ms；null 表示从未用过。 */
+  fableLastUsedAt: number | null;
 }
 
 export interface Overview {
@@ -147,6 +157,7 @@ function buildPlanOverview(store: Store, plan: PlanConfig, now: number): Overvie
     manualKey: adapter != null && adapter.manualKey !== false,
     credentialHint: adapter?.credentialHint ?? null,
     tier,
+    fableLastUsedAt: store.lastModelUsed('claude', 'claude-fable-5'),
   };
 }
 

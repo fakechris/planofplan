@@ -69,6 +69,42 @@ function groupedNumber(n, digits) {
   return n.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits });
 }
 
+// /plans 拖拽排序：localStorage 保存用户拖过的顺序，applyOrder 在 render 时套用。
+const ORDER_KEY = 'planofplan.planOrder.v1';
+
+function loadPlanOrder() {
+  try {
+    const raw = localStorage.getItem(ORDER_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((s) => typeof s === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function savePlanOrder(slugs) {
+  try {
+    localStorage.setItem(ORDER_KEY, JSON.stringify(slugs));
+  } catch {
+    /* localStorage 不可用（隐私模式）则静默丢弃 — UI 仍可拖动，只是不持久化 */
+  }
+}
+
+function applyOrder(plans) {
+  const order = loadPlanOrder();
+  if (!order.length) return plans;
+  const idx = new Map(order.map((slug, i) => [slug, i]));
+  return [...plans].sort((a, b) => {
+    const ai = idx.has(a.slug) ? idx.get(a.slug) : Number.POSITIVE_INFINITY;
+    const bi = idx.has(b.slug) ? idx.get(b.slug) : Number.POSITIVE_INFINITY;
+    return ai - bi;
+  });
+}
+
+// 拖拽进行中：30s 自动 poll 替换 DOM 会打断拖拽，守卫 render() 跳过替换。
+let dragInFlight = false;
+
 function levelClass(percentage) {
   if (percentage == null) return 'unknown';
   const remaining = 100 - percentage;
@@ -122,6 +158,21 @@ function renderTierPill(plan, now) {
   ].filter(Boolean);
   return `<span class="badge tier tier-${escapeHtml(tier.tier)}" title="${escapeHtml(tooltipParts.join(''))}">
     <i></i>${tierGlyph(tier.tier)} ${tierLabel(tier.tier)}${tier.multiplier != null ? ` ${tierMultiplierText(tier.multiplier)}` : ''}
+  </span>`;
+}
+
+/** Claude Code 上次用 `claude-fable-5` 超过 24h 时显示醒目 badge（参考 glm 高峰/低谷 pill）。 */
+const FABLE_IDLE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
+
+function renderFableIdlePill(plan, now) {
+  if (plan.fableLastUsedAt == null) return '';
+  const idleMs = now - plan.fableLastUsedAt;
+  if (idleMs < FABLE_IDLE_THRESHOLD_MS) return '';
+  const label = idleMs < 48 * 60 * 60 * 1000
+    ? `${Math.round(idleMs / (60 * 60 * 1000))}h`
+    : `${Math.round(idleMs / (24 * 60 * 60 * 1000))}d`;
+  return `<span class="badge fable-idle" title="fable-5 已 ${escapeHtml(label)} 未使用">
+    <i></i>⚠ fable-5 空闲 ${escapeHtml(label)}
   </span>`;
 }
 
@@ -424,7 +475,12 @@ function fmtTokens(value) {
 }
 
 function fmtUsd(value) {
-  return value == null ? '--' : `$${Number(value).toFixed(4)}`;
+  if (value == null) return '--';
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '--';
+  // USD 截到两位小数，避免 0.39999… 之类浮点尾巴
+  const rounded = Math.round(n * 100) / 100;
+  return `$${rounded.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 function usageSourceLabel(source, confidence) {
@@ -664,6 +720,7 @@ function renderPlan(p, now) {
       ${hasSettings ? '<button type="button" class="settings-trigger" data-open-settings>设置</button>' : ''}
       <div class="badges">
         ${renderTierPill(p, now)}
+        ${renderFableIdlePill(p, now)}
         <span class="badge st-${p.status}"><i></i>${STATUS_TEXT[p.status] ?? p.status}</span>
         <span class="badge auth ${p.authStatus}">${authLabel(p.authStatus)}</span>
       </div>
@@ -710,8 +767,8 @@ function renderPlan(p, now) {
       const pct = unlimited ? '∞' : w.percentage == null ? '--' : `${w.percentage}%`;
       const frac = unlimited ? ''
         : w.used != null && w.total != null
-          ? `${w.used}/${w.total}`
-          : w.used != null ? String(w.used) : '';
+          ? `${groupedNumber(w.used, 0)}/${groupedNumber(w.total, 0)}`
+          : w.used != null ? groupedNumber(w.used, 0) : '';
       meta.innerHTML = `${Number.isFinite(w.percentage) || unlimited ? `<b>${pct}</b>` : pct}${frac ? ` · ${frac}` : ''}`;
       const fill = node.querySelector('.fill');
       fill.className = `fill ${levelClass(w.percentage)}`;
@@ -730,7 +787,50 @@ function renderPlan(p, now) {
     }
   }
   bindPlanActions(card, p);
+  bindDragReorder(card, p);
   return card;
+}
+
+/** 拖拽重排：HTML5 DnD，松开后写 localStorage。 */
+function bindDragReorder(card, p) {
+  card.dataset.slug = p.slug;
+  card.draggable = true;
+  card.addEventListener('dragstart', (event) => {
+    dragInFlight = true;
+    event.dataTransfer.setData('text/plain', p.slug);
+    event.dataTransfer.effectAllowed = 'move';
+    card.classList.add('dragging');
+  });
+  card.addEventListener('dragend', () => {
+    dragInFlight = false;
+    card.classList.remove('dragging');
+    document.querySelectorAll('.card.drop-before, .card.drop-after')
+      .forEach((el) => el.classList.remove('drop-before', 'drop-after'));
+  });
+  card.addEventListener('dragover', (event) => {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+    const rect = card.getBoundingClientRect();
+    const before = (event.clientY - rect.top) < rect.height / 2;
+    card.classList.toggle('drop-before', before);
+    card.classList.toggle('drop-after', !before);
+  });
+  card.addEventListener('dragleave', () => {
+    card.classList.remove('drop-before', 'drop-after');
+  });
+  card.addEventListener('drop', (event) => {
+    event.preventDefault();
+    const fromSlug = event.dataTransfer.getData('text/plain');
+    if (!fromSlug || fromSlug === p.slug) return;
+    const grid = card.parentElement;
+    if (!grid) return;
+    const rect = card.getBoundingClientRect();
+    const before = (event.clientY - rect.top) < rect.height / 2;
+    const fromEl = grid.querySelector(`[data-slug="${CSS.escape(fromSlug)}"]`);
+    if (!fromEl) return;
+    grid.insertBefore(fromEl, before ? card : card.nextSibling);
+    savePlanOrder([...grid.children].map((c) => c.dataset.slug).filter(Boolean));
+  });
 }
 
 function bindPlanActions(card, p) {
@@ -884,10 +984,12 @@ async function render() {
     renderUsage(latestUsage);
     renderSessions(latestSessions);
     maybePollSessionIndex(latestSessions);
+    if (dragInFlight) return;
     const grid = document.getElementById('grid');
     const nextGrid = document.createDocumentFragment();
-    for (const p of latestOverview.plans) nextGrid.appendChild(renderPlan(p, now));
+    for (const p of applyOrder(latestOverview.plans)) nextGrid.appendChild(renderPlan(p, now));
     grid.replaceChildren(nextGrid);
+    syncResetOrderVisibility();
   } catch (error) {
     if (generation !== renderGeneration) return;
     document.getElementById('connectionState').className = 'connection disconnected';
@@ -912,6 +1014,21 @@ document.getElementById('refreshBtn').addEventListener('click', async () => {
 });
 
 let launchOnStartupEnabled = null; // null = 不可用/未知，按钮保持隐藏
+
+/** 根据 localStorage 是否有用户自定义顺序，显示「恢复默认顺序」入口。 */
+function syncResetOrderVisibility() {
+  const btn = document.getElementById('resetOrder');
+  if (!btn) return;
+  btn.hidden = loadPlanOrder().length === 0;
+}
+
+document.getElementById('resetOrder')?.addEventListener('click', () => {
+  try {
+    localStorage.removeItem(ORDER_KEY);
+  } catch { /* 静默 */ }
+  if (typeof render === 'function') void render();
+  syncResetOrderVisibility();
+});
 
 function renderStartupToggle(enabled) {
   launchOnStartupEnabled = enabled;

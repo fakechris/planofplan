@@ -21,6 +21,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { AdapterContext, Credential, PlanAdapter, QuotaWindow } from '../types.ts';
 import { AdapterError } from '../types.ts';
+import { clampPct } from './util.ts';
 
 const LIMIT_PATH = '/api/monitor/usage/quota/limit';
 
@@ -72,10 +73,6 @@ function num(v: unknown): number | null {
 
 function now(): number {
   return Date.now();
-}
-
-function clampPct(v: number): number {
-  return Math.min(100, Math.max(0, v));
 }
 
 export function glmAuthorizationHeaders(

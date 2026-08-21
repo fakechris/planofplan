@@ -36,7 +36,7 @@ describe('normalizeCursorUsd', () => {
     expect(w!.unit).toBe('usd');
     expect(w!.used).toBe(4430);
     expect(w!.total).toBe(40000);
-    expect(w!.percentage).toBeCloseTo(11.075, 2);
+    expect(w!.percentage).toBeCloseTo(11.08, 2);
     expect(w!.resetAt).toBe(1788888888);
   });
 

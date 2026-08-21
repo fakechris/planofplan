@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { AdapterContext, Credential, PlanAdapter, QuotaWindow } from '../types.ts';
 import { AdapterError } from '../types.ts';
+import { clampPct } from './util.ts';
 
 const USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage';
 
@@ -106,7 +107,7 @@ export function normalizeCodex(raw: unknown): QuotaWindow[] {
       used: null, // 接口只给百分比
       total: null,
       unit: 'percent',
-      percentage: Math.min(100, Math.max(0, usedPercent)),
+      percentage: clampPct(usedPercent),
       resetAt: resetSec != null ? resetSec * 1000 : null,
       note: null,
     });

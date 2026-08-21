@@ -20,6 +20,7 @@ import { homedir } from 'node:os';
 import { Database } from 'bun:sqlite';
 import type { AdapterContext, Credential, PlanAdapter, QuotaWindow } from '../types.ts';
 import { AdapterError } from '../types.ts';
+import { clampPct } from './util.ts';
 
 const LEGACY_URL = 'https://cursor.com/api/usage';
 const USD_URL = 'https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage';
@@ -135,7 +136,7 @@ export function normalizeCursorLegacy(raw: unknown): QuotaWindow | null {
     used,
     total: max,
     unit: 'requests',
-    percentage: Math.min(100, (used / max) * 100),
+    percentage: clampPct((used / max) * 100),
     resetAt: legacyReset(r.startOfMonth),
     note: 'legacy 请求数',
   };
@@ -180,7 +181,7 @@ export function normalizeCursorUsd(raw: unknown): QuotaWindow | null {
     used: usedCents,
     total: limit,
     unit: 'usd',
-    percentage: percent != null ? Math.min(100, Math.max(0, percent)) : null,
+    percentage: percent != null ? clampPct(percent) : null,
     resetAt,
     note: 'USD credit',
   };

@@ -18,6 +18,7 @@ import { createInterface } from 'node:readline';
 import { spawn } from 'node:child_process';
 import type { AdapterContext, Credential, PlanAdapter, QuotaWindow } from '../types.ts';
 import { AdapterError } from '../types.ts';
+import { clampPct } from './util.ts';
 
 const BILLING_URL = 'https://cli-chat-proxy.grok.com/v1/billing?format=credits';
 const SETTINGS_URL = 'https://cli-chat-proxy.grok.com/v1/settings';
@@ -217,7 +218,7 @@ export function normalizeGrok(raw: unknown): QuotaWindow[] {
       percent = 0; // 有可解析周期但无百分比值 → 视为 0（CodexBar 同规则）
     }
   }
-  percent = Math.min(100, Math.max(0, percent));
+  percent = clampPct(percent);
 
   const resetAt =
     parseIsoMs(cfg.currentPeriod?.end) ?? parseIsoMs(cfg.billingPeriodEnd);

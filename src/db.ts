@@ -4,6 +4,7 @@ import type {
   PlanStateRow,
   QuotaWindow,
   SessionRecord,
+  SessionRepo,
   UsageRecord,
   UsageReport,
   UsageScanFile,
@@ -102,6 +103,18 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_native ON sessions(provider, native_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_cwd ON sessions(cwd);
+CREATE TABLE IF NOT EXISTS session_repos (
+  session_id TEXT NOT NULL,
+  role TEXT NOT NULL,
+  url TEXT NOT NULL,
+  root TEXT,
+  name TEXT NOT NULL,
+  evidence_kind TEXT NOT NULL,
+  first_seq INTEGER,
+  PRIMARY KEY (session_id, role, url)
+);
+CREATE INDEX IF NOT EXISTS idx_session_repos_session ON session_repos(session_id);
+CREATE INDEX IF NOT EXISTS idx_session_repos_name ON session_repos(name);
 `;
 
 interface SnapshotRow {
@@ -125,7 +138,11 @@ function rowToWindow(r: SnapshotRow): QuotaWindow {
     used: r.used,
     total: r.total,
     unit: r.unit as QuotaWindow['unit'],
-    percentage: r.percentage,
+    // 历史 snapshots 里可能保留 8.799999999999999 之类的浮点尾巴，渲染前统一
+    // 钳到 [0, 100] 并保留两位小数。
+    percentage: r.percentage == null
+      ? null
+      : Math.round(Math.max(0, Math.min(100, r.percentage)) * 100) / 100,
     resetAt: r.reset_at,
     note: r.note,
     fetchedAt: r.fetched_at,
@@ -169,6 +186,18 @@ export class Store {
       }
     }
     db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_git_name ON sessions(git_name)');
+    db.exec(`CREATE TABLE IF NOT EXISTS session_repos (
+      session_id TEXT NOT NULL,
+      role TEXT NOT NULL,
+      url TEXT NOT NULL,
+      root TEXT,
+      name TEXT NOT NULL,
+      evidence_kind TEXT NOT NULL,
+      first_seq INTEGER,
+      PRIMARY KEY (session_id, role, url)
+    )`);
+    db.exec('CREATE INDEX IF NOT EXISTS idx_session_repos_session ON session_repos(session_id)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_session_repos_name ON session_repos(name)');
   }
 
   /** 配置 → db plans 表（INSERT OR IGNORE；已存在时只更新非运行时字段） */
@@ -795,6 +824,21 @@ export class Store {
     });
   }
 
+  /**
+   * 指定 provider/model 最近一次在本地会话里被使用的 epoch ms；null 表示从未用过。
+   * 走 idx_usage_records_provider_model(provider, model, timestamp)，单 MAX 查询。
+   */
+  lastModelUsed(provider: string, model: string): number | null {
+    const row = this.db
+      .query(
+        `SELECT MAX(timestamp) AS last
+         FROM usage_records
+         WHERE provider = ? AND model = ?`,
+      )
+      .get(provider, model) as { last: number | null } | undefined;
+    return row?.last ?? null;
+  }
+
   upsertSessions(rows: SessionRecord[]): void {
     if (rows.length === 0) return;
     const stmt = this.db.query(
@@ -892,7 +936,7 @@ export class Store {
       git_url: string | null;
       git_name: string | null;
     }>;
-    return rows.map(sessionFromRow);
+    return this.attachSessionRepos(rows.map(sessionFromRow));
   }
 
   getSession(id: string): SessionRecord | null {
@@ -919,7 +963,85 @@ export class Store {
       git_url: string | null;
       git_name: string | null;
     } | null;
-    return row ? sessionFromRow(row) : null;
+    if (!row) return null;
+    return this.attachSessionRepos([sessionFromRow(row)])[0] ?? null;
+  }
+
+  replaceSessionRepos(sessionId: string, repos: SessionRepo[]): void {
+    this.db.exec('BEGIN');
+    try {
+      this.db.query('DELETE FROM session_repos WHERE session_id = ?').run(sessionId);
+      const stmt = this.db.query(
+        `INSERT INTO session_repos (session_id, role, url, root, name, evidence_kind, first_seq)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const repo of repos) {
+        stmt.run(
+          sessionId,
+          repo.role,
+          repo.url,
+          repo.root,
+          repo.name,
+          repo.evidenceKind,
+          repo.firstSeq ?? null,
+        );
+      }
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  listSessionRepos(sessionId?: string): SessionRepo[] {
+    const rows = sessionId
+      ? this.db.query(
+          `SELECT session_id, role, url, root, name, evidence_kind, first_seq
+           FROM session_repos WHERE session_id = ?`,
+        ).all(sessionId) as Array<{
+          session_id: string;
+          role: SessionRepo['role'];
+          url: string;
+          root: string | null;
+          name: string;
+          evidence_kind: SessionRepo['evidenceKind'];
+          first_seq: number | null;
+        }>
+      : this.db.query(
+          `SELECT session_id, role, url, root, name, evidence_kind, first_seq
+           FROM session_repos`,
+        ).all() as Array<{
+          session_id: string;
+          role: SessionRepo['role'];
+          url: string;
+          root: string | null;
+          name: string;
+          evidence_kind: SessionRepo['evidenceKind'];
+          first_seq: number | null;
+        }>;
+    return rows.map((row) => ({
+      sessionId: row.session_id,
+      role: row.role,
+      url: row.url,
+      root: row.root ?? '',
+      name: row.name,
+      evidenceKind: row.evidence_kind,
+      firstSeq: row.first_seq,
+    }));
+  }
+
+  private attachSessionRepos(sessions: SessionRecord[]): SessionRecord[] {
+    if (sessions.length === 0) return sessions;
+    const grouped = new Map<string, SessionRepo[]>();
+    for (const repo of this.listSessionRepos()) {
+      const list = grouped.get(repo.sessionId) ?? [];
+      list.push(repo);
+      grouped.set(repo.sessionId, list);
+    }
+    return sessions.map((session) => ({
+      ...session,
+      repos: grouped.get(session.id) ?? session.repos ?? [],
+    }));
   }
 }
 

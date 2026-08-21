@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { AdapterContext, Credential, PlanAdapter, QuotaWindow } from '../types.ts';
 import { AdapterError } from '../types.ts';
+import { clampPct } from './util.ts';
 import { getFactoryBrowserSession, updateFactoryWorkOSSession, clearFactoryBrowserSession } from '../factory-session.ts';
 
 const API_BASE = 'https://api.factory.ai';
@@ -82,10 +83,6 @@ function stringValue(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
-function clampPercent(value: number): number {
-  return Math.min(100, Math.max(0, value));
-}
-
 function parseDateMs(value: unknown): number | null {
   const numeric = numberValue(value) ?? (typeof value === 'string' && value.trim() ? Number(value) : null);
   if (numeric != null && Number.isFinite(numeric)) {
@@ -121,7 +118,7 @@ function normalizeBillingWindow(
     used: null,
     total: null,
     unit: 'percent',
-    percentage: clampPercent(expired ? 0 : rawPercent ?? 0),
+    percentage: clampPct(expired ? 0 : rawPercent ?? 0),
     resetAt,
     note: null,
   };
@@ -171,16 +168,16 @@ function usagePercent(pool: FactoryUsagePool | undefined): number | null {
   if (!pool) return null;
   const ratio = numberValue(pool.usedRatio);
   if (ratio != null && Number.isFinite(ratio)) {
-    if (ratio >= 0 && ratio <= 1.001) return clampPercent(ratio * 100);
-    if (ratio > 1 && ratio <= 100.1) return clampPercent(ratio);
+    if (ratio >= 0 && ratio <= 1.001) return clampPct(ratio * 100);
+    if (ratio > 1 && ratio <= 100.1) return clampPct(ratio);
   }
   const used = numberValue(pool.userTokens);
   const allowance = numberValue(pool.totalAllowance);
   if (used == null || allowance == null || allowance <= 0) return null;
   if (allowance > 1_000_000_000_000) {
-    return clampPercent((used / 100_000_000) * 100);
+    return clampPct((used / 100_000_000) * 100);
   }
-  return clampPercent((used / allowance) * 100);
+  return clampPct((used / allowance) * 100);
 }
 
 export function normalizeFactoryUsage(raw: unknown, now = Date.now()): QuotaWindow[] {
