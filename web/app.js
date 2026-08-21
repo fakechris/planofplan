@@ -51,7 +51,10 @@ function fmtCountdown(resetAt, now) {
   const hours = Math.floor(totalMinutes / 60);
   const minutes = totalMinutes % 60;
   if (hours === 0) return `${minutes}分钟后`;
-  return `${hours}小时${minutes}分钟后`;
+  if (hours < 24) return `${hours}小时${minutes}分钟后`;
+  const days = Math.floor(hours / 24);
+  const restHours = hours % 24;
+  return restHours > 0 ? `${days}天${restHours}小时后` : `${days}天后`;
 }
 
 function fmtAgo(ms, now) {
@@ -61,8 +64,10 @@ function fmtAgo(ms, now) {
   if (m < 1) return '刚刚';
   if (m < 60) return `${m} 分钟前`;
   const h = Math.round(m / 60);
-  if (h < 48) return `${h} 小时前`;
-  return `${Math.round(h / 24)} 天前`;
+  if (h < 24) return `${h} 小时前`;
+  const days = Math.floor(h / 24);
+  const restHours = h % 24;
+  return restHours > 0 ? `${days} 天 ${restHours} 小时前` : `${days} 天前`;
 }
 
 function groupedNumber(n, digits) {
@@ -107,8 +112,9 @@ let dragInFlight = false;
 
 function levelClass(percentage) {
   if (percentage == null) return 'unknown';
-  const remaining = 100 - percentage;
-  return remaining > 50 ? 'ok' : remaining > 10 ? 'warn' : 'bad';
+  if (percentage < 75) return 'ok';
+  if (percentage < 90) return 'warn';
+  return 'bad';
 }
 
 function authLabel(status) {
@@ -143,7 +149,10 @@ function tierCountdownText(nextChangeAt, now) {
   const hours = Math.floor(totalMinutes / 60);
   const minutes = totalMinutes % 60;
   if (hours === 0) return `${minutes} 分后切换`;
-  return `${hours} 小时${minutes > 0 ? ` ${minutes} 分` : ''}后切换`;
+  if (hours < 24) return `${hours} 小时${minutes > 0 ? ` ${minutes} 分` : ''}后切换`;
+  const days = Math.floor(hours / 24);
+  const restHours = hours % 24;
+  return restHours > 0 ? `${days} 天 ${restHours} 小时后切换` : `${days} 天后切换`;
 }
 
 function renderTierPill(plan, now) {
@@ -165,6 +174,7 @@ function renderTierPill(plan, now) {
 const FABLE_IDLE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
 
 function renderFableIdlePill(plan, now) {
+  if (plan.adapter !== 'claude') return '';
   if (plan.fableLastUsedAt == null) return '';
   const idleMs = now - plan.fableLastUsedAt;
   if (idleMs < FABLE_IDLE_THRESHOLD_MS) return '';

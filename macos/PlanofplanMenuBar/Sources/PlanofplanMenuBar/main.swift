@@ -9,6 +9,7 @@ struct Overview: Decodable {
 struct Plan: Decodable {
     let slug: String
     let name: String
+    let adapter: String?
     let status: String
     let authStatus: String?
     let windows: [Window]
@@ -118,7 +119,7 @@ final class PanelView: NSView {
     private let accentColor = NSColor(srgbRed: 0.36, green: 0.84, blue: 0.90, alpha: 1)
     private let chevronColor = NSColor(white: 1, alpha: 0.55)
 
-    static let panelWidth: CGFloat = 344
+    static let panelWidth: CGFloat = 380
     static let cardInset: CGFloat = 6
 
     /// 面板固定高度：取 provider 页与 9 行总览页的较大者。
@@ -619,6 +620,7 @@ final class PanelView: NSView {
 
     /// Claude Code 闲置超过 24h 时返回 "25h" / "3d"，否则 nil。
     static func fableIdleLabel(for plan: Plan, nowMs: Double) -> String? {
+        guard plan.adapter == "claude" else { return nil }
         guard let last = plan.fableLastUsedAt else { return nil }
         let idle = nowMs - last
         if idle < 24 * 3600 * 1000 { return nil }
@@ -631,7 +633,12 @@ final class PanelView: NSView {
         if interval <= 0 { return "已恢复" }
         let minutes = max(1, Int((interval / 60).rounded(.up)))
         if minutes < 60 { return "\(minutes)分钟后" }
-        return "\(minutes / 60)小时\(minutes % 60 > 0 ? " \(minutes % 60)分" : "")后"
+        let hours = minutes / 60
+        let restMinutes = minutes % 60
+        if hours < 24 { return "\(hours)小时\(restMinutes > 0 ? " \(restMinutes)分" : "")后" }
+        let days = hours / 24
+        let restHours = hours % 24
+        return restHours > 0 ? "\(days)天\(restHours)小时后" : "\(days)天后"
     }
 
     static func shortDateTime(_ ms: Double) -> String {
@@ -645,7 +652,11 @@ final class PanelView: NSView {
         let seconds = Date().timeIntervalSince1970 - ms / 1000
         if seconds < 60 { return "刚刚" }
         if seconds < 3600 { return "\(Int(seconds / 60)) 分钟前" }
-        return "\(Int(seconds / 3600)) 小时前"
+        let hours = Int(seconds / 3600)
+        if hours < 24 { return "\(hours) 小时前" }
+        let days = hours / 24
+        let restHours = hours % 24
+        return restHours > 0 ? "\(days) 天 \(restHours) 小时前" : "\(days) 天前"
     }
 }
 
@@ -727,10 +738,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /** 数据到达后的安全刷新：菜单打开时只标记待重建，关闭后补上。 */
+    /** 数据到达后的安全刷新：菜单打开时也原地重填，避免用户看到旧数据。 */
     private func refreshUISafely() {
-        if isMenuOpen {
-            pendingMenuRebuild = true
+        if isMenuOpen, let menu = statusItem.menu {
+            refillMenu(menu)
+            updateMenuBarIcon()
             return
         }
         rebuildMenu()

@@ -1177,6 +1177,6 @@ export async function collectUsageReport(store: Store, options: CollectUsageOpti
   store.replaceUsageRecordsForFiles(replacements);
   const official = options.includeOfficial === false ? [] : await fetchOfficialUsage(range);
   store.upsertUsageRecords(official);
-  collectSessionCatalog(store, options);
+  await collectSessionCatalog(store, options);
   return store.getUsageReport(range.since, range.until);
 }

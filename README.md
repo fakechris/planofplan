@@ -5,6 +5,8 @@
 
 当前状态：**M2 额度轨** + **WG-M3 session 目录**（扫描本地 Claude / Codex / Grok / DSH 等日志，只读文件头，不复制原文。见 [`docs/work-graph-design.md`](docs/work-graph-design.md)）。
 
+界面按 **Lumen Design System** 实现：Vault 深色默认、Atelier 浅色切换（`data-theme`），IBM Plex Sans/Mono 字体栈，4px 网格，额度阈值 75%/90% 染色。
+
 ## 快速开始
 
 ```bash
@@ -59,6 +61,9 @@ planofplan auth clear <slug>             清掉手动 key
 - Dashboard 普通打开和 `GET /api/usage` 默认只读已保存数据，不会同步扫描大日志目录。
   使用 Dashboard 的“扫描本地日志”按钮，或调用 `GET /api/usage?days=30&refresh=1`
   显式启动后台扫描；扫描期间 API 会返回上次已保存的数据和 `scanStatus`。
+- Session catalog（`planofplan sessions` / `/api/sessions`）在 daemon 启动时自动增量索引：
+  文件 mtime 未变的直接复用旧记录，只重扫新文件/变动文件；扫描过程分片让出事件循环，
+  不会阻塞 dashboard 响应。
 
 JSON API：
 
@@ -200,13 +205,13 @@ web/              静态前端（无构建，vanilla JS + CSS）
 
 adapter 接口见 `src/types.ts`。MiniMax 的端点/解析规格出处：CodexBar `docs/minimax.md` + `MiniMaxUsageFetcher.swift`、JinHanAI/coding-plan-monitor（实测实现）。
 
-## 覆盖矩阵与验证状态（2026-08-18）
+## 覆盖矩阵与验证状态（2026-08-21）
 
 | plan | adapter | 真机验证 | 备注 |
 |---|---|---|---|
 | MiniMax legacy | minimax | ✅ | 5h 多车道（general/video）+ weekly 车道 |
 | GLM Coding Plan | glm | ⏳ | 自动尝试 z.ai / BigModel quota host，支持 5h/week/MCP；只需在 Dashboard 的 GLM 设置弹窗填写 API key，不需要选择区域 |
-| Claude Code | claude | ✅ | 读 Keychain OAuth；5H 7% / Week 18%（实测） |
+| Claude Code | claude | ✅ | 读 Keychain OAuth；5H / Week / Fable Week（`limits[].weekly_scoped` 解析）；5H 7% / Week 18%（实测） |
 | OpenAI Codex | codex | ✅ | 读 `~/.codex/auth.json`；5H 90%（实测） |
 | Kimi Code | kimi | ✅ | 读 `~/.kimi-code/credentials/kimi-code.json`；按 onWatch 规则自动刷新并写回轮换 token；月限额需 kimi.com 网页登录态 |
 | Grok | grok | ✅ | 读 `~/.grok/auth.json`；Credits 95%（实测，8/18 重登后；SuperGrok） |

@@ -5,10 +5,10 @@
 import { createReadStream, existsSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { spawn } from 'node:child_process';
-import { dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
 import type { SessionRecord, SessionTranscript, TranscriptTurn } from './types.ts';
 import { textOf } from './sessions.ts';
+import { sourcePathFor } from './session-repos.ts';
 import { resumeFor } from './resume.ts';
 
 const MAX_BYTES = 2 * 1024 * 1024;
@@ -175,19 +175,6 @@ function turnsFromFactory(records: Record<string, unknown>[]): TranscriptTurn[] 
     else if (role === 'assistant') pushTurn(turns, 'assistant', text);
   }
   return turns;
-}
-
-function sourcePathFor(session: SessionRecord): string | null {
-  if (!session.sourceFile) return null;
-  if (session.provider === 'grok' && session.sourceFile.endsWith('summary.json')) {
-    const chat = join(dirname(session.sourceFile), 'chat_history.jsonl');
-    if (existsSync(chat)) return chat;
-  }
-  if (session.provider === 'kimi' && session.sourceFile.endsWith('state.json')) {
-    const wire = join(dirname(session.sourceFile), 'agents', 'main', 'wire.jsonl');
-    if (existsSync(wire)) return wire;
-  }
-  return session.sourceFile;
 }
 
 function turnsFromZcodeDb(path: string, nativeId: string): TranscriptTurn[] {

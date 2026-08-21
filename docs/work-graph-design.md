@@ -106,6 +106,24 @@ CREATE INDEX idx_sessions_updated ON sessions(updated_at DESC);
 CREATE INDEX idx_sessions_cwd ON sessions(cwd);
 ```
 
+### 5.1 多维 git（纱线 / 需求抽取的主键）
+
+cwd walk-up 只回答「人坐在哪」。纱线图和需求归属必须用**实际碰到的仓**，而且一个 session 可以碰到多个。三层分开存，互不顶替：
+
+| 维度 | 来源 | 回答 | 证据 | 用途 |
+|---|---|---|---|---|
+| **工作 git** | session `cwd` 向上找到 `.git` / origin | 人在哪个仓库目录里开的 session | observed | session 元数据、Resume cwd |
+| **触碰 git** | 日志里 tool 的 `file_path` / `workdir` / `git -C` | 实际读/写/操作了哪些仓 | observed | **纱线泳道**、**需求.project** |
+| **提交 git** | 工作∪触碰仓的 `git log`（committer time，session 窗 ±10min） | 这段工作落到了哪些仓 | trailer `Harness-Session:` → declared；仅时间重叠 → candidate | 交付落点；不升级证据；当前实现默认关闭（大量 `git log` 会阻塞 daemon，且 Bun 1.3.5 在长扫描中曾段错误），需要时显式传入 git runner |
+
+规则（对齐 dsh-track `header.repos` / `attributeIssuesBySpan`）：
+
+- 需求归到其 span 里**第一个触碰仓**。没有触碰就保持 `(unmapped)`，**不准**用工作 git 冒充。
+- `~/source/dsh/explorer` 不是项目；从那里改 `dsh-track` / `dsh-harness-ops` 时，纱线要画出那些仓。
+- 时间接近不是 provenance。缺证据保持 candidate / unmapped。
+
+表：`session_repos (session_id, role, url, root, name, evidence_kind, first_seq)`。`sessions.git_*` 仍是工作 git 的投影，方便列表。
+
 标题规则（对齐 dsh-track `titleify` / `isShortAck`）：跳过过短确认（「可以」「ok」）；压空白；上限 80 字。全文不进 M3 表。
 
 Token 列是 **usage_records 的聚合投影**，不是第二份消费账本。session 没有 usage 行时 token 为 0（Factory 当前就是这样）。
@@ -158,8 +176,8 @@ Dashboard：对话 tab。搜索（标题 / 需求 / git 项目 / 来源）；筛
 |---|---|---|---|
 | **M3 Session 目录** | `sessions` 表 + 头扫描 + 与 usage 同趟 + 列表页/CLI | Claude / Codex / Grok / DSH 能列出；条数与 usage 能对上（同文件/同 sid）；大文件不全文读 | 正文渲染、Resume、图、issue |
 | **M4 阅读 + Resume** | 应用内 transcript；有 CLI 才显示 Resume | 点开一条 Claude 和一条 Codex 能读对话；无 CLI 的源只有阅读 | 假深链；跨 agent 续跑当默认 |
-| **M5 日历纱线** | 先做现有 catalog 的知识图：git 项目（cwd walk-up）、需求（首条长用户请求）、observed 边 `in-project` / `has-requirement`；搜索；项目聚合视图。日历纱线随后 | 跨项目能按 git repo 聚需求；搜「dsh-track」能命中目录名不是 dsh-track 的 session | 写入 declared 边；chat 搜索；skill 蒸馏 |
-| **M6 谱系（可选）** | 需求候选、commit 对齐、证据 guard | 默认 dry-run；时间窗链接标 candidate | skill 蒸馏；Entire hook；写入 OVP Crystal |
+| **M5 日历纱线** | 多维 git 抽取 + 需求 + 关系图。纱线泳道 = **触碰 git**（工具路径实际碰到的仓），不是 cwd。工作 git 只作 session 元数据。提交 git 先记仓身份（时间窗 candidate / trailer declared）。日历纱线可视化随后 | 同一 session 可落在多个触碰仓；需求不因 cwd 而全部塌到工作 git；explorer cwd 里改 dsh-track 的需求归 dsh-track | 把时间窗 commit 升级成 observed；chat 搜索；skill 蒸馏 |
+| **M6 谱系（可选）** | 需求候选、commit sha 对齐、证据 guard | 默认 dry-run；时间窗链接标 candidate | skill 蒸馏；Entire hook；写入 OVP Crystal |
 
 M3 完成后再开 M4。M5 可复用 dsh-involute `export/track-calendar-view.html` 的数据形状，不必复用 DSH 面板代码。
 
@@ -169,8 +187,9 @@ M3 完成后再开 M4。M5 可复用 dsh-involute `export/track-calendar-view.ht
 
 ```
 src/sessions.ts     catalog：发现、文件头解析、titleify、与 usage 聚合
-src/repos.ts        cwd → git root / origin URL（项目身份）
-src/graph.ts        session / requirement / project 关系图（observed only）
+src/repos.ts        cwd / 路径 → git root / origin URL；触碰路径抽取
+src/session-repos.ts 工作 git / 触碰 git / 提交 git 抽取
+src/graph.ts        session / requirement / project 关系图（worked-in / touched / landed-in）
 src/transcript.ts   只读 JSONL 流式正文（有上限）
 src/resume.ts       家目录候选路径探测 CLI，macOS Terminal 启动
 src/db.ts           sessions 表 CRUD（现有 Store，不加第二个库）

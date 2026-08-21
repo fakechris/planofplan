@@ -157,7 +157,7 @@ function buildPlanOverview(store: Store, plan: PlanConfig, now: number): Overvie
     manualKey: adapter != null && adapter.manualKey !== false,
     credentialHint: adapter?.credentialHint ?? null,
     tier,
-    fableLastUsedAt: store.lastModelUsed('claude', 'claude-fable-5'),
+    fableLastUsedAt: plan.adapter === 'claude' ? store.lastModelUsed('claude', 'claude-fable-5') : null,
   };
 }
 

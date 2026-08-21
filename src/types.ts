@@ -141,6 +141,26 @@ export interface SessionRecord {
   gitUrl?: string | null;
   /** Display name from origin tail / root basename. */
   gitName?: string | null;
+  /**
+   * Multi-dimension git identity for this session.
+   * work = cwd walk-up; touch = tool-call paths; commit = git log in the
+   * session window. Yarn / requirement project uses touch, not work.
+   */
+  repos?: SessionRepo[];
+}
+
+export type GitRole = 'work' | 'touch' | 'commit';
+export type EvidenceKind = 'observed' | 'declared' | 'candidate';
+
+/** One git repository associated with a session, in a specific role. */
+export interface SessionRepo {
+  sessionId: string;
+  role: GitRole;
+  url: string;
+  root: string;
+  name: string;
+  evidenceKind: EvidenceKind;
+  firstSeq?: number | null;
 }
 
 export interface WorkRequirement {
@@ -148,6 +168,7 @@ export interface WorkRequirement {
   sessionId: string;
   text: string;
   provider: string;
+  /** Touch-git display name, or '(unmapped)' when the span touched no repo. */
   project: string;
   updatedAt: number;
 }
@@ -173,9 +194,12 @@ export interface WorkNode {
 export interface WorkEdge {
   from: string;
   to: string;
-  kind: 'in-project' | 'has-requirement';
-  /** Filesystem / log observation. Semantic links stay candidate and are not written here. */
-  evidenceKind: 'observed';
+  kind: 'worked-in' | 'touched' | 'landed-in' | 'in-project' | 'has-requirement';
+  /**
+   * work/touch filesystem facts are observed. Time-window commit matches are
+   * candidate. Commit trailers are declared. Semantic clustering is not written.
+   */
+  evidenceKind: EvidenceKind;
 }
 
 export interface WorkGraph {

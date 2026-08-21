@@ -80,6 +80,32 @@ describe('normalizeClaude', () => {
     expect(windows.find((window) => window.window === 'weekly_fable')?.percentage).toBe(38);
   });
 
+  test('renders limits[] weekly_scoped Fable row without duplicating generic windows', () => {
+    const windows = normalizeClaude({
+      five_hour: { utilization: 52, resets_at: '2026-08-21T11:40:00.000Z' },
+      seven_day: { utilization: 19, resets_at: '2026-08-26T21:00:00.000Z' },
+      limits: [
+        { kind: 'session', percent: 52, resets_at: '2026-08-21T11:40:00.000Z' },
+        { kind: 'weekly_all', percent: 19, resets_at: '2026-08-26T21:00:00.000Z' },
+        {
+          kind: 'weekly_scoped',
+          percent: 17,
+          resets_at: '2026-08-26T20:59:59.000Z',
+          scope: { model: { display_name: 'Fable' } },
+        },
+      ],
+    });
+
+    expect(windows).toHaveLength(3);
+    expect(windows.find((window) => window.window === 'rolling_5h')?.percentage).toBe(52);
+    expect(windows.find((window) => window.window === 'weekly')?.percentage).toBe(19);
+    expect(windows.find((window) => window.window === 'weekly_fable')).toMatchObject({
+      label: 'Fable Week',
+      percentage: 17,
+      resetAt: Date.parse('2026-08-26T20:59:59.000Z'),
+    });
+  });
+
   test('空响应 → parse 错误', () => {
     expect(() => normalizeClaude({})).toThrow(AdapterError);
     expect(() => normalizeClaude(null)).toThrow(AdapterError);

@@ -38,9 +38,26 @@ interface ExtraUsage {
   utilization?: number | null;
 }
 
+interface LimitEntry {
+  kind?: string;
+  group?: string;
+  percent?: number | null;
+  severity?: string;
+  resets_at?: string | number | null;
+  scope?: {
+    model?: {
+      id?: string | null;
+      display_name?: string | null;
+    } | null;
+    surface?: unknown;
+  } | null;
+  is_active?: boolean;
+}
+
 interface ClaudeUsageResponse {
   five_hour?: OauthWindow | null;
   seven_day?: OauthWindow | null;
+  limits?: LimitEntry[];
   extra_usage?: ExtraUsage;
   [key: string]: unknown;
 }
@@ -124,6 +141,36 @@ export function normalizeClaude(raw: unknown): QuotaWindow[] {
       const model = rawModel.trim().replace(/[^a-z0-9]+/gi, '_').replace(/^_|_$/g, '').toLowerCase();
       const modelLabel = rawModel.trim().replace(/[_-]+/g, ' ');
       pushPctWindow(`weekly_${model}`, `${modelLabel} Week`, record);
+    }
+  }
+
+  // Newer API responses carry every window in `limits[]`, including
+  // model-scoped weekly rows (for example Fable) that never appear as
+  // seven_day_<model> top-level fields. Parse them without duplicating
+  // the generic session/weekly rows already handled above.
+  const seenWindows = new Set(windows.map((w) => w.window));
+  for (const entry of r.limits ?? []) {
+    if (!entry || typeof entry !== 'object') continue;
+    const percent = num(entry.percent);
+    if (percent == null) continue;
+    const kind = entry.kind ?? '';
+    const scopeModel = entry.scope?.model?.display_name?.trim();
+    if (kind === 'session' || kind === 'weekly_all') continue;
+    if (kind === 'weekly_scoped' && scopeModel) {
+      const model = scopeModel.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+      const id = `weekly_${model}`;
+      if (seenWindows.has(id)) continue;
+      windows.push({
+        window: id,
+        label: `${scopeModel} Week`,
+        used: null,
+        total: null,
+        unit: 'percent',
+        percentage: clampPct(percent),
+        resetAt: resetTimeMs(entry.resets_at),
+        note: null,
+      });
+      seenWindows.add(id);
     }
   }
 

@@ -20,7 +20,8 @@ import { basename, dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
 import type { Store } from './db.ts';
 import { buildWorkGraph } from './graph.ts';
-import { repoRefOf, sessionProject } from './repos.ts';
+import { repoRefOf, sessionProjectNames } from './repos.ts';
+import { attachRepos, extractSessionRepos } from './session-repos.ts';
 import type { SessionList, SessionRecord } from './types.ts';
 
 /** Subset of usage collect options — kept here to avoid a usage.ts cycle. */
@@ -99,6 +100,7 @@ export function searchSessions(sessions: SessionRecord[], query: string): Sessio
       session.gitUrl,
       session.provider,
       session.nativeId,
+      ...(session.repos ?? []).flatMap((repo) => [repo.name, repo.root, repo.url, repo.role]),
     ].filter(Boolean).join('\n').toLowerCase();
     return tokens.every((token) => hay.includes(token));
   });
@@ -575,20 +577,52 @@ export function discoverSessionFiles(options: SessionCollectOptions, since: numb
   }));
 }
 
-export function collectSessionCatalog(store: Store, options: SessionCollectOptions = {}): number {
+const CATALOG_YIELD_BATCH = 8;
+
+function yieldEventLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+export async function collectSessionCatalog(store: Store, options: SessionCollectOptions = {}): Promise<number> {
   const since = options.since ?? Date.now() - 30 * DAY_MS;
   const until = options.until ?? Date.now();
   const discovered = discoverSessionFiles(options, since);
+
+  // 增量：文件 mtime 未超过上次 catalog 时间的直接复用旧记录，跳过
+  // extractSessionRepos（读 2MB 正文 + 路径正则，是扫描里唯一重的步骤）。
+  // zcode 的 db.sqlite 有 WAL，主文件 mtime 可能不反映最新写入，所以总是重扫。
+  const existingByFile = new Map<string, SessionRecord[]>();
+  for (const row of store.listSessionRows()) {
+    if (!row.sourceFile) continue;
+    const list = existingByFile.get(row.sourceFile) ?? [];
+    list.push(row);
+    existingByFile.set(row.sourceFile, list);
+  }
+
   const rows: SessionRecord[] = [];
+  let processed = 0;
+  let scanned = 0;
   for (const file of discovered) {
-    for (const row of extractSessionRecords(file.provider, file.path, file.mtimeMs)) {
-      rows.push(attachGit(row));
+    const existingRows = existingByFile.get(file.path);
+    const latestSeen = existingRows?.reduce((max, row) => Math.max(max, row.seenAt), 0) ?? 0;
+    if (file.provider !== 'zcode' && existingRows && latestSeen >= file.mtimeMs) {
+      rows.push(...existingRows);
+      continue;
     }
+    scanned += 1;
+    for (const row of extractSessionRecords(file.provider, file.path, file.mtimeMs)) {
+      const withWork = attachGit(row);
+      const repos = extractSessionRepos(withWork);
+      rows.push(attachRepos(withWork, repos));
+    }
+    processed += 1;
+    if (processed % CATALOG_YIELD_BATCH === 0) await yieldEventLoop();
   }
   store.upsertSessions(rows);
+  for (const row of rows) store.replaceSessionRepos(row.id, row.repos ?? []);
   store.upsertSessions(sessionStubsFromUsage(store, since, until, new Set(rows.map((row) => row.id))));
   applySessionUsage(store, since, until);
-  return rows.length;
+  return scanned;
 }
 
 function sessionStubsFromUsage(
@@ -695,8 +729,9 @@ export function buildSessionList(
   const byProject = new Map<string, number>();
   for (const session of inWindow) {
     byProvider.set(session.provider, (byProvider.get(session.provider) ?? 0) + 1);
-    const project = sessionProject(session);
-    byProject.set(project, (byProject.get(project) ?? 0) + 1);
+    for (const project of sessionProjectNames(session)) {
+      byProject.set(project, (byProject.get(project) ?? 0) + 1);
+    }
   }
   const sorted = inWindow.sort((a, b) => b.updatedAt - a.updatedAt);
   let indexedAt: number | null = null;

@@ -105,13 +105,13 @@ async function tokenUsage(): Promise<void> {
   }
 }
 
-function sessionsCmd(): void {
+async function sessionsCmd(): Promise<void> {
   const f = flags();
   const store = openDb(f.db ?? join(ensureHome(), 'planofplan.db'));
   syncStore(store, loadConfig());
   const now = Date.now();
   const since = now - f.days * 86_400_000;
-  if (f.refresh) collectSessionCatalog(store, { since, until: now });
+  if (f.refresh) await collectSessionCatalog(store, { since, until: now });
   let rows = store.listSessionRows();
   if (f.provider) rows = rows.filter((row) => row.provider === f.provider);
   if (f.search) rows = searchSessions(rows, f.search);
@@ -392,7 +392,7 @@ switch (cmd) {
     await tokenUsage();
     break;
   case 'sessions':
-    sessionsCmd();
+    await sessionsCmd();
     break;
   case 'status':
     status();

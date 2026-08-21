@@ -12,7 +12,7 @@ import { spawnSync } from 'node:child_process';
 import { getBuildInfo } from './build-info.ts';
 import { buildUsageReport } from './usage.ts';
 import { buildSessionList, searchSessions } from './sessions.ts';
-import { sessionProject } from './repos.ts';
+import { sessionProjectNames } from './repos.ts';
 import { readTranscript } from './transcript.ts';
 import { launchResume } from './resume.ts';
 import { getStartupSettings, setLaunchOnStartup } from './startup.ts';
@@ -175,7 +175,7 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     if (refresh || allRows.length === 0) startSessionIndex(days);
     let rows = allRows;
     if (provider) rows = rows.filter((row) => row.provider === provider);
-    if (project) rows = rows.filter((row) => sessionProject(row) === project);
+    if (project) rows = rows.filter((row) => sessionProjectNames(row).includes(project));
     if (query) rows = searchSessions(rows, query);
     const list = buildSessionList(rows, { since, until: now, generatedAt: now });
     return c.json({

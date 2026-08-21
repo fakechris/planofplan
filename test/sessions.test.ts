@@ -115,7 +115,7 @@ describe('session catalog extractors', () => {
     }
   });
 
-  test('collectSessionCatalog upserts four providers and fills tokens from usage_records', () => {
+  test('collectSessionCatalog upserts four providers and fills tokens from usage_records', async () => {
     const root = tempRoot();
     const store = openMemoryDb();
     const claudeId = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
@@ -166,7 +166,7 @@ describe('session catalog extractors', () => {
         confidence: 'measured',
       }]);
 
-      const count = collectSessionCatalog(store, {
+      const count = await collectSessionCatalog(store, {
         since,
         until,
         claudeRoots: [join(root, 'claude')],
