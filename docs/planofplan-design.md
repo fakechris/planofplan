@@ -6,7 +6,20 @@
 
 ---
 
-## 0. 产品形态（用户已确认）
+## 0. 产品定位（2026-08-22 用户确认）
+
+planofplan 不是配额监控器，而是**本机的 coding agent 洞察层**：
+
+- **内容抽取**：消息级索引多家 agent 的本地 transcript——用户说了什么、agent 做了什么；
+- **用户动机洞察**：从用户消息抽取需求/意图，聚成可追踪的「动机单元」（work graph 的 requirement 是其载体）；
+- **agent 行为跟踪**：tool call 序列、文件触及面、失败重试，刻划 agent 怎么干活；
+- **commit → 动机归因**：session-repos 的三维归属（work/touch/commit）+ `Harness-Session` trailer，把每个 commit 归因回当初那句需求。
+
+归因链：`用户消息（动机） → session（意图载体） → tool calls（行为） → file touches（触及面） → commit（结果）`。
+
+额度/配额（下文 §0.1 起）是第一条产品线与获客钩子，不是终态。session 索引层的工程参照见 [`obelisk-session-research.md`](./obelisk-session-research.md)：消息表 + FTS、行级增量 cursor、changedPaths 定向索引；中文搜索用 trigram 分词（unicode61 对中文子串半残，实测）。
+
+## 0.1 产品形态（用户已确认）
 
 - **展示方式照 CodexBar**：
   - 每个 plan 一条**用量条**（`used/total`、百分比、重置倒计时）；多窗口的 plan 一条 bar 内分多段（5h / 周 / 月 / 请求数），支持「合并总条 vs 分条」视图切换；
@@ -203,9 +216,9 @@ planofplan/
 
 > 建议 M1 先打通 MiniMax legacy（或 GLM legacy）：都是「单 5h 窗口」最简单模型，先验证窗口语义与 UI 闭环，再铺多窗口。
 
-### 8.1 工作谱系轨（第二条产品轨，2026-08-20 确认）
+### 8.1 工作谱系轨（产品主线，2026-08-20 立项 / 2026-08-22 升级为主线）
 
-额度轨（上表）不变。planofplan 同时是本机 session 指挥台：额度怎么烧，烧出来的工作落在哪。完整分层、证据纪律、跳转三档与里程碑见 [`work-graph-design.md`](./work-graph-design.md)。
+额度轨（上表）继续维护。按 §0 的定位，谱系轨是产品主线：额度怎么烧只是表象，烧出来的工作落在哪、归因回哪句需求才是核心价值。完整分层、证据纪律、跳转三档与里程碑见 [`work-graph-design.md`](./work-graph-design.md)。
 
 | 阶段 | 内容 | 验收 |
 |---|---|---|

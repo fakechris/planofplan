@@ -1,7 +1,10 @@
 # planofplan
 
-本地 dashboard，管理多个 AI Coding Plan 订阅的用量/限额。
-展示形态参考 **CodexBar**（逐 plan 用量条 + 总览 dashboard），架构参考 **onWatch**（守护进程 + SQLite + localhost Web）。
+本机的多 coding agent 洞察中枢：从 Claude Code / Codex / Kimi / GLM 等 agent 的本地 session 里做**内容抽取 → 用户动机洞察 → agent 行为跟踪 → commit 到动机的归因**。
+
+归因链：`用户消息（动机） → session（意图载体） → tool calls（行为） → file touches（触及面） → commit（结果）`。
+
+两条产品线：**额度与消耗**（多 plan 配额 dashboard + macOS menubar，形态参考 CodexBar，架构参考 onWatch）是入口和钩子；**工作谱系**（session → 需求 → commit 的归因链）是主线。session 索引层设计参照 Obelisk 研究（[`docs/obelisk-session-research.md`](docs/obelisk-session-research.md)）。
 
 当前状态：**M2 额度轨** + **WG-M3 session 目录**（扫描本地 Claude / Codex / Grok / DSH 等日志，只读文件头，不复制原文。见 [`docs/work-graph-design.md`](docs/work-graph-design.md)）。
 
