@@ -3,6 +3,9 @@ import type {
   PlanConfig,
   PlanStateRow,
   QuotaWindow,
+  SessionIndexState,
+  SessionMessageHit,
+  SessionMessageRow,
   SessionRecord,
   SessionRepo,
   UsageRecord,
@@ -115,6 +118,45 @@ CREATE TABLE IF NOT EXISTS session_repos (
 );
 CREATE INDEX IF NOT EXISTS idx_session_repos_session ON session_repos(session_id);
 CREATE INDEX IF NOT EXISTS idx_session_repos_name ON session_repos(name);
+-- 消息级索引：只存 user/assistant 可见文本 + tool_use 入参（截断），tool_result 正文不入库。
+CREATE TABLE IF NOT EXISTS session_messages (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  role TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'text',
+  tool_name TEXT,
+  text TEXT,
+  timestamp INTEGER,
+  model TEXT,
+  input_tokens INTEGER,
+  output_tokens INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_session_messages_session ON session_messages(session_id, seq);
+-- trigram：中文子串搜索的最短查询是 3 字符，更短的查询由 Store 回退 LIKE。
+CREATE VIRTUAL TABLE IF NOT EXISTS session_messages_fts USING fts5(
+  text, content=session_messages, content_rowid=rowid, tokenize='trigram');
+CREATE TRIGGER IF NOT EXISTS session_messages_fts_ai AFTER INSERT ON session_messages BEGIN
+  INSERT INTO session_messages_fts(rowid, text) VALUES (new.rowid, new.text);
+END;
+CREATE TRIGGER IF NOT EXISTS session_messages_fts_ad AFTER DELETE ON session_messages BEGIN
+  INSERT INTO session_messages_fts(session_messages_fts, rowid, text)
+  VALUES ('delete', old.rowid, old.text);
+END;
+CREATE TRIGGER IF NOT EXISTS session_messages_fts_au AFTER UPDATE ON session_messages BEGIN
+  INSERT INTO session_messages_fts(session_messages_fts, rowid, text)
+  VALUES ('delete', old.rowid, old.text);
+  INSERT INTO session_messages_fts(rowid, text) VALUES (new.rowid, new.text);
+END;
+-- 消息级行级续扫水位（字节偏移 + 行号 + 解析器版本）。
+CREATE TABLE IF NOT EXISTS session_index_state (
+  path TEXT PRIMARY KEY,
+  mtime_ms REAL NOT NULL,
+  size INTEGER NOT NULL DEFAULT 0,
+  parsed_bytes INTEGER NOT NULL DEFAULT 0,
+  lines INTEGER NOT NULL DEFAULT 0,
+  parser_version INTEGER NOT NULL DEFAULT 1
+);
 `;
 
 interface SnapshotRow {
@@ -150,6 +192,25 @@ function rowToWindow(r: SnapshotRow): QuotaWindow {
 }
 
 export class Store {
+  /** 简易嵌套事务:外层已开事务时直接执行,避免嵌套 BEGIN 报错。 */
+  private txDepth = 0;
+
+  withTransaction<T>(work: () => T): T {
+    if (this.txDepth > 0) return work();
+    this.db.exec('BEGIN');
+    this.txDepth += 1;
+    try {
+      const result = work();
+      this.db.exec('COMMIT');
+      return result;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    } finally {
+      this.txDepth -= 1;
+    }
+  }
+
   constructor(private db: Database) {
     db.exec(SCHEMA);
     try {
@@ -1055,6 +1116,169 @@ export class Store {
       repos: grouped.get(session.id) ?? session.repos ?? [],
     }));
   }
+
+  upsertSessionMessages(rows: SessionMessageRow[]): void {
+    if (rows.length === 0) return;
+    const stmt = this.db.query(
+      `INSERT INTO session_messages (
+         id, session_id, seq, role, kind, tool_name, text, timestamp, model, input_tokens, output_tokens
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         seq = excluded.seq,
+         role = excluded.role,
+         kind = excluded.kind,
+         tool_name = excluded.tool_name,
+         text = excluded.text,
+         timestamp = excluded.timestamp,
+         model = excluded.model,
+         input_tokens = excluded.input_tokens,
+         output_tokens = excluded.output_tokens`,
+    );
+    this.withTransaction(() => {
+      for (const row of rows) {
+        stmt.run(
+          row.id,
+          row.sessionId,
+          row.seq,
+          row.role,
+          row.kind,
+          row.toolName,
+          row.text,
+          row.timestamp,
+          row.model,
+          row.inputTokens,
+          row.outputTokens,
+        );
+      }
+    });
+  }
+
+  deleteSessionMessages(sessionId: string): void {
+    this.db.query('DELETE FROM session_messages WHERE session_id = ?').run(sessionId);
+  }
+
+  /** 级联删除：session 本体 + repo 归属 + 消息索引（FTS 由触发器同步）。 */
+  deleteSession(id: string): void {
+    this.db.exec('BEGIN');
+    try {
+      this.db.query('DELETE FROM session_messages WHERE session_id = ?').run(id);
+      this.db.query('DELETE FROM session_repos WHERE session_id = ?').run(id);
+      this.db.query('DELETE FROM sessions WHERE id = ?').run(id);
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  countSessionMessages(sessionId?: string): number {
+    const row = sessionId
+      ? this.db.query('SELECT COUNT(*) AS n FROM session_messages WHERE session_id = ?').get(sessionId) as { n: number }
+      : this.db.query('SELECT COUNT(*) AS n FROM session_messages').get() as { n: number };
+    return row.n;
+  }
+
+  getSessionIndexState(path: string): SessionIndexState | null {
+    const row = this.db.query(
+      'SELECT path, mtime_ms, size, parsed_bytes, lines, parser_version FROM session_index_state WHERE path = ?',
+    ).get(path) as {
+      path: string;
+      mtime_ms: number;
+      size: number;
+      parsed_bytes: number;
+      lines: number;
+      parser_version: number;
+    } | null;
+    if (!row) return null;
+    return {
+      path: row.path,
+      mtimeMs: row.mtime_ms,
+      size: row.size,
+      parsedBytes: row.parsed_bytes,
+      lines: row.lines,
+      parserVersion: row.parser_version,
+    };
+  }
+
+  upsertSessionIndexState(state: SessionIndexState): void {
+    this.db.query(
+      `INSERT INTO session_index_state (path, mtime_ms, size, parsed_bytes, lines, parser_version)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(path) DO UPDATE SET
+         mtime_ms = excluded.mtime_ms,
+         size = excluded.size,
+         parsed_bytes = excluded.parsed_bytes,
+         lines = excluded.lines,
+         parser_version = excluded.parser_version`,
+    ).run(state.path, state.mtimeMs, state.size, state.parsedBytes, state.lines, state.parserVersion);
+  }
+
+  /**
+   * 内容级搜索：trigram FTS5 命中按 session 聚合（count + 最佳片段）。
+   * trigram 最少 3 个字符，更短的查询回退 LIKE 子串扫描。
+   * snippet 里用 \u0001/\u0002 包住命中词，由展示层转高亮标签。
+   */
+  searchSessionMessages(query: string, limit = 80): SessionMessageHit[] {
+    const q = query.trim();
+    if (!q) return [];
+    if ([...q.replace(/\s+/g, '')].length < 3) {
+      return this.searchSessionMessagesLike(q, limit);
+    }
+    const ftsQuery = q.split(/\s+/).filter(Boolean)
+      .map((token) => `"${token.replaceAll('"', '""')}"`)
+      .join(' ');
+    try {
+      const rows = this.db.query(
+        `SELECT m.session_id AS sessionId,
+                snippet(session_messages_fts, 0, char(1), char(2), '…', 24) AS snippet,
+                bm25(session_messages_fts) AS rank
+         FROM session_messages_fts
+         JOIN session_messages m ON m.rowid = session_messages_fts.rowid
+         WHERE session_messages_fts MATCH ?
+         ORDER BY rank
+         LIMIT ?`,
+      ).all(ftsQuery, limit) as Array<{ sessionId: string; snippet: string; rank: number }>;
+      return aggregateMessageHits(rows.map((row) => ({ sessionId: row.sessionId, snippet: row.snippet })));
+    } catch {
+      // FTS 语法错误（特殊字符等）兜底到 LIKE
+      return this.searchSessionMessagesLike(q, limit);
+    }
+  }
+
+  private searchSessionMessagesLike(query: string, limit: number): SessionMessageHit[] {
+    const pattern = `%${query.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
+    const rows = this.db.query(
+      `SELECT session_id AS sessionId, text
+       FROM session_messages
+       WHERE text LIKE ? ESCAPE '\\'
+       ORDER BY timestamp DESC
+       LIMIT ?`,
+    ).all(pattern, limit) as Array<{ sessionId: string; text: string | null }>;
+    const needle = query.toLowerCase();
+    return aggregateMessageHits(rows.map((row) => {
+      const text = row.text ?? '';
+      const at = text.toLowerCase().indexOf(needle);
+      const start = Math.max(0, at - 24);
+      const snippet = at < 0
+        ? text.slice(0, 48)
+        : `${start > 0 ? '…' : ''}${text.slice(start, at)}\u0001${text.slice(at, at + query.length)}\u0002${text.slice(at + query.length, at + query.length + 24)}${at + query.length + 24 < text.length ? '…' : ''}`;
+      return { sessionId: row.sessionId, snippet };
+    }));
+  }
+}
+
+/** 命中行聚合成每 session 一条：保留最好（最靠前）的片段，统计命中条数。 */
+function aggregateMessageHits(rows: Array<{ sessionId: string; snippet: string }>): SessionMessageHit[] {
+  const bySession = new Map<string, SessionMessageHit>();
+  for (const row of rows) {
+    const hit = bySession.get(row.sessionId);
+    if (hit) {
+      hit.count += 1;
+    } else {
+      bySession.set(row.sessionId, { sessionId: row.sessionId, count: 1, snippet: row.snippet });
+    }
+  }
+  return [...bySession.values()];
 }
 
 function stripGlmRegion(extra: Record<string, string>): Record<string, string> {

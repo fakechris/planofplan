@@ -149,6 +149,41 @@ export interface SessionRecord {
    * session window. Yarn / requirement project uses touch, not work.
    */
   repos?: SessionRepo[];
+  /** 内容搜索（FTS）命中摘要，仅 /api/sessions?q= 时由 server 附上。 */
+  messageHit?: SessionMessageHit | null;
+}
+
+/** 消息级索引行（session_messages 表）。只存可见文本与 tool_use 入参。 */
+export interface SessionMessageRow {
+  id: string;
+  sessionId: string;
+  /** 源文件行号 / part 序号，会话内排序用。 */
+  seq: number;
+  role: 'user' | 'assistant' | 'tool';
+  kind: 'text' | 'tool_use';
+  toolName: string | null;
+  text: string;
+  timestamp: number | null;
+  model: string | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+}
+
+/** 一次内容搜索命中的会话聚合：命中条数 + 最佳片段。snippet 里 \u0001/\u0002 包住命中词。 */
+export interface SessionMessageHit {
+  sessionId: string;
+  count: number;
+  snippet: string;
+}
+
+/** session_index_state 表行：消息级索引的行级续扫水位。 */
+export interface SessionIndexState {
+  path: string;
+  mtimeMs: number;
+  size: number;
+  parsedBytes: number;
+  lines: number;
+  parserVersion: number;
 }
 
 export type GitRole = 'work' | 'touch' | 'commit';

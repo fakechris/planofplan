@@ -21,8 +21,9 @@ import { Database } from 'bun:sqlite';
 import type { Store } from './db.ts';
 import { buildWorkGraph } from './graph.ts';
 import { repoRefOf, sessionProjectNames } from './repos.ts';
-import { attachRepos, extractSessionRepos } from './session-repos.ts';
-import type { SessionList, SessionRecord } from './types.ts';
+import { attachRepos, extractSessionRepos, TOUCH_BYTES } from './session-repos.ts';
+import { messagesFromRecord, messagesFromZcodeDb } from './transcript.ts';
+import type { SessionIndexState, SessionList, SessionRecord, SessionRepo } from './types.ts';
 
 /** Subset of usage collect options — kept here to avoid a usage.ts cycle. */
 export interface SessionCollectOptions {
@@ -583,14 +584,210 @@ function yieldEventLoop(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
+// ── 消息级索引:行级续扫 ─────────────────────────────────────────
+// 水位存 session_index_state(path → mtime/parsedBytes/lines/parserVersion)。
+// 文件只在尾部增长时从字节偏移续读;压缩文件(zstd)无法按字节续扫,整量重解。
+
+/** 消息抽取规则版本:改 messagesFromX 行为时 +1,老水位自动失效触发全量重扫。 */
+export const MESSAGE_PARSER_VERSION = 1;
+const MSG_BATCH = 400;
+
+interface StreamedLine {
+  record: Record<string, unknown>;
+  /** 绝对行号(1 起,跨续扫段连续)。 */
+  line: number;
+  /** 该行(含换行)结束处的绝对字节偏移。 */
+  end: number;
+}
+
+function isCompressedLog(path: string): boolean {
+  return path.endsWith('.jsonl.zstd') || path.endsWith('.jsonl.zst');
+}
+
+/** 消息索引实际读的路径:kimi/grok 的目录文件重定向到正文日志。 */
+function messageReadPath(provider: string, path: string): string {
+  if (provider === 'grok' && path.endsWith('summary.json')) {
+    const chat = join(dirname(path), 'chat_history.jsonl');
+    if (existsSync(chat)) return chat;
+  }
+  if (provider === 'kimi' && path.endsWith('state.json')) {
+    const wire = join(dirname(path), 'agents', 'main', 'wire.jsonl');
+    if (existsSync(wire)) return wire;
+  }
+  return path;
+}
+
+/**
+ * 从 fromBytes(必须落在行边界,水位由本函数产出保证)流式读 JSONL,
+ * 只消费以 \n 结尾的完整行;末尾残行留给下次。批回调里写库。
+ */
+function streamJsonlFrom(
+  path: string,
+  fromBytes: number,
+  baseLines: number,
+  onBatch: (lines: StreamedLine[]) => void,
+): { parsedBytes: number; lines: number } {
+  if (isCompressedLog(path)) {
+    const raw = (() => {
+      try {
+        const zstd = process.env.ZSTD_PATH?.trim()
+          || (existsSync('/opt/homebrew/bin/zstd') ? '/opt/homebrew/bin/zstd' : 'zstd');
+        return execFileSync(zstd, ['-dc', path], { encoding: 'utf8', maxBuffer: ZSTD_MAX_BYTES });
+      } catch {
+        return '';
+      }
+    })();
+    let lines = 0;
+    let batch: StreamedLine[] = [];
+    for (const line of raw.split('\n')) {
+      if (!line.trim()) continue;
+      lines += 1;
+      try {
+        const value = JSON.parse(line) as unknown;
+        if (value && typeof value === 'object') {
+          batch.push({ record: value as Record<string, unknown>, line: baseLines + lines, end: 0 });
+        }
+      } catch {
+        /* truncated or malformed line */
+      }
+      if (batch.length >= MSG_BATCH) {
+        onBatch(batch);
+        batch = [];
+      }
+    }
+    if (batch.length > 0) onBatch(batch);
+    let size = 0;
+    try {
+      size = statSync(path).size;
+    } catch {
+      /* rotated */
+    }
+    // 压缩文件的字节水位没有意义:记成文件大小,后续只要 mtime 变就整量重扫
+    return { parsedBytes: size, lines };
+  }
+
+  let fd: number | null = null;
+  let parsedBytes = fromBytes;
+  let lines = 0;
+  try {
+    fd = openSync(path, 'r');
+    const size = statSync(path).size;
+    let pos = Math.min(fromBytes, size);
+    let remainder = '';
+    let batch: StreamedLine[] = [];
+    const buf = Buffer.alloc(256 * 1024);
+    let n = 0;
+    while ((n = readSync(fd, buf, 0, buf.length, pos)) > 0) {
+      pos += n;
+      const chunk = remainder + buf.toString('utf8', 0, n);
+      const parts = chunk.split('\n');
+      remainder = parts.pop() ?? '';
+      for (const line of parts) {
+        const end = parsedBytes + Buffer.byteLength(line, 'utf8') + 1;
+        parsedBytes = end;
+        lines += 1;
+        if (!line.trim()) continue;
+        try {
+          const value = JSON.parse(line) as unknown;
+          if (value && typeof value === 'object') {
+            batch.push({ record: value as Record<string, unknown>, line: baseLines + lines, end });
+          }
+        } catch {
+          /* truncated or malformed line */
+        }
+      }
+      if (batch.length >= MSG_BATCH) {
+        onBatch(batch);
+        batch = [];
+      }
+    }
+    if (batch.length > 0) onBatch(batch);
+  } catch {
+    /* unreadable */
+  } finally {
+    if (fd != null) closeSync(fd);
+  }
+  return { parsedBytes, lines };
+}
+
+/** 增量合并:已有 repo 优先,新发现的 touch/commit 追加(按 role+url 去重)。 */
+function mergeSessionRepos(existing: SessionRepo[], fresh: SessionRepo[]): SessionRepo[] {
+  const seen = new Set(existing.map((repo) => `${repo.role} ${repo.url}`));
+  const merged = [...existing];
+  for (const repo of fresh) {
+    const key = `${repo.role} ${repo.url}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(repo);
+  }
+  return merged;
+}
+
+/**
+ * 变动文件的消息级索引:一次流式 parse 同时喂消息行(写 session_messages)
+ * 和 repo touch 提取(records 保留前 TOUCH_BYTES,与旧行为一致)。
+ * 返回该 session 最终的 repos。
+ */
+function indexSessionFileMessages(
+  store: Store,
+  session: SessionRecord,
+  readPath: string,
+  readMtimeMs: number,
+  readSize: number,
+  state: SessionIndexState | null,
+): SessionRepo[] {
+  const canAppend = state != null
+    && state.parserVersion === MESSAGE_PARSER_VERSION
+    && !isCompressedLog(readPath)
+    && state.parsedBytes > 0
+    && readSize >= state.size
+    && readSize > state.parsedBytes;
+  const baseLines = canAppend && state ? state.lines : 0;
+  const repoRecords: unknown[] = [];
+  // 整个文件的消息写入包在一个事务里:WAL 下每次 COMMIT 都是一次 fsync,
+  // 按批提交会把活跃 session 的续扫拖慢一个数量级
+  store.withTransaction(() => {
+    if (!canAppend) store.deleteSessionMessages(session.id);
+    const r = streamJsonlFrom(readPath, canAppend && state ? state.parsedBytes : 0, baseLines, (lines) => {
+      const messages = lines.flatMap(({ record, line }) => (
+        messagesFromRecord(session.provider, session.id, record, line)
+      ));
+      try {
+        store.upsertSessionMessages(messages);
+      } catch {
+        /* 单批写入失败不拖垮整趟目录扫描 */
+      }
+      for (const { record, end } of lines) {
+        if (end > TOUCH_BYTES && !isCompressedLog(readPath)) continue;
+        repoRecords.push(record);
+      }
+    });
+    store.upsertSessionIndexState({
+      path: readPath,
+      mtimeMs: readMtimeMs,
+      size: readSize,
+      parsedBytes: r.parsedBytes,
+      lines: baseLines + r.lines,
+      parserVersion: MESSAGE_PARSER_VERSION,
+    });
+    return r;
+  });
+  const fresh = extractSessionRepos(session, { records: repoRecords });
+  return canAppend
+    ? mergeSessionRepos(store.listSessionRepos(session.id), fresh)
+    : fresh;
+}
+
 export async function collectSessionCatalog(store: Store, options: SessionCollectOptions = {}): Promise<number> {
   const since = options.since ?? Date.now() - 30 * DAY_MS;
   const until = options.until ?? Date.now();
   const discovered = discoverSessionFiles(options, since);
 
-  // 增量：文件 mtime 未超过上次 catalog 时间的直接复用旧记录，跳过
-  // extractSessionRepos（读 2MB 正文 + 路径正则，是扫描里唯一重的步骤）。
-  // zcode 的 db.sqlite 有 WAL，主文件 mtime 可能不反映最新写入，所以总是重扫。
+  // 增量两道闸:目录行按 seenAt 复用(跳过 head 解析);消息级按
+  // session_index_state 水位,mtime 未变整体跳过,文件尾部增长则从字节偏移
+  // 续扫(只 parse 新增行),截断/轮换/解析器版本变了才全量重扫。
+  // zcode 的 db.sqlite 有 WAL,主文件 mtime 不可信,总是重扫(part id 稳定,
+  // 消息 upsert 幂等)。
   const existingByFile = new Map<string, SessionRecord[]>();
   for (const row of store.listSessionRows()) {
     if (!row.sourceFile) continue;
@@ -605,14 +802,50 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
   for (const file of discovered) {
     const existingRows = existingByFile.get(file.path);
     const latestSeen = existingRows?.reduce((max, row) => Math.max(max, row.seenAt), 0) ?? 0;
-    if (file.provider !== 'zcode' && existingRows && latestSeen >= file.mtimeMs) {
+    // 消息级水位:kimi/grok 的正文在重定向文件里,mtime 以实际读取路径为准
+    const readPath = messageReadPath(file.provider, file.path);
+    let readMtimeMs = file.mtimeMs;
+    let readSize = 0;
+    try {
+      const readStat = statSync(readPath);
+      readMtimeMs = readStat.mtimeMs;
+      readSize = readStat.size;
+    } catch {
+      /* 正文文件不存在(如 kimi 尚无 wire.jsonl):只落目录元数据 */
+    }
+    const state = file.provider === 'zcode' ? null : store.getSessionIndexState(readPath);
+    // mtime 同毫秒可能撞车（测试和快速重写都撞过），新鲜度必须 mtime + size 双等
+    const indexFresh = state != null
+      && state.parserVersion === MESSAGE_PARSER_VERSION
+      && state.mtimeMs >= readMtimeMs
+      && state.size === readSize
+      && readSize > 0;
+    if (file.provider !== 'zcode' && existingRows && latestSeen >= file.mtimeMs && indexFresh) {
       rows.push(...existingRows);
       continue;
     }
     scanned += 1;
     for (const row of extractSessionRecords(file.provider, file.path, file.mtimeMs)) {
       const withWork = attachGit(row);
-      const repos = extractSessionRepos(withWork);
+      let repos: SessionRepo[];
+      if (file.provider === 'zcode') {
+        // zcode 正文在其自有 sqlite:part id 稳定,upsert 幂等,维持"总是重扫"
+        try {
+          store.upsertSessionMessages(messagesFromZcodeDb(file.path, row.nativeId, row.id));
+        } catch {
+          /* 单个 session 的消息抽取失败不拖垮目录 */
+        }
+        repos = extractSessionRepos(withWork);
+      } else if (indexFresh) {
+        // 文件级水位新鲜但目录行没命中(典型:codex 同一 session 续写出多个
+        // rollout 文件,source_file 只能指一个)。消息已按水位索引过,目录行
+        // 照常 upsert,repos 复用已存的,不做全量重扫。
+        repos = store.listSessionRepos(row.id);
+      } else if (readSize > 0) {
+        repos = indexSessionFileMessages(store, withWork, readPath, readMtimeMs, readSize, state);
+      } else {
+        repos = extractSessionRepos(withWork);
+      }
       rows.push(attachRepos(withWork, repos));
     }
     processed += 1;
@@ -621,6 +854,12 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
   store.upsertSessions(rows);
   for (const row of rows) store.replaceSessionRepos(row.id, row.repos ?? []);
   store.upsertSessions(sessionStubsFromUsage(store, since, until, new Set(rows.map((row) => row.id))));
+  // 清理:源文件已被删除/轮换的 session,连同消息索引和 repo 归属一起删
+  for (const row of store.listSessionRows()) {
+    if (!row.sourceFile) continue;
+    if (!(CATALOG_PROVIDERS as readonly string[]).includes(row.provider)) continue;
+    if (!existsSync(row.sourceFile)) store.deleteSession(row.id);
+  }
   applySessionUsage(store, since, until);
   return scanned;
 }

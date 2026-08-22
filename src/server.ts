@@ -176,7 +176,23 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     let rows = allRows;
     if (provider) rows = rows.filter((row) => row.provider === provider);
     if (project) rows = rows.filter((row) => sessionProjectNames(row).includes(project));
-    if (query) rows = searchSessions(rows, query);
+    if (query) {
+      // 元数据子串匹配 ∪ 消息正文 FTS;FTS 命中的 session 附上命中片段
+      const hits = store.searchSessionMessages(query);
+      const hitBySession = new Map(hits.map((hit) => [hit.sessionId, hit]));
+      const matched = searchSessions(rows, query);
+      const have = new Set(matched.map((row) => row.id));
+      for (const hit of hits) {
+        if (have.has(hit.sessionId)) continue;
+        const session = store.getSession(hit.sessionId);
+        if (!session) continue;
+        if (provider && session.provider !== provider) continue;
+        if (project && !sessionProjectNames(session).includes(project)) continue;
+        matched.push(session);
+        have.add(session.id);
+      }
+      rows = matched.map((row) => ({ ...row, messageHit: hitBySession.get(row.id) ?? null }));
+    }
     const list = buildSessionList(rows, { since, until: now, generatedAt: now });
     return c.json({
       ...list,

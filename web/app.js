@@ -272,7 +272,9 @@ function filteredSessions(list) {
     if (hideUntitled && untitled) return false;
     if (provider && session.provider !== provider) return false;
     if (project && !sessionProjectNames(session).includes(project)) return false;
-    if (query) {
+    // 与已发往服务端的 q 一致时,列表已是「元数据 ∪ 消息正文 FTS」的并集,
+    // 本地再按元数据过滤会把 FTS 命中的条目误杀
+    if (query && query !== sessionServerQuery) {
       const hay = [
         session.provider, title, session.cwd || '', sessionProjectName(session),
         session.gitRoot || '', session.gitUrl || '', session.nativeId || '',
@@ -370,12 +372,22 @@ function renderSessions(list) {
 }
 
 function sessionItemHtml(session) {
+  const hit = session.messageHit;
+  const hitHtml = hit
+    ? `<span class="session-hit">${highlightHit(hit.snippet)} · ${hit.count} 处命中</span>`
+    : '';
   return `
     <button type="button" class="session-item${session.id === openSessionId ? ' active' : ''}" data-session-id="${escapeHtml(session.id)}">
       <strong>${escapeHtml(session.title || '无标题')}</strong>
       <span>${escapeHtml(session.provider)} · ${escapeHtml(sessionProjectName(session))} · ${fmtAgo(session.updatedAt, Date.now())}${session.totalTokens ? ` · ${fmtTokens(session.totalTokens)}` : ''}</span>
+      ${hitHtml}
     </button>
   `;
+}
+
+// snippet 里的 \u0001/\u0002 是服务端 snippet() 的命中标记,转义后再换成高亮标签
+function highlightHit(snippet) {
+  return escapeHtml(snippet || '').replaceAll('\u0001', '<b>').replaceAll('\u0002', '</b>');
 }
 
 function sessionListHtml(visible, total) {
@@ -1126,7 +1138,26 @@ function resetSessionFilters() {
 document.getElementById('sessionProvider')?.addEventListener('change', resetSessionFilters);
 document.getElementById('sessionProject')?.addEventListener('change', resetSessionFilters);
 document.getElementById('sessionHideUntitled')?.addEventListener('change', resetSessionFilters);
-document.getElementById('sessionSearch')?.addEventListener('input', resetSessionFilters);
+// 搜索框:输入即本地过滤元数据,停顿 300ms 后带 q 问服务端(并集消息正文 FTS)
+let sessionSearchTimer = null;
+let sessionServerQuery = '';
+document.getElementById('sessionSearch')?.addEventListener('input', () => {
+  resetSessionFilters();
+  if (sessionSearchTimer != null) clearTimeout(sessionSearchTimer);
+  sessionSearchTimer = setTimeout(refetchSessionsForSearch, 300);
+});
+async function refetchSessionsForSearch() {
+  const q = (document.getElementById('sessionSearch')?.value || '').trim();
+  if (q === sessionServerQuery) return;
+  try {
+    const days = document.getElementById('usageDays')?.value || '30';
+    latestSessions = await request(`/api/sessions?days=${encodeURIComponent(days)}&q=${encodeURIComponent(q)}`);
+    sessionServerQuery = q.toLowerCase();
+    renderSessions(latestSessions);
+  } catch {
+    /* daemon restarting */
+  }
+}
 document.querySelectorAll('[data-session-view]').forEach((btn) => {
   btn.addEventListener('click', () => {
     sessionView = btn.getAttribute('data-session-view') || 'list';
@@ -1167,7 +1198,8 @@ function maybePollSessionIndex(list) {
     sessionIndexPollTimer = null;
     try {
       const days = document.getElementById('usageDays')?.value || '30';
-      latestSessions = await request(`/api/sessions?days=${encodeURIComponent(days)}`);
+      const q = (document.getElementById('sessionSearch')?.value || '').trim();
+      latestSessions = await request(`/api/sessions?days=${encodeURIComponent(days)}&q=${encodeURIComponent(q)}`);
       renderSessions(latestSessions);
       maybePollSessionIndex(latestSessions);
     } catch {

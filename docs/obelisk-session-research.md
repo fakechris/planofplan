@@ -273,3 +273,15 @@ CREATE VIRTUAL TABLE session_messages_fts USING fts5(
 3. **人类侧做情感价值而非效率工具**:Activity 热力图、Recap 周报卡片（可分享、archetype 主题）是留存/传播层；skill 里 `recap` 走独立 intent 路由和专用检索参考，说明"周期性回顾"被他们视为人侧的核心场景，而不是顺手的报表。
 
 对 planofplan 的启示：planofplan 的基本盘（配额/用量聚合）天然是"人看"的仪表盘，obelisk 证明了同一份本地数据再加一个"agent 可查"的面就能长出第二种产品；但 obelisk 也示范了代价——一旦把 agent 当用户，helper 形状、token 口径、身份边界（is_invoking）都得当公共 API 管理。
+
+### 8.5 实施回填(2026-08-22,v1 已落地)
+
+8.3 的方案已实现并冒烟,实测数字与发现的坑:
+
+- **首扫**:30 天窗口、7 家 provider、真实本机数据,75s;消息 66,080 行;DB 从 164MB → 481MB(**+317MB**,高于 8.3 预估的 100-150MB,主因是 codex 巨型 rollout(单文件 100-170MB)的 tool_use 入参(2K 截断)+ trigram 索引比 unicode61 大约 1.5-2x)。体积可接受但贴上限,后续若要压缩可考虑 tool_use 入参截到 500 字符或不入 FTS。
+- **增量稳态**:3.3s(对比 HEAD 基线 5.8s 还更快)。期间抓到两个真 bug:
+  1. mtime 毫秒精度撞车(测试里 writeFileSync 同毫秒重写被误判新鲜)→ 新鲜度改为 mtime + size 双等,session_index_state 加 size 列;
+  2. **codex 同一 session 续写产生多个 rollout 文件**(实测 86 个文件共享 session id),catalog 的 sourceFile 只能指一个,其余文件每轮全量重扫(含 169MB 大文件,单此一项 22s)→ 加"文件级水位新鲜但目录行未命中"分支,直接复用索引。
+- **写入事务**:WAL 下每次 COMMIT 一次 fsync,按批提交把续扫拖慢一个数量级(16s/965 批)→ 改为整文件一个事务(Store.withTransaction,支持嵌套)。
+- **FTS 实测**:trigram 中文 ≥3 字符命中 1-7ms;2 字查询回退 LIKE,66k 行全表扫 639ms 可接受。snippet 用 char(1)/char(2) 做命中标记,前端转义后换成 <b>。
+- **冒烟**:`bun src/cli.ts sessions --refresh` 真实库两轮 + HTTP `/api/sessions?q=` 实测(FTS 并集、LIKE 回退、snippet 均正常)。
