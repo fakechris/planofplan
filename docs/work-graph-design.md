@@ -126,6 +126,8 @@ cwd walk-up 只回答「人坐在哪」。纱线图和需求归属必须用**实
 
 标题规则（对齐 dsh-track `titleify` / `isShortAck`）：跳过过短确认（「可以」「ok」）；压空白；上限 80 字。全文不进 M3 表。
 
+动机抽取（M5 起）对齐 dsh-track 已验证的实践与教训：capture 的 motivation context = 该会话最近一条用户显式请求（`source.kind==='user'`），v2 sync 管线用 segment → intent → align 把执行层信号折叠成需求层。教训：模型主动 `capture_thought` 的自发率极低（实测 1/148），所以本产品的动机抽取**离线从 L0 日志做**，不依赖 agent 自报；「最近一条用户请求」粒度太粗（dsh-track P6/R3），待消息级表（obelisk 研究 P0）落地后升级为全量用户消息流抽取。
+
 Token 列是 **usage_records 的聚合投影**，不是第二份消费账本。session 没有 usage 行时 token 为 0（Factory 当前就是这样）。
 
 ---

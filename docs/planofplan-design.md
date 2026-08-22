@@ -11,7 +11,7 @@
 planofplan 不是配额监控器，而是**本机的 coding agent 洞察层**：
 
 - **内容抽取**：消息级索引多家 agent 的本地 transcript——用户说了什么、agent 做了什么；
-- **用户动机洞察**：从用户消息抽取需求/意图，聚成可追踪的「动机单元」（work graph 的 requirement 是其载体）；
+- **用户动机洞察**：从用户消息抽取需求/意图，聚成可追踪的「动机单元」（work graph 的 requirement 是其载体）。已有地基：`src/graph.ts` 的 requirement 节点（title 启发式）+ dsh-track 的 capture/motivation-context 实践——其教训是模型主动捕获率极低（实测 1/148），且「最近一条用户请求」的 context 粒度太粗；离线从 L0 日志抽取 + 消息级全文是正路，不走 agent 自报；
 - **agent 行为跟踪**：tool call 序列、文件触及面、失败重试，刻划 agent 怎么干活；
 - **commit → 动机归因**：session-repos 的三维归属（work/touch/commit）+ `Harness-Session` trailer，把每个 commit 归因回当初那句需求。
 
