@@ -80,6 +80,29 @@ describe('getTier deepseek', () => {
     expect(t.nextChangeAt).toBe(shanghaiAt(2026, 8, 22, 18, 0));
   });
 
+  // 2026-08-23 00:00 起 DeepSeek 周末全天低谷（新规则生效前费用仍按旧规则）
+  test('新规生效日 Sun 2026-08-23 10:00 → offpeak，下一高峰为周一 09:00', () => {
+    const now = shanghaiAt(2026, 8, 23, 10, 0);
+    const t = getTier('deepseek', now);
+    expect(t.tier).toBe('offpeak');
+    expect(t.multiplier).toBe(0.5);
+    expect(t.nextChangeAt).toBe(shanghaiAt(2026, 8, 24, 9, 0));
+  });
+
+  test('新规后 Sat 2026-08-29 14:00 → offpeak，下一高峰为 Mon 09:00', () => {
+    const now = shanghaiAt(2026, 8, 29, 14, 0);
+    const t = getTier('deepseek', now);
+    expect(t.tier).toBe('offpeak');
+    expect(t.nextChangeAt).toBe(shanghaiAt(2026, 8, 31, 9, 0));
+  });
+
+  test('新规后周一高峰不变：Mon 2026-08-24 10:00 → peak', () => {
+    const now = shanghaiAt(2026, 8, 24, 10, 0);
+    const t = getTier('deepseek', now);
+    expect(t.tier).toBe('peak');
+    expect(t.nextChangeAt).toBe(shanghaiAt(2026, 8, 24, 12, 0));
+  });
+
   test('Wed 03:00 (凌晨空闲) → offpeak, nextChangeAt = 当日 09:00', () => {
     const now = shanghaiAt(2026, 8, 19, 3, 0);
     const t = getTier('deepseek', now);

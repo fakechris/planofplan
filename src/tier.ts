@@ -2,7 +2,9 @@
  * 高峰/低谷（peak/off-peak）时段规则。
  *
  * 背景：DeepSeek 与 GLM 公开计价在「高峰时段」与「空闲时段」不同：
- *   - DeepSeek：每日 09:00-12:00、14:00-18:00（Asia/Shanghai），非高峰半价
+ *   - DeepSeek：09:00-12:00、14:00-18:00（Asia/Shanghai），非高峰半价。
+ *     2026-08-23 00:00 起周末（周六/周日）全天不再区分峰谷，统一按低谷价
+ *     —— 即高峰窗口只存在于周一到周五；此前周末仍有高峰。
  *   - GLM：周一至周五 14:00-18:00（Asia/Shanghai），非高峰按基础积分 50% 抵扣
  *
  * 设计：纯函数 + 静态规则表。`getTier` 只在 `now` 上做无副作用查表，方便测试
@@ -28,12 +30,23 @@ export interface TierState {
   timezone: string | null;
 }
 
+interface LocalDate {
+  year: number;
+  /** 1-12 */
+  month: number;
+  day: number;
+}
+
 interface TimeWindow {
   /** 0=Sunday .. 6=Saturday（与 `new Date().getDay()` 一致） */
   weekdays: ReadonlyArray<number>;
   /** 0-1439：自当天 0 点起的分钟数 */
   startMin: number;
   endMin: number;
+  /** 窗口只在本地日期 >= validFrom 时生效（规则改版过渡用）；缺省不限 */
+  validFrom?: LocalDate;
+  /** 窗口只在本地日期 < validUntil 时生效；缺省不限 */
+  validUntil?: LocalDate;
 }
 
 interface ProviderRule {
@@ -57,9 +70,16 @@ function parseHHMM(value: string): number | null {
   return h * 60 + mm;
 }
 
+/** DeepSeek 周末全天低谷新规的生效日（Asia/Shanghai 本地日期，含当天）。 */
+const DEEPSEEK_WEEKEND_OFFPEAK_FROM: LocalDate = { year: 2026, month: 8, day: 23 };
+
 const DEEPSEEK_WINDOWS: ReadonlyArray<TimeWindow> = [
-  { weekdays: [0, 1, 2, 3, 4, 5, 6], startMin: parseHHMM('09:00')!, endMin: parseHHMM('12:00')! },
-  { weekdays: [0, 1, 2, 3, 4, 5, 6], startMin: parseHHMM('14:00')!, endMin: parseHHMM('18:00')! },
+  // 旧规则：每天两段高峰。2026-08-23 起作废。
+  { weekdays: [0, 1, 2, 3, 4, 5, 6], startMin: parseHHMM('09:00')!, endMin: parseHHMM('12:00')!, validUntil: DEEPSEEK_WEEKEND_OFFPEAK_FROM },
+  { weekdays: [0, 1, 2, 3, 4, 5, 6], startMin: parseHHMM('14:00')!, endMin: parseHHMM('18:00')!, validUntil: DEEPSEEK_WEEKEND_OFFPEAK_FROM },
+  // 新规则：高峰只限工作日；周末全天低谷。
+  { weekdays: [1, 2, 3, 4, 5], startMin: parseHHMM('09:00')!, endMin: parseHHMM('12:00')!, validFrom: DEEPSEEK_WEEKEND_OFFPEAK_FROM },
+  { weekdays: [1, 2, 3, 4, 5], startMin: parseHHMM('14:00')!, endMin: parseHHMM('18:00')!, validFrom: DEEPSEEK_WEEKEND_OFFPEAK_FROM },
 ];
 
 const GLM_WINDOWS: ReadonlyArray<TimeWindow> = [
@@ -183,8 +203,21 @@ function minutesIntoDay(local: LocalTime): number {
   return local.hour * 60 + local.minute;
 }
 
-function windowContains(window: TimeWindow, minutes: number, weekday: number): boolean {
-  if (!window.weekdays.includes(weekday)) return false;
+/** 比较两个本地日期：a<b 返回负数，相等返回 0。 */
+function compareLocalDate(a: LocalDate, b: LocalDate): number {
+  return a.year - b.year || a.month - b.month || a.day - b.day;
+}
+
+/** 窗口在指定本地日期是否生效（规则改版过渡）。 */
+function windowValidOn(window: TimeWindow, date: LocalDate): boolean {
+  if (window.validFrom && compareLocalDate(date, window.validFrom) < 0) return false;
+  if (window.validUntil && compareLocalDate(date, window.validUntil) >= 0) return false;
+  return true;
+}
+
+function windowContains(window: TimeWindow, minutes: number, local: LocalTime): boolean {
+  if (!window.weekdays.includes(local.weekday)) return false;
+  if (!windowValidOn(window, local)) return false;
   if (window.startMin <= window.endMin) {
     return minutes >= window.startMin && minutes < window.endMin;
   }
@@ -194,7 +227,7 @@ function windowContains(window: TimeWindow, minutes: number, weekday: number): b
 
 function isPeakAt(rule: ProviderRule, local: LocalTime): boolean {
   const min = minutesIntoDay(local);
-  return rule.peakWindows.some((window) => windowContains(window, min, local.weekday));
+  return rule.peakWindows.some((window) => windowContains(window, min, local));
 }
 
 interface CandidateTransition {
@@ -217,6 +250,7 @@ function nextTransitions(rule: ProviderRule, from: LocalTime, fromEpoch: number)
     const parts = partsInTimezone(probe, rule.timezone);
     for (const window of rule.peakWindows) {
       if (!window.weekdays.includes(parts.weekday)) continue;
+      if (!windowValidOn(window, parts)) continue;
       const startEpoch = epochFromLocal(rule.timezone, parts.year, parts.month, parts.day, Math.floor(window.startMin / 60), window.startMin % 60);
       const endEpoch = epochFromLocal(rule.timezone, parts.year, parts.month, parts.day, Math.floor(window.endMin / 60), window.endMin % 60);
       out.push({ at: startEpoch, to: 'peak' });
