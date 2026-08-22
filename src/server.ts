@@ -12,6 +12,7 @@ import { spawnSync } from 'node:child_process';
 import { getBuildInfo } from './build-info.ts';
 import { buildUsageReport } from './usage.ts';
 import { buildSessionList, searchSessions } from './sessions.ts';
+import { pickRequirement } from './motivation.ts';
 import { sessionProjectNames } from './repos.ts';
 import { readTranscript } from './transcript.ts';
 import { launchResume } from './resume.ts';
@@ -193,7 +194,15 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
       }
       rows = matched.map((row) => ({ ...row, messageHit: hitBySession.get(row.id) ?? null }));
     }
-    const list = buildSessionList(rows, { since, until: now, generatedAt: now });
+    // 动机抽取 v2:从消息流抽需求,替代 head 解析的 title(含 meta 信封噪音)
+    const userTexts = store.listSessionUserTexts();
+    const requirements = new Map<string, string>();
+    for (const session of rows) {
+      const requirement = pickRequirement(userTexts.get(session.id) ?? []);
+      if (requirement) requirements.set(session.id, requirement);
+    }
+    rows = rows.map((row) => ({ ...row, requirement: requirements.get(row.id) ?? null }));
+    const list = buildSessionList(rows, { since, until: now, generatedAt: now, requirements });
     return c.json({
       ...list,
       indexStatus: sessionIndexProcess ? 'running' : 'idle',

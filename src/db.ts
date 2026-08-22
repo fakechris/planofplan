@@ -1178,6 +1178,23 @@ export class Store {
     return row.n;
   }
 
+  /** 全部 session 的有序用户文本(seq 升序),供动机抽取。66k 行量级,内存分组。 */
+  listSessionUserTexts(): Map<string, string[]> {
+    const rows = this.db.query(
+      `SELECT session_id, text FROM session_messages
+       WHERE role = 'user' AND kind = 'text'
+       ORDER BY session_id, seq`,
+    ).all() as Array<{ session_id: string; text: string | null }>;
+    const map = new Map<string, string[]>();
+    for (const row of rows) {
+      if (!row.text) continue;
+      const list = map.get(row.session_id) ?? [];
+      list.push(row.text);
+      map.set(row.session_id, list);
+    }
+    return map;
+  }
+
   getSessionIndexState(path: string): SessionIndexState | null {
     const row = this.db.query(
       'SELECT path, mtime_ms, size, parsed_bytes, lines, parser_version FROM session_index_state WHERE path = ?',

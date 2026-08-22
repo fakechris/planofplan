@@ -143,6 +143,8 @@ export interface SessionRecord {
   gitUrl?: string | null;
   /** Display name from origin tail / root basename. */
   gitName?: string | null;
+  /** 需求文本:从 session_messages 用户消息流抽取(motivation.ts),由读侧附上。 */
+  requirement?: string | null;
   /**
    * Multi-dimension git identity for this session.
    * work = cwd walk-up; touch = tool-call paths; commit = git log in the

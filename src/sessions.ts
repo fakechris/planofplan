@@ -959,7 +959,7 @@ function applySessionUsage(store: Store, since: number, until: number): void {
 
 export function buildSessionList(
   sessions: SessionRecord[],
-  options: { since: number; until: number; generatedAt?: number },
+  options: { since: number; until: number; generatedAt?: number; requirements?: Map<string, string> },
 ): SessionList {
   const inWindow = sessions.filter((session) => (
     session.updatedAt >= options.since && session.updatedAt < options.until
@@ -988,7 +988,7 @@ export function buildSessionList(
     byProject: [...byProject.entries()]
       .map(([project, count]) => ({ project, count }))
       .sort((a, b) => b.count - a.count || a.project.localeCompare(b.project)),
-    graph: buildWorkGraph(sorted),
+    graph: buildWorkGraph(sorted, options.requirements),
     indexedAt,
     indexStatus: 'idle',
   };

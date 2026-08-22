@@ -66,7 +66,7 @@ function addSessionToProject(project: WorkProject, session: SessionRecord): void
   if (!project.providers.includes(session.provider)) project.providers.push(session.provider);
 }
 
-export function buildWorkGraph(sessions: SessionRecord[]): WorkGraph {
+export function buildWorkGraph(sessions: SessionRecord[], requirements?: Map<string, string>): WorkGraph {
   const nodes: WorkNode[] = [];
   const edges: WorkEdge[] = [];
   const projects = new Map<string, WorkProject>();
@@ -150,7 +150,8 @@ export function buildWorkGraph(sessions: SessionRecord[]): WorkGraph {
       });
     }
 
-    const text = session.title?.trim();
+    // 需求文本:优先消息流抽取(motivation v2),没有再退回 head 解析的 title
+    const text = requirements?.get(session.id)?.trim() || session.title?.trim();
     if (!text) continue;
     const reqId = `req:${session.id}`;
     const touchProject = touch[0];

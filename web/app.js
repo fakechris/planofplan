@@ -365,7 +365,7 @@ function renderSessions(list) {
     readerEl.innerHTML = `
       <div class="usage-empty">
         <strong>${sessionView === 'projects' ? '从左边选一个项目里的需求' : '从左边选一条对话'}</strong>
-        <span>需求来自首条用户请求，项目来自 git 仓库。有 CLI 时可以 Resume。</span>
+        <span>需求来自用户消息流抽取，项目来自 git 仓库。有 CLI 时可以 Resume。</span>
       </div>
     `;
   }
@@ -378,7 +378,7 @@ function sessionItemHtml(session) {
     : '';
   return `
     <button type="button" class="session-item${session.id === openSessionId ? ' active' : ''}" data-session-id="${escapeHtml(session.id)}">
-      <strong>${escapeHtml(session.title || '无标题')}</strong>
+      <strong>${escapeHtml(session.requirement || session.title || '无标题')}</strong>
       <span>${escapeHtml(session.provider)} · ${escapeHtml(sessionProjectName(session))} · ${fmtAgo(session.updatedAt, Date.now())}${session.totalTokens ? ` · ${fmtTokens(session.totalTokens)}` : ''}</span>
       ${hitHtml}
     </button>
@@ -479,7 +479,7 @@ function sessionDetailHtml(session, pool) {
     : '';
   return `
     <div class="session-detail-grid">
-      <dt>需求</dt><dd>${escapeHtml(session.title || '（未抽出）')}</dd>
+      <dt>需求</dt><dd>${escapeHtml(session.requirement || session.title || '（未抽出）')}</dd>
       <dt>需求项目</dt><dd>${escapeHtml(sessionRepos(session, 'touch').map((repo) => repo.name).join(', ') || '（未触碰仓库）')}</dd>
       <dt>工作 git</dt><dd>${escapeHtml(sessionRepos(session, 'work').map((repo) => repo.name).join(', ') || session.gitName || '--')}</dd>
       <dt>提交 git</dt><dd>${escapeHtml(sessionRepos(session, 'commit').map((repo) => `${repo.name} (${repo.evidenceKind})`).join(', ') || '--')}</dd>
