@@ -585,6 +585,264 @@ function commitsBlockHtml(commits) {
   return `<h3>提交 <span class="muted">● 声明/文件交集 · ○ 时间窗</span></h3>${shown}${attrFoldHtml(rest, restRows.length, '条提交')}`;
 }
 
+// ── 图谱页:work graph 全局可视化 ──────────────────────────────
+// 三层列式(需求 | 对话 | commit)+ project 泳道。SVG 手写、DOM 构建
+// (textContent 赋值,天然免转义)。容器滚动,不做 pan/zoom。
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
+const GRAPH_ROW_H = 26;
+const GRAPH_LANE_HEAD = 30;
+const GRAPH_LANE_GAP = 18;
+const GRAPH_COL_X = { req: 8, session: 320, commit: 700 };
+const GRAPH_COL_W = { req: 280, session: 340, commit: 350 };
+const GRAPH_WIDTH = 1070;
+const GRAPH_COMMITS_PER_SESSION = 8;
+const GRAPH_NODE_GUARD = 800;
+
+let graphShowCandidates = false;
+
+function clipLabel(text, max) {
+  const s = String(text || '');
+  return s.length > max ? `${s.slice(0, max - 1)}…` : s;
+}
+
+function renderGraph(list) {
+  const el = document.getElementById('graphCanvas');
+  if (!el) return;
+  const stats = document.getElementById('graphStats');
+  const graph = list?.graph;
+  if (!graph || !(graph.nodes || []).length) {
+    el.innerHTML = '<div class="usage-empty"><strong>还没有图数据</strong><span>先让 daemon 完成一轮 session 索引。</span></div>';
+    if (stats) stats.textContent = '';
+    return;
+  }
+  const nodesById = new Map(graph.nodes.map((n) => [n.id, n]));
+  const reqBySession = new Map();
+  const commitsBySession = new Map();
+  const projectOfSession = new Map();
+  const commitRepo = new Map();
+  for (const e of graph.edges || []) {
+    if (e.kind === 'has-requirement') {
+      const req = nodesById.get(e.to);
+      if (req) reqBySession.set(e.from, req);
+    } else if (e.kind === 'landed-in') {
+      const commit = nodesById.get(e.to);
+      if (!commit) continue;
+      const arr = commitsBySession.get(e.from) ?? [];
+      arr.push({ node: commit, evidence: e.evidenceKind });
+      commitsBySession.set(e.from, arr);
+    } else if (e.kind === 'worked-in' || e.kind === 'touched') {
+      if (!projectOfSession.has(e.from)) projectOfSession.set(e.from, e.to.replace(/^project:/, ''));
+    } else if (e.kind === 'in-project' && e.from.startsWith('commit:')) {
+      commitRepo.set(e.from, e.to.replace(/^project:/, ''));
+    }
+  }
+
+  // project 过滤下拉(重绘时保留选择)
+  const sel = document.getElementById('graphProject');
+  const prevSel = sel?.value || 'all';
+  if (sel) {
+    sel.innerHTML = '<option value="all">全部项目</option>'
+      + (graph.projects || []).map((p) => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)}</option>`).join('');
+    sel.value = [...sel.options].some((o) => o.value === prevSel) ? prevSel : 'all';
+  }
+  const projectFilter = sel?.value || 'all';
+
+  // 泳道分组:session 按 project 归道,未归属垫底
+  const laneMap = new Map();
+  for (const s of graph.nodes.filter((n) => n.kind === 'session')) {
+    const pid = projectOfSession.get(s.id) || null;
+    if (projectFilter !== 'all' && pid !== projectFilter) continue;
+    if (!laneMap.has(pid)) laneMap.set(pid, []);
+    laneMap.get(pid).push(s);
+  }
+  const projectById = new Map((graph.projects || []).map((p) => [p.id, p]));
+  const laneEntries = [...laneMap.entries()].sort((a, b) => {
+    if (!a[0]) return 1;
+    if (!b[0]) return -1;
+    const ac = projectById.get(a[0])?.sessionCount ?? 0;
+    const bc = projectById.get(b[0])?.sessionCount ?? 0;
+    return bc - ac || a[0].localeCompare(b[0]);
+  });
+
+  // 节点数量保护:>800 时强制只画高置信 commit
+  const hiConf = (c) => c.evidence === 'declared' || c.node.fileOverlap;
+  const countFor = (candidates) => laneEntries.reduce((n, [, sessions]) => (
+    n + sessions.length * 2 + sessions.reduce((m, s) => {
+      const all = commitsBySession.get(s.id) || [];
+      return m + Math.min((candidates ? all : all.filter(hiConf)).length, GRAPH_COMMITS_PER_SESSION);
+    }, 0)
+  ), 0);
+  let effectiveCandidates = graphShowCandidates;
+  let guardNote = '';
+  if (effectiveCandidates && countFor(true) > GRAPH_NODE_GUARD) {
+    effectiveCandidates = false;
+    guardNote = '节点过多,已收敛到高置信';
+  }
+  const cb = document.getElementById('graphCandidates');
+  if (cb) cb.disabled = !!guardNote;
+
+  // 布局:session 行高 = 其 commit 数(封顶 8)撑开,需求与 session 同水平线
+  const pos = new Map();
+  const laneHeaders = [];
+  const moreLabels = [];
+  let y = 10;
+  let commitShown = 0;
+  let commitTotal = 0;
+  for (const [pid, sessions] of laneEntries) {
+    const name = pid ? (projectById.get(pid)?.name || pid) : '未归属';
+    laneHeaders.push({ name, y });
+    y += GRAPH_LANE_HEAD;
+    for (const s of sessions) {
+      const all = commitsBySession.get(s.id) || [];
+      commitTotal += all.length;
+      const commits = effectiveCandidates ? all : all.filter(hiConf);
+      const shown = commits.slice(0, GRAPH_COMMITS_PER_SESSION);
+      commitShown += shown.length;
+      const rowH = Math.max(1, shown.length) * GRAPH_ROW_H;
+      const cy = y + rowH / 2;
+      pos.set(s.id, {
+        x: GRAPH_COL_X.session, y: cy, w: GRAPH_COL_W.session, kind: 'session',
+        label: `${s.provider} · ${clipLabel(s.label, 26)}`, title: s.label,
+      });
+      const req = reqBySession.get(s.id);
+      if (req) {
+        pos.set(req.id, {
+          x: GRAPH_COL_X.req, y: cy, w: GRAPH_COL_W.req, kind: 'requirement',
+          label: clipLabel(req.label, 26), title: req.label,
+        });
+      }
+      shown.forEach((c, i) => {
+        pos.set(c.node.id, {
+          x: GRAPH_COL_X.commit, y: y + i * GRAPH_ROW_H + GRAPH_ROW_H / 2, w: GRAPH_COL_W.commit,
+          kind: 'commit', label: `${c.node.id.slice(7, 15)} ${clipLabel(c.node.label, 30)}`,
+          title: c.node.label, fileOverlap: !!c.node.fileOverlap,
+        });
+      });
+      if (commits.length > shown.length) {
+        moreLabels.push({
+          x: GRAPH_COL_X.commit,
+          y: y + shown.length * GRAPH_ROW_H + GRAPH_ROW_H / 2,
+          text: `+${commits.length - shown.length} 条`,
+        });
+      }
+      y += rowH;
+    }
+    y += GRAPH_LANE_GAP;
+  }
+  const drawnSessions = [...pos.values()].filter((p) => p.kind === 'session').length;
+  if (stats) {
+    stats.textContent = `${laneEntries.length} 个项目 · ${drawnSessions} 对话 · commit ${commitShown}/${commitTotal}${guardNote ? ` · ${guardNote}` : ''}`;
+  }
+
+  // 绘制(先边后节点,边压在节点下)
+  const svg = document.createElementNS(SVG_NS, 'svg');
+  svg.setAttribute('width', String(GRAPH_WIDTH));
+  svg.setAttribute('height', String(Math.max(y, 120)));
+  svg.setAttribute('class', 'graph-svg');
+
+  for (const header of laneHeaders) {
+    const text = document.createElementNS(SVG_NS, 'text');
+    text.setAttribute('x', '8');
+    text.setAttribute('y', String(header.y + 16));
+    text.setAttribute('class', 'glane-title');
+    text.textContent = header.name;
+    svg.appendChild(text);
+    const rule = document.createElementNS(SVG_NS, 'line');
+    rule.setAttribute('x1', '8');
+    rule.setAttribute('x2', String(GRAPH_WIDTH - 8));
+    rule.setAttribute('y1', String(header.y + 22));
+    rule.setAttribute('y2', String(header.y + 22));
+    rule.setAttribute('class', 'glane-rule');
+    svg.appendChild(rule);
+  }
+
+  const adj = new Map();
+  const link = (a, b, edgeId) => {
+    if (!adj.has(a)) adj.set(a, new Set());
+    if (!adj.has(b)) adj.set(b, new Set());
+    adj.get(a).add(b).add(edgeId);
+    adj.get(b).add(a).add(edgeId);
+  };
+  for (const e of graph.edges || []) {
+    if (e.kind !== 'has-requirement' && e.kind !== 'landed-in') continue;
+    const from = pos.get(e.from);
+    const to = pos.get(e.to);
+    if (!from || !to) continue; // 被过滤/折叠的端点不画
+    const edgeId = `e:${e.from}→${e.to}`;
+    const weak = e.kind === 'landed-in' && e.evidenceKind !== 'declared' && !to.fileOverlap;
+    const path = document.createElementNS(SVG_NS, 'path');
+    const x1 = from.x + from.w;
+    const x2 = to.x;
+    const mx = x1 + (x2 - x1) / 2;
+    path.setAttribute('d', `M ${x1} ${from.y} C ${mx} ${from.y}, ${mx} ${to.y}, ${x2} ${to.y}`);
+    path.setAttribute('class', `gedge${weak ? ' gedge-weak' : ''}`);
+    path.setAttribute('data-id', edgeId);
+    svg.appendChild(path);
+    link(e.from, e.to, edgeId);
+  }
+
+  for (const [id, p] of pos) {
+    const g = document.createElementNS(SVG_NS, 'g');
+    g.setAttribute('class', `gnode g-${p.kind}`);
+    g.setAttribute('data-id', id);
+    const rect = document.createElementNS(SVG_NS, 'rect');
+    rect.setAttribute('x', String(p.x));
+    rect.setAttribute('y', String(p.y - 11));
+    rect.setAttribute('width', String(p.w));
+    rect.setAttribute('height', '22');
+    rect.setAttribute('rx', '6');
+    g.appendChild(rect);
+    const text = document.createElementNS(SVG_NS, 'text');
+    text.setAttribute('x', String(p.x + 8));
+    text.setAttribute('y', String(p.y + 4));
+    text.textContent = p.label;
+    g.appendChild(text);
+    const tip = document.createElementNS(SVG_NS, 'title');
+    tip.textContent = p.title || p.label;
+    g.appendChild(tip);
+    svg.appendChild(g);
+  }
+  for (const more of moreLabels) {
+    const text = document.createElementNS(SVG_NS, 'text');
+    text.setAttribute('x', String(more.x + 8));
+    text.setAttribute('y', String(more.y + 4));
+    text.setAttribute('class', 'g-more');
+    text.textContent = more.text;
+    svg.appendChild(text);
+  }
+
+  // hover 高亮整条链;点击:session → 对话页详情,commit → repo 的 commit 页
+  svg.addEventListener('mouseover', (event) => {
+    const g = event.target.closest?.('.gnode');
+    if (!g) return;
+    const id = g.getAttribute('data-id');
+    const keep = new Set([id, ...(adj.get(id) || [])]);
+    svg.querySelectorAll('.gnode, .gedge').forEach((n) => {
+      n.classList.toggle('g-dim', !keep.has(n.getAttribute('data-id')));
+    });
+  });
+  svg.addEventListener('mouseout', () => {
+    svg.querySelectorAll('.g-dim').forEach((n) => n.classList.remove('g-dim'));
+  });
+  svg.addEventListener('click', (event) => {
+    const g = event.target.closest?.('.gnode');
+    if (!g) return;
+    const id = g.getAttribute('data-id') || '';
+    const p = pos.get(id);
+    if (p?.kind === 'session') {
+      openSessionId = id;
+      showTab('sessions');
+      renderSessions(latestSessions);
+    } else if (p?.kind === 'commit') {
+      const url = commitUrl(commitRepo.get(id), id.slice(7));
+      if (url) window.open(url, '_blank', 'noopener');
+    }
+  });
+
+  el.replaceChildren(svg);
+}
+
 function sessionDetailHtml(session, pool) {
   const mine = new Set(sessionProjectNames(session));
   const related = (pool || []).filter((row) => (
@@ -1157,6 +1415,7 @@ async function render() {
     renderSummary(latestOverview);
     renderUsage(latestUsage);
     renderSessions(latestSessions);
+    if (currentTab() === 'graph') renderGraph(latestSessions);
     maybePollSessionIndex(latestSessions);
     if (dragInFlight) return;
     const grid = document.getElementById('grid');
@@ -1296,11 +1555,11 @@ document.querySelectorAll('[data-session-view]').forEach((btn) => {
 
 function currentTab() {
   const hash = (location.hash || '#plans').replace('#', '');
-  return ['plans', 'sessions', 'usage'].includes(hash) ? hash : 'plans';
+  return ['plans', 'sessions', 'graph', 'usage'].includes(hash) ? hash : 'plans';
 }
 
 function showTab(name) {
-  if (!['plans', 'sessions', 'usage'].includes(name)) name = 'plans';
+  if (!['plans', 'sessions', 'graph', 'usage'].includes(name)) name = 'plans';
   const hash = `#${name}`;
   if (location.hash !== hash) location.hash = hash;
   document.querySelectorAll('[data-tab]').forEach((btn) => {
@@ -1309,7 +1568,14 @@ function showTab(name) {
   document.querySelectorAll('.tab-panel').forEach((panel) => {
     panel.hidden = panel.getAttribute('data-panel') !== name;
   });
+  if (name === 'graph') renderGraph(latestSessions);
 }
+
+document.getElementById('graphCandidates')?.addEventListener('change', (event) => {
+  graphShowCandidates = event.target.checked;
+  renderGraph(latestSessions);
+});
+document.getElementById('graphProject')?.addEventListener('change', () => renderGraph(latestSessions));
 
 document.querySelectorAll('[data-tab]').forEach((btn) => {
   btn.addEventListener('click', () => showTab(btn.getAttribute('data-tab')));

@@ -18,6 +18,7 @@
     <nav class="tabs" role="tablist">
       <button type="button" role="tab" data-tab="plans" aria-selected="true">额度</button>
       <button type="button" role="tab" data-tab="sessions" aria-selected="false">对话</button>
+      <button type="button" role="tab" data-tab="graph" aria-selected="false">图谱</button>
       <button type="button" role="tab" data-tab="usage" aria-selected="false">Token</button>
     </nav>
     <div class="header-meta">
@@ -80,6 +81,27 @@
         </div>
       </div>
     </div>
+  </section>
+
+  <section id="panel-graph" class="tab-panel" data-panel="graph" hidden>
+    <section class="hero">
+      <div>
+        <p class="eyebrow">WORK GRAPH</p>
+        <h1>图谱</h1>
+        <p class="hero-copy">需求 → 对话 → commit 的归因链。实线是确定证据（声明/文件交集），虚线是时间窗推断。</p>
+      </div>
+    </section>
+    <div class="graph-toolbar">
+      <select id="graphProject" aria-label="按项目过滤">
+        <option value="all">全部项目</option>
+      </select>
+      <label class="session-check">
+        <input id="graphCandidates" type="checkbox" />
+        显示时间窗推断
+      </label>
+      <span id="graphStats" class="muted"></span>
+    </div>
+    <div id="graphCanvas" class="graph-canvas"></div>
   </section>
 
   <section id="panel-usage" class="tab-panel" data-panel="usage" hidden>

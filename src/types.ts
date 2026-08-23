@@ -266,6 +266,8 @@ export interface WorkNode {
   label: string;
   provider?: string;
   sessionId?: string;
+  /** commit 节点专用:与 session 的文件触碰有交集(candidate 里的强信号)。 */
+  fileOverlap?: boolean;
 }
 
 export interface WorkEdge {

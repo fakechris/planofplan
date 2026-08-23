@@ -204,6 +204,7 @@ export function buildWorkGraph(
       kind: 'commit',
       label: commit.summary || commit.sha.slice(0, 8),
       sessionId: commit.sessionId,
+      fileOverlap: commit.fileOverlap,
     });
     edges.push({
       from: commit.sessionId,
