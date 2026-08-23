@@ -129,12 +129,15 @@ export function applyHerdrOrigin(
 }
 
 /**
- * 一次性 backfill(user_version 2→3):为升级前已落库的 session 补 origin。
+ * 一次性 backfill(user_version < 4 时跑):为升级前已落库的 session 补 origin。
  * codex 重读 source_file 第一行(文件不在则跳过);claude 走路径判断。
- * 完成后把 user_version 推到 3。幂等:重复跑结果相同。
+ * 完成后把 user_version 推到 4。幂等:重复跑结果相同。
+ * (v3 是列迁移;v4 = 修复 upsertSessions 的 COALESCE 顺序 bug 后重跑:
+ * excluded.origin 引用 VALUES 最终值,VALUES 里的 COALESCE 曾让重扫把
+ * 已有 origin 洗回 'user'。)
  */
 export function backfillSessionOrigins(store: Store): void {
-  if (store.getUserVersion() >= 3) return;
+  if (store.getUserVersion() >= 4) return;
   const patches: Array<{ id: string; origin: SessionOrigin; parentId?: string | null }> = [];
   for (const session of store.listSessionRows()) {
     const byPath = session.sourceFile ? classifySessionPath(session.provider, session.sourceFile) : null;
@@ -162,5 +165,5 @@ export function backfillSessionOrigins(store: Store): void {
     }
   }
   store.updateSessionOrigins(patches);
-  store.setUserVersion(3);
+  store.setUserVersion(4);
 }

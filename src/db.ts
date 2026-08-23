@@ -976,6 +976,10 @@ export class Store {
 
   upsertSessions(rows: SessionRecord[]): void {
     if (rows.length === 0) return;
+    // 注意:excluded.* 引用的是 VALUES 的最终值,VALUES 里的 COALESCE(?, 'user')
+    // 会让 excluded.origin 永远非空,导致冲突更新把已有 origin 重置回 'user'
+    //(线上实测:subagent 被 stub 重扫洗掉)。所以 UPDATE 分支必须用独立的
+    // 原始参数(SET 子句里的 ?),VALUES 里的 COALESCE 只服务新插入。
     const stmt = this.db.query(
       `INSERT INTO sessions (
          id, provider, native_id, cwd, title, source_file, started_at, updated_at,
@@ -990,10 +994,10 @@ export class Store {
          git_root = COALESCE(excluded.git_root, sessions.git_root),
          git_url = COALESCE(excluded.git_url, sessions.git_url),
          git_name = COALESCE(excluded.git_name, sessions.git_name),
-         -- origin 只在明确知道时覆盖:extract 给 null(plain user)时保留既有值
-         --(例如 herdr 升级),backfill/专用 pass 负责修正
-         origin = COALESCE(excluded.origin, sessions.origin),
-         parent_id = COALESCE(excluded.parent_id, sessions.parent_id),
+         -- origin 只在明确知道时覆盖:extract/stub 给 null(plain user)时保留
+         -- 既有值(例如 herdr 升级),backfill/专用 pass 负责修正
+         origin = COALESCE(?, sessions.origin),
+         parent_id = COALESCE(?, sessions.parent_id),
          updated_at = excluded.updated_at,
          seen_at = excluded.seen_at`,
     );
@@ -1016,6 +1020,8 @@ export class Store {
           row.gitRoot ?? null,
           row.gitUrl ?? null,
           row.gitName ?? null,
+          row.origin ?? null,
+          row.parentId ?? null,
           row.origin ?? null,
           row.parentId ?? null,
         );

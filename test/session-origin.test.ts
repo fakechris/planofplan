@@ -128,6 +128,31 @@ describe('herdr 关联(fixture,不依赖真机文件)', () => {
   });
 });
 
+describe('upsert 不洗掉已有 origin(回归:VALUES 里 COALESCE 曾污染 excluded.origin)', () => {
+  test('stub 重扫(origin 缺省)保留 backfill/标记的 subagent', () => {
+    const store = openMemoryDb();
+    // 1. 先按 user 入库(模拟 usage stub,不带 origin)
+    store.upsertSessions([session({ id: 'claude:agent-x', provider: 'claude', nativeId: 'agent-x', sourceFile: '/x/.claude/projects/-p/u/subagents/agent-x.jsonl' })]);
+    expect(store.getSession('claude:agent-x')?.origin).toBe('user');
+    // 2. backfill 标成 subagent
+    store.updateSessionOrigins([{ id: 'claude:agent-x', origin: 'subagent' }]);
+    expect(store.getSession('claude:agent-x')?.origin).toBe('subagent');
+    // 3. 重扫:stub 再次 upsert(origin 缺省)→ 必须保留 subagent
+    store.upsertSessions([session({ id: 'claude:agent-x', provider: 'claude', nativeId: 'agent-x', sourceFile: '/x/.claude/projects/-p/u/subagents/agent-x.jsonl' })]);
+    expect(store.getSession('claude:agent-x')?.origin).toBe('subagent');
+  });
+
+  test('v3 存量库(被洗过的)→ backfill 重跑自愈', () => {
+    const store = openMemoryDb();
+    store.setUserVersion(3); // 模拟:列已迁但 origin 被旧 upsert 洗回 user
+    store.upsertSessions([session({ id: 'claude:agent-y', provider: 'claude', nativeId: 'agent-y', sourceFile: '/x/subagents/agent-y.jsonl' })]);
+    expect(store.getSession('claude:agent-y')?.origin).toBe('user');
+    backfillSessionOrigins(store);
+    expect(store.getSession('claude:agent-y')?.origin).toBe('subagent');
+    expect(store.getUserVersion()).toBe(4);
+  });
+});
+
 describe('backfillSessionOrigins', () => {
   test('codex 重读文件头分类、claude 路径判断、幂等、版本推进', () => {
     const root = mkdtempSync(join(tmpdir(), 'planofplan-origin-backfill-'));
@@ -138,7 +163,7 @@ describe('backfillSessionOrigins', () => {
         payload: { id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', originator: 'Claude Code', source: 'cli' },
       })}\n`);
       const store = openMemoryDb();
-      expect(store.getUserVersion()).toBe(2); // 新库列由 SCHEMA 带齐,但版本号要等 backfill 完成才推 3
+      expect(store.getUserVersion()).toBe(2); // 新库列由 SCHEMA 带齐,但版本号要等 backfill 完成才推 4
       store.upsertSessions([
         session({ id: 'codex:bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', provider: 'codex', nativeId: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', sourceFile: codexFile }),
         session({ id: 'claude:c1', provider: 'claude', nativeId: 'c1', sourceFile: '/x/.claude/projects/-p/uuid/subagents/agent-a.jsonl' }),
@@ -150,7 +175,7 @@ describe('backfillSessionOrigins', () => {
       expect(store.getSession('claude:c1')?.origin).toBe('subagent');
       expect(store.getSession('claude:plain')?.origin).toBe('user');
       expect(store.getSession('codex:gone')?.origin).toBe('user'); // 文件不在 → 跳过
-      expect(store.getUserVersion()).toBe(3);
+      expect(store.getUserVersion()).toBe(4);
       // 幂等:重跑不报错、结果不变
       backfillSessionOrigins(store);
       expect(store.getSession('codex:bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb')?.origin).toBe('plugin:claude');
@@ -163,7 +188,7 @@ describe('backfillSessionOrigins', () => {
     // 用 ALTER 前的老 schema 模拟:openMemoryDb 走的是新 SCHEMA,这里验证
     // getUserVersion 语义与重复 ALTER 容错即可(真实老库迁移由 v1→v2→v3 链覆盖)
     const store = openMemoryDb();
-    expect(() => store.setUserVersion(3)).not.toThrow();
-    expect(store.getUserVersion()).toBe(3);
+    expect(() => store.setUserVersion(4)).not.toThrow();
+    expect(store.getUserVersion()).toBe(4);
   });
 });
