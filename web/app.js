@@ -361,6 +361,7 @@ function renderSessions(list) {
       });
     });
     void loadSessionTranscript(open.id);
+    void loadSessionAttribution(open);
   } else {
     readerEl.innerHTML = `
       <div class="usage-empty">
@@ -461,6 +462,112 @@ function transcriptHtml(data) {
   `;
 }
 
+// ── 归因链展示:文件 touch + commit ─────────────────────────────
+// 与 transcript 同一时机加载,但独立请求、独立失败——失败/无数据时区块
+// 保持空(session-attrs:empty 隐藏),不影响详情其余部分。
+
+const ATTR_FOLD_LIMIT = 20;
+
+function loadSessionAttribution(session) {
+  const filesEl = document.getElementById('sessionFiles');
+  const commitsEl = document.getElementById('sessionCommits');
+  if (!filesEl || !commitsEl) return;
+  // session id 形如 provider:nativeId,按第一个 : 切开
+  const sep = session.id.indexOf(':');
+  const provider = session.id.slice(0, sep);
+  const nativeId = session.id.slice(sep + 1);
+  const base = `/api/sessions/${encodeURIComponent(provider)}/${encodeURIComponent(nativeId)}`;
+  request(`${base}/touches`)
+    .then((data) => {
+      filesEl.innerHTML = filesBlockHtml(data.touches || [], session);
+      bindAttrFold(filesEl);
+    })
+    .catch(() => { filesEl.innerHTML = ''; });
+  request(`${base}/commits`)
+    .then((data) => {
+      commitsEl.innerHTML = commitsBlockHtml(data.commits || []);
+      bindAttrFold(commitsEl);
+    })
+    .catch(() => { commitsEl.innerHTML = ''; });
+}
+
+function bindAttrFold(el) {
+  const btn = el.querySelector('[data-attr-expand]');
+  if (!btn) return;
+  btn.addEventListener('click', () => {
+    el.querySelector('[data-attr-rest]')?.removeAttribute('hidden');
+    btn.remove();
+  });
+}
+
+// 路径显示:能相对项目根(cwd / gitRoot / work repo root)就显示相对部分;
+// 太长中间截断;完整路径放 title
+function displayPath(filePath, session) {
+  const bases = [
+    session.cwd,
+    session.gitRoot,
+    ...(session.repos || []).map((repo) => repo.root),
+  ].filter(Boolean);
+  for (const base of bases) {
+    const prefix = base.endsWith('/') ? base : `${base}/`;
+    if (filePath.startsWith(prefix)) return filePath.slice(prefix.length);
+  }
+  if (filePath.length <= 72) return filePath;
+  return `${filePath.slice(0, 40)}…${filePath.slice(-28)}`;
+}
+
+function attrFoldHtml(restHtml, restCount, label) {
+  if (restCount === 0) return '';
+  return `<div data-attr-rest hidden>${restHtml}</div>
+    <button type="button" class="session-more" data-attr-expand>还有 ${restCount} ${label},展开</button>`;
+}
+
+function filesBlockHtml(touches, session) {
+  if (touches.length === 0) return '';
+  const byPath = new Map();
+  for (const touch of touches) {
+    let agg = byPath.get(touch.filePath);
+    if (!agg) {
+      agg = { ops: new Set(), count: 0, lastTs: 0 };
+      byPath.set(touch.filePath, agg);
+    }
+    agg.ops.add(touch.op);
+    agg.count += 1;
+    if (touch.ts && touch.ts > agg.lastTs) agg.lastTs = touch.ts;
+  }
+  const rows = [...byPath.entries()]
+    .sort((a, b) => b[1].lastTs - a[1].lastTs);
+  const rowHtml = ([filePath, agg]) => `
+    <div class="attr-row" title="${escapeHtml(filePath)}">
+      <span class="attr-path">${escapeHtml(displayPath(filePath, session))}</span>
+      <span class="attr-meta">${escapeHtml([...agg.ops].sort().join('/'))} · ${agg.count} 次${agg.lastTs ? ` · ${fmtAgo(agg.lastTs, Date.now())}` : ''}</span>
+    </div>`;
+  const shown = rows.slice(0, ATTR_FOLD_LIMIT).map(rowHtml).join('');
+  const restRows = rows.slice(ATTR_FOLD_LIMIT);
+  const rest = restRows.map(rowHtml).join('');
+  return `<h3>文件</h3>${shown}${attrFoldHtml(rest, restRows.length, '个文件')}`;
+}
+
+function commitsBlockHtml(commits) {
+  if (commits.length === 0) return '';
+  const rows = [...commits].sort((a, b) => (b.ts || 0) - (a.ts || 0));
+  const rowHtml = (commit) => {
+    // ● 高置信(trailer 声明 / 文件交集),○ 纯时间窗 candidate
+    const strong = commit.kind === 'declared' || commit.fileOverlap;
+    return `
+    <div class="attr-row${strong ? '' : ' attr-dim'}" title="${escapeHtml(commit.sha)} · ${escapeHtml(commit.repo)}">
+      <span class="attr-dot${strong ? ' attr-dot-strong' : ''}">${strong ? '●' : '○'}</span>
+      <span class="attr-sha">${escapeHtml(commit.sha.slice(0, 8))}</span>
+      <span class="attr-summary">${escapeHtml(commit.summary || '(no subject)')}</span>
+      <span class="attr-meta">${commit.ts ? fmtAgo(commit.ts, Date.now()) : ''}</span>
+    </div>`;
+  };
+  const shown = rows.slice(0, ATTR_FOLD_LIMIT).map(rowHtml).join('');
+  const restRows = rows.slice(ATTR_FOLD_LIMIT);
+  const rest = restRows.map(rowHtml).join('');
+  return `<h3>提交 <span class="muted">● 声明/文件交集 · ○ 时间窗</span></h3>${shown}${attrFoldHtml(rest, restRows.length, '条提交')}`;
+}
+
 function sessionDetailHtml(session, pool) {
   const mine = new Set(sessionProjectNames(session));
   const related = (pool || []).filter((row) => (
@@ -492,6 +599,8 @@ function sessionDetailHtml(session, pool) {
     <div class="session-actions">
       ${session.sourceFile ? `<button class="secondary-btn" type="button" data-reveal="${escapeHtml(session.id)}">在 Finder 中显示</button>` : ''}
     </div>
+    <div id="sessionFiles" class="session-attrs"></div>
+    <div id="sessionCommits" class="session-attrs"></div>
     ${relatedHtml}
     <div id="sessionTranscript" class="session-transcript"></div>
   `;

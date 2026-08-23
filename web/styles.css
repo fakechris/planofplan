@@ -455,6 +455,18 @@ td { font-variant-numeric: tabular-nums; }
 .session-detail-grid dt { color: var(--muted); font-size: 0.9em; letter-spacing: 0.08em; text-transform: uppercase; }
 .session-detail-grid dd { margin: 0 0 8px; font-family: var(--font-mono); color: var(--text); word-break: break-all; }
 .session-actions { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.session-attrs { margin-top: var(--space-4); max-width: 720px; }
+.session-attrs:empty { display: none; }
+.session-attrs h3 { margin: 0 0 6px; color: var(--muted); font-size: var(--text-xs); letter-spacing: 0.08em; text-transform: uppercase; }
+.session-attrs h3 .muted { text-transform: none; letter-spacing: normal; }
+.attr-row { display: flex; align-items: baseline; gap: 8px; padding: 3px 0; font-size: var(--text-xs); }
+.attr-dim { opacity: 0.55; }
+.attr-dot { color: var(--muted); }
+.attr-dot-strong { color: var(--accent-2); }
+.attr-path { font-family: var(--font-mono); color: var(--text); word-break: break-all; }
+.attr-sha { font-family: var(--font-mono); color: var(--accent-2); }
+.attr-summary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.attr-meta { margin-left: auto; white-space: nowrap; color: var(--muted); }
 .session-transcript { margin-top: var(--space-4); }
 .transcript { display: flex; flex-direction: column; gap: 8px; max-height: 420px; overflow-y: auto; padding-right: 4px; max-width: 720px; }
 .turn { padding: 8px 10px; border: var(--border-width) solid var(--border); border-radius: var(--radius-input); background: var(--surface); }
