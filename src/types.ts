@@ -143,6 +143,10 @@ export interface SessionRecord {
   gitUrl?: string | null;
   /** Display name from origin tail / root basename. */
   gitName?: string | null;
+  /** 会话来源归因(session-origin.ts);未标记即真实用户会话。 */
+  origin?: SessionOrigin;
+  /** codex subagent 的父 session id(codex:<parent_native_id>)。 */
+  parentId?: string | null;
   /** 需求文本:从 session_messages 用户消息流抽取(motivation.ts),由读侧附上。 */
   requirement?: string | null;
   /**
@@ -233,6 +237,10 @@ export interface SessionCommit {
 
 export type GitRole = 'work' | 'touch' | 'commit';
 export type EvidenceKind = 'observed' | 'declared' | 'candidate';
+
+/** 会话来源:user=真实用户;subagent=子代理;plugin:claude=被 claude 插件拉起;
+ *  exec=脚本化调用(codex_exec/exec);herdr=herdr 窗格关联(启发式)。 */
+export type SessionOrigin = 'user' | 'subagent' | 'plugin:claude' | 'exec' | 'herdr';
 
 /** One git repository associated with a session, in a specific role. */
 export interface SessionRepo {

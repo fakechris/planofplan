@@ -372,15 +372,25 @@ function renderSessions(list) {
   }
 }
 
+// origin 徽标文案(仅非 user 时显示;判定见 src/session-origin.ts)
+const ORIGIN_LABELS = {
+  subagent: 'subagent',
+  'plugin:claude': 'claude 插件',
+  exec: 'exec',
+  herdr: 'herdr',
+};
+
 function sessionItemHtml(session) {
   const hit = session.messageHit;
   const hitHtml = hit
     ? `<span class="session-hit">${highlightHit(hit.snippet)} · ${hit.count} 处命中</span>`
     : '';
+  const originLabel = ORIGIN_LABELS[session.origin] || '';
+  const originHtml = originLabel ? ` · <i class="session-origin">${originLabel}</i>` : '';
   return `
     <button type="button" class="session-item${session.id === openSessionId ? ' active' : ''}" data-session-id="${escapeHtml(session.id)}">
       <strong>${escapeHtml(session.requirement || session.title || '无标题')}</strong>
-      <span>${escapeHtml(session.provider)} · ${escapeHtml(sessionProjectName(session))} · ${fmtAgo(session.updatedAt, Date.now())}${session.totalTokens ? ` · ${fmtTokens(session.totalTokens)}` : ''}</span>
+      <span>${escapeHtml(session.provider)} · ${escapeHtml(sessionProjectName(session))} · ${fmtAgo(session.updatedAt, Date.now())}${session.totalTokens ? ` · ${fmtTokens(session.totalTokens)}` : ''}${originHtml}</span>
       ${hitHtml}
     </button>
   `;

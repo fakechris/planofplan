@@ -78,12 +78,12 @@ export function buildWorkGraph(
   const projects = new Map<string, WorkProject>();
   const counted = new Map<string, Set<string>>();
 
-  // subagent 派工 session(claude 布局:source_file 路径含 /subagents/)的
-  // 「需求」是父 agent 的派工 prompt,不是用户意图,默认不进图;其它 provider
-  // 出现类似布局时在此扩展。project 计数、requirement、commit 边同步排除。
+  // origin 归因(session-origin.ts):subagent / 插件拉起 / exec 等非用户会话
+  // 的「需求」是派工 prompt 或脚本输入,默认不进图;project 计数、
+  // requirement、commit 边同步排除。?subagents=1 时包含全部。
   const visible = includeSubagents
     ? sessions
-    : sessions.filter((session) => !session.sourceFile?.includes('/subagents/'));
+    : sessions.filter((session) => (session.origin ?? 'user') === 'user');
 
   const noteSession = (project: WorkProject, session: SessionRecord): void => {
     const seen = counted.get(project.id) ?? new Set<string>();

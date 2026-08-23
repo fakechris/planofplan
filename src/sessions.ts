@@ -25,6 +25,7 @@ import { attachRepos, extractSessionRepos, TOUCH_BYTES } from './session-repos.t
 import { messagesFromRecord, messagesFromZcodeDb } from './transcript.ts';
 import { touchesFromRecord } from './file-touches.ts';
 import { collectSessionCommits } from './commit-attribution.ts';
+import { applyHerdrOrigin, backfillSessionOrigins, classifyCodexMeta, classifySessionPath } from './session-origin.ts';
 import type { SessionCommit, SessionIndexState, SessionList, SessionRecord, SessionRepo } from './types.ts';
 
 /** Subset of usage collect options — kept here to avoid a usage.ts cycle. */
@@ -268,6 +269,8 @@ function extractClaude(path: string, mtimeMs: number): SessionRecord | null {
     outputTokens: 0,
     totalTokens: 0,
     estimatedCostUsd: null,
+    // subagent transcript 布局:<proj>/<uuid>/subagents/agent-*.jsonl
+    ...(classifySessionPath('claude', path) ?? {}),
     seenAt: Date.now(),
   };
 }
@@ -279,6 +282,8 @@ function extractCodex(path: string, mtimeMs: number): SessionRecord | null {
   let cwd: string | null = null;
   let startedAt: number | null = null;
   let title: string | null = null;
+  let origin: SessionRecord['origin'];
+  let parentId: string | null = null;
   for (const record of records) {
     const payload = record.payload && typeof record.payload === 'object'
       ? record.payload as Record<string, unknown>
@@ -288,6 +293,12 @@ function extractCodex(path: string, mtimeMs: number): SessionRecord | null {
       if (typeof id === 'string') nativeId = id;
       if (typeof payload.cwd === 'string') cwd = payload.cwd;
       startedAt = parseTimestamp(payload.timestamp ?? record.timestamp, mtimeMs);
+      // originator/source 判定 session 来源;plain user 返回 null 不动既有值
+      const tag = classifyCodexMeta(payload);
+      if (tag) {
+        origin = tag.origin;
+        parentId = tag.parentId ?? null;
+      }
     }
     if (!title && record.type === 'response_item' && payload) {
       const role = payload.role;
@@ -298,6 +309,8 @@ function extractCodex(path: string, mtimeMs: number): SessionRecord | null {
     }
   }
   if (!nativeId) return null;
+  // 同一 session 拆成多个 rollout 文件时,续写文件的 thread_spawn 可能回指自身 id
+  if (parentId && parentId === sessionKey('codex', nativeId)) parentId = null;
   return {
     id: sessionKey('codex', nativeId),
     provider: 'codex',
@@ -311,6 +324,8 @@ function extractCodex(path: string, mtimeMs: number): SessionRecord | null {
     outputTokens: 0,
     totalTokens: 0,
     estimatedCostUsd: null,
+    origin,
+    parentId,
     seenAt: Date.now(),
   };
 }
@@ -877,6 +892,14 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
     await collectSessionCommits(store, { since, until });
   } catch {
     /* commit attribution is best-effort */
+  }
+  // origin 归因:一次性 backfill(user_version 2→3,重读 codex 文件头 +
+  // claude 路径判断)+ 每轮 herdr 升级。单文件读、有界,失败不拖垮目录
+  try {
+    backfillSessionOrigins(store);
+    applyHerdrOrigin(store);
+  } catch {
+    /* origin attribution is best-effort */
   }
   return scanned;
 }

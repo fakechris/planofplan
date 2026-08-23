@@ -104,7 +104,9 @@ CREATE TABLE IF NOT EXISTS sessions (
   seen_at INTEGER NOT NULL,
   git_root TEXT,
   git_url TEXT,
-  git_name TEXT
+  git_name TEXT,
+  origin TEXT NOT NULL DEFAULT 'user',
+  parent_id TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_native ON sessions(provider, native_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);
@@ -309,6 +311,26 @@ export class Store {
       }
       db.exec('PRAGMA user_version = 2');
     }
+    // v3:sessions 加 origin/parent_id 列。列在这里补,但版本号不由这里推:
+    // backfill(session-origin.ts,含文件重读)完成后才把 user_version 置 3,
+    // 中途崩溃会在下次扫描时重跑 backfill(幂等)。
+    if (version < 3) {
+      for (const column of ["origin TEXT NOT NULL DEFAULT 'user'", 'parent_id TEXT']) {
+        try {
+          db.exec(`ALTER TABLE sessions ADD COLUMN ${column}`);
+        } catch {
+          // 列已存在(新库 SCHEMA 已含)
+        }
+      }
+    }
+  }
+
+  getUserVersion(): number {
+    return (this.db.query('PRAGMA user_version').get() as { user_version: number }).user_version;
+  }
+
+  setUserVersion(version: number): void {
+    this.db.exec(`PRAGMA user_version = ${Math.floor(version)}`);
   }
 
   /** 配置 → db plans 表（INSERT OR IGNORE；已存在时只更新非运行时字段） */
@@ -958,8 +980,8 @@ export class Store {
       `INSERT INTO sessions (
          id, provider, native_id, cwd, title, source_file, started_at, updated_at,
          input_tokens, output_tokens, total_tokens, estimated_cost_usd, seen_at,
-         git_root, git_url, git_name
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         git_root, git_url, git_name, origin, parent_id
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'user'), ?)
        ON CONFLICT(id) DO UPDATE SET
          cwd = COALESCE(excluded.cwd, sessions.cwd),
          title = COALESCE(excluded.title, sessions.title),
@@ -968,11 +990,14 @@ export class Store {
          git_root = COALESCE(excluded.git_root, sessions.git_root),
          git_url = COALESCE(excluded.git_url, sessions.git_url),
          git_name = COALESCE(excluded.git_name, sessions.git_name),
+         -- origin 只在明确知道时覆盖:extract 给 null(plain user)时保留既有值
+         --(例如 herdr 升级),backfill/专用 pass 负责修正
+         origin = COALESCE(excluded.origin, sessions.origin),
+         parent_id = COALESCE(excluded.parent_id, sessions.parent_id),
          updated_at = excluded.updated_at,
          seen_at = excluded.seen_at`,
     );
-    this.db.exec('BEGIN');
-    try {
+    this.withTransaction(() => {
       for (const row of rows) {
         stmt.run(
           row.id,
@@ -991,13 +1016,22 @@ export class Store {
           row.gitRoot ?? null,
           row.gitUrl ?? null,
           row.gitName ?? null,
+          row.origin ?? null,
+          row.parentId ?? null,
         );
       }
-      this.db.exec('COMMIT');
-    } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
-    }
+    });
+  }
+
+  /** origin 修正入口:backfill / herdr 升级专用,不走 upsert 的 COALESCE 语义。 */
+  updateSessionOrigins(patches: Array<{ id: string; origin: string; parentId?: string | null }>): void {
+    if (patches.length === 0) return;
+    const stmt = this.db.query('UPDATE sessions SET origin = ?, parent_id = COALESCE(?, parent_id) WHERE id = ?');
+    this.withTransaction(() => {
+      for (const patch of patches) {
+        stmt.run(patch.origin, patch.parentId ?? null, patch.id);
+      }
+    });
   }
 
   updateSessionTokens(patches: Array<{
@@ -1029,7 +1063,7 @@ export class Store {
     const rows = this.db.query(
       `SELECT id, provider, native_id, cwd, title, source_file, started_at, updated_at,
               input_tokens, output_tokens, total_tokens, estimated_cost_usd, seen_at,
-              git_root, git_url, git_name
+              git_root, git_url, git_name, origin, parent_id
        FROM sessions`,
     ).all() as Array<{
       id: string;
@@ -1048,6 +1082,8 @@ export class Store {
       git_root: string | null;
       git_url: string | null;
       git_name: string | null;
+      origin: string | null;
+      parent_id: string | null;
     }>;
     return this.attachSessionRepos(rows.map(sessionFromRow));
   }
@@ -1056,7 +1092,7 @@ export class Store {
     const row = this.db.query(
       `SELECT id, provider, native_id, cwd, title, source_file, started_at, updated_at,
               input_tokens, output_tokens, total_tokens, estimated_cost_usd, seen_at,
-              git_root, git_url, git_name
+              git_root, git_url, git_name, origin, parent_id
        FROM sessions WHERE id = ?`,
     ).get(id) as {
       id: string;
@@ -1075,6 +1111,8 @@ export class Store {
       git_root: string | null;
       git_url: string | null;
       git_name: string | null;
+      origin: string | null;
+      parent_id: string | null;
     } | null;
     if (!row) return null;
     return this.attachSessionRepos([sessionFromRow(row)])[0] ?? null;
@@ -1584,6 +1622,8 @@ function sessionFromRow(row: {
   git_root?: string | null;
   git_url?: string | null;
   git_name?: string | null;
+  origin?: string | null;
+  parent_id?: string | null;
 }): SessionRecord {
   return {
     id: row.id,
@@ -1602,6 +1642,8 @@ function sessionFromRow(row: {
     gitRoot: row.git_root ?? null,
     gitUrl: row.git_url ?? null,
     gitName: row.git_name ?? null,
+    origin: (row.origin ?? 'user') as SessionRecord['origin'],
+    parentId: row.parent_id ?? null,
   };
 }
 

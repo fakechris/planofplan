@@ -154,8 +154,8 @@ describe('sessions schema migration', () => {
 });
 
 describe('subagent filtering in work graph', () => {
-  // claude 布局:subagent transcript 在 <proj>/<uuid>/subagents/agent-*.jsonl,
-  // 其「需求」是父 agent 的派工 prompt,默认不进图
+  // origin 归因后按 origin 过滤(判定在 session-origin.ts:claude 走路径,
+  // codex 走 session_meta);这里的 fixture 直接带 origin
   const main = session({
     id: 'claude:main',
     provider: 'claude',
@@ -168,19 +168,28 @@ describe('subagent filtering in work graph', () => {
     nativeId: 'sub1',
     title: '请审查以下改动(派工 prompt)',
     sourceFile: '/Users/x/.claude/projects/-x/main-uuid/subagents/agent-abc.jsonl',
+    origin: 'subagent',
+  });
+  const plugin = session({
+    id: 'codex:p1',
+    provider: 'codex',
+    nativeId: 'p1',
+    title: 'codexreview 插件拉起',
+    origin: 'plugin:claude',
   });
 
-  test('默认排除 /subagents/ 路径的 session(节点+边+requirement)', () => {
-    const graph = buildWorkGraph([main, sub]);
+  test('默认排除非 user origin 的 session(节点+边+requirement)', () => {
+    const graph = buildWorkGraph([main, sub, plugin]);
     const sessionNodes = graph.nodes.filter((n) => n.kind === 'session');
     expect(sessionNodes.map((n) => n.id)).toEqual(['claude:main']);
-    expect(graph.nodes.some((n) => n.kind === 'requirement' && n.sessionId === 'claude:sub1')).toBe(false);
-    expect(graph.edges.some((e) => e.from === 'claude:sub1' || e.to.includes('sub1'))).toBe(false);
+    expect(graph.nodes.some((n) => n.kind === 'requirement' && n.sessionId !== 'claude:main')).toBe(false);
+    expect(graph.edges.some((e) => e.from === 'claude:sub1' || e.from === 'codex:p1'
+      || e.to.includes('sub1') || e.to.includes('codex:p1'))).toBe(false);
   });
 
   test('includeSubagents=true 时保持现状', () => {
-    const graph = buildWorkGraph([main, sub], undefined, undefined, true);
+    const graph = buildWorkGraph([main, sub, plugin], undefined, undefined, true);
     const sessionNodes = graph.nodes.filter((n) => n.kind === 'session');
-    expect(sessionNodes.map((n) => n.id).sort()).toEqual(['claude:main', 'claude:sub1']);
+    expect(sessionNodes.map((n) => n.id).sort()).toEqual(['claude:main', 'claude:sub1', 'codex:p1']);
   });
 });
