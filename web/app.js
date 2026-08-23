@@ -548,16 +548,33 @@ function filesBlockHtml(touches, session) {
   return `<h3>文件</h3>${shown}${attrFoldHtml(rest, restRows.length, '个文件')}`;
 }
 
+// repo 可能是本地路径、git@host:org/repo.git 或 https://host/org/repo.git;
+// 能归一化成 http(s) 的返回 commit 详情页 URL(GitLab 用 /-/commit/),否则 null
+function commitUrl(repo, sha) {
+  if (!repo || !sha) return null;
+  let url = repo.trim().replace(/\/+$/, '').replace(/\.git$/, '');
+  const ssh = url.match(/^git@([^:]+):(.+)$/);
+  if (ssh) url = `https://${ssh[1]}/${ssh[2]}`;
+  if (!/^https?:\/\//.test(url)) return null;
+  const path = /gitlab/i.test(url) ? '/-/commit/' : '/commit/';
+  return `${url}${path}${encodeURIComponent(sha)}`;
+}
+
 function commitsBlockHtml(commits) {
   if (commits.length === 0) return '';
   const rows = [...commits].sort((a, b) => (b.ts || 0) - (a.ts || 0));
   const rowHtml = (commit) => {
     // ● 高置信(trailer 声明 / 文件交集),○ 纯时间窗 candidate
     const strong = commit.kind === 'declared' || commit.fileOverlap;
+    const url = commitUrl(commit.repo, commit.sha);
+    const sha = escapeHtml(commit.sha.slice(0, 8));
+    const shaHtml = url
+      ? `<a class="attr-sha" href="${escapeHtml(url)}" target="_blank" rel="noreferrer">${sha}</a>`
+      : `<span class="attr-sha">${sha}</span>`;
     return `
     <div class="attr-row${strong ? '' : ' attr-dim'}" title="${escapeHtml(commit.sha)} · ${escapeHtml(commit.repo)}">
       <span class="attr-dot${strong ? ' attr-dot-strong' : ''}">${strong ? '●' : '○'}</span>
-      <span class="attr-sha">${escapeHtml(commit.sha.slice(0, 8))}</span>
+      ${shaHtml}
       <span class="attr-summary">${escapeHtml(commit.summary || '(no subject)')}</span>
       <span class="attr-meta">${commit.ts ? fmtAgo(commit.ts, Date.now()) : ''}</span>
     </div>`;

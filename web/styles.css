@@ -465,6 +465,8 @@ td { font-variant-numeric: tabular-nums; }
 .attr-dot-strong { color: var(--accent-2); }
 .attr-path { font-family: var(--font-mono); color: var(--text); word-break: break-all; }
 .attr-sha { font-family: var(--font-mono); color: var(--accent-2); }
+a.attr-sha { text-decoration: none; }
+a.attr-sha:hover { text-decoration: underline; }
 .attr-summary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
 .attr-meta { margin-left: auto; white-space: nowrap; color: var(--muted); }
 .session-transcript { margin-top: var(--space-4); }
