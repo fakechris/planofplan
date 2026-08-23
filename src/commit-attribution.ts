@@ -6,8 +6,10 @@
  *               (本机实测 2026-08:几十个 repo 的 git log 里没有任何 harness
  *               写过 trailer,declared 是面向未来的约定;candidate 是现实路径)
  *   candidate — commit 落在 session 活跃窗(started-grace ~ updated+grace)、
- *               repo 是该 session 的 work/touch repo;commit 文件与
- *               session_file_touches 有交集时标 file_overlap=1
+ *               repo 是该 session 的 work/touch repo;有 touch 数据的 session
+ *               必须文件交集才落表,无 touch 数据的按 session 封顶
+ *               CANDIDATE_PER_SESSION_MAX 条(ts 近者优先);merge 在 git 层
+ *               --no-merges 挡掉,stash 类 subject 不进 candidate
  *
  * 历史教训(为什么这个模块的有界性是硬约束):早期实现 per-session per-repo
  * 全量 git log,在几千 session 的目录上打爆 Bun 主线程(段错误 + 事件循环
@@ -31,8 +33,12 @@ import type { SessionCommit, SessionRecord, SessionRepo } from './types.ts';
 
 const COMMIT_LOG_MAX = 300;
 const CANDIDATE_PER_COMMIT_MAX = 5;
+/** 无 touch 数据的 session:candidate 封顶条数(ts 近者优先)。 */
+export const CANDIDATE_PER_SESSION_MAX = 100;
 const GIT_TIMEOUT_MS = 5_000;
 const SHA_RE = /^[0-9a-f]{40}$/i;
+/** stash 类提交的 subject 模式(merge 在 git log 层用 --no-merges 挡,这里只挡 stash)。 */
+const STASH_SUBJECT_RE = /^(?:On|index on|untracked files on|WIP on) \S[^:]*:/;
 
 /** 有界 git runner:timeout + maxBuffer,任何失败抛给调用方跳过。 */
 export function boundedGitRunner(timeoutMs = GIT_TIMEOUT_MS): GitRunner {
@@ -109,6 +115,12 @@ export interface AttributeRepoOptions {
   sessions: SessionRecord[];
   /** sessionId → 该 session 在此 repo 里碰过的 repo 相对路径集合 */
   touchesBySession: Map<string, Set<string>>;
+  /**
+   * 有任何 touch 数据的 session 集合。在列的 session:candidate 必须有文件
+   * 交集才落表;不在列的(如 codex/grok,工具入参里少有结构化路径)保留
+   * 时间窗 candidate,由调用方按 session 封顶。declared(trailer)不受此限。
+   */
+  touchedSessionIds?: Set<string>;
   git: GitRunner;
   graceMs?: number;
   maxCommits?: number;
@@ -126,7 +138,8 @@ export function attributeRepoCommits(options: AttributeRepoOptions): SessionComm
   try {
     raw = git([
       '-C', repo.root,
-      'log', '--exclude=refs/stash', '--all',
+      // --exclude 必须在 --all 之前(stash);--no-merges 在 git 层挡 merge commit
+      'log', '--exclude=refs/stash', '--all', '--no-merges',
       `--since=${new Date(since).toISOString()}`,
       `--until=${new Date(until).toISOString()}`,
       '-n', String(maxCommits),
@@ -161,13 +174,17 @@ export function attributeRepoCommits(options: AttributeRepoOptions): SessionComm
       }
       continue;
     }
-    // candidate:时间窗重叠;文件交集提高置信度,排序优先并截断上限
+    // candidate:时间窗重叠;stash 类提交不进 candidate;有 touch 数据的
+    // session 必须有文件交集;文件交集提高置信度,排序优先并截断上限
+    if (STASH_SUBJECT_RE.test(commit.subject)) continue;
+    const touched = options.touchedSessionIds ?? new Set<string>();
     const candidates = sessions
       .filter((session) => {
         const [from, to] = windowOf(session, grace);
         return commit.committedAt >= from && commit.committedAt <= to;
       })
       .map((session) => ({ session, overlap: overlapOf(session) }))
+      .filter(({ session, overlap }) => !touched.has(session.id) || overlap)
       .sort((a, b) => Number(b.overlap) - Number(a.overlap) || b.session.updatedAt - a.session.updatedAt)
       .slice(0, CANDIDATE_PER_COMMIT_MAX);
     for (const { session, overlap } of candidates) {
@@ -218,10 +235,13 @@ export async function collectSessionCommits(
   }
   if (byRepo.size === 0) return 0;
 
-  // 重算前先清掉本次覆盖的 session 的旧归因(窗口外 session 的行不动)
+  // 重算前先清掉本次覆盖的 session 的旧归因;滚出窗口的 session 的行也一并清掉
+  //(它们不会再被重算,留着只会带着旧口径腐烂)
   store.deleteSessionCommitsFor(sessions.map((s) => s.id));
+  store.deleteSessionCommitsBefore(since);
 
-  let attributed = 0;
+  const touchedSessionIds = store.listTouchedSessionIds();
+  const all: SessionCommit[] = [];
   let processed = 0;
   for (const { repo, sessions: repoSessions } of byRepo.values()) {
     const touchesBySession = new Map<string, Set<string>>();
@@ -233,14 +253,30 @@ export async function collectSessionCommits(
       touchesBySession.set(row.sessionId, set);
     }
     try {
-      const rows = attributeRepoCommits({ repo, sessions: repoSessions, touchesBySession, git });
-      store.upsertSessionCommits(rows);
-      attributed += rows.length;
+      all.push(...attributeRepoCommits({ repo, sessions: repoSessions, touchesBySession, touchedSessionIds, git }));
     } catch {
       /* 单 repo 归因失败不拖垮整趟扫描 */
     }
     processed += 1;
     if (processed % REPO_YIELD_BATCH === 0) await yieldEventLoop();
   }
-  return attributed;
+
+  // 无 touch 数据的 session:candidate 每 session 封顶(跨 repo 全局,ts 近者优先);
+  // declared 和有文件交集的 candidate 不受限
+  const uncapped = all.filter((row) => row.kind === 'declared' || touchedSessionIds.has(row.sessionId));
+  const cappedBySession = new Map<string, SessionCommit[]>();
+  for (const row of all) {
+    if (row.kind === 'declared' || touchedSessionIds.has(row.sessionId)) continue;
+    const list = cappedBySession.get(row.sessionId) ?? [];
+    list.push(row);
+    cappedBySession.set(row.sessionId, list);
+  }
+  const capped: SessionCommit[] = [];
+  for (const rows of cappedBySession.values()) {
+    rows.sort((a, b) => (b.ts ?? 0) - (a.ts ?? 0));
+    capped.push(...rows.slice(0, CANDIDATE_PER_SESSION_MAX));
+  }
+  const rows = [...uncapped, ...capped];
+  store.upsertSessionCommits(rows);
+  return rows.length;
 }

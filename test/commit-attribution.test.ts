@@ -76,17 +76,51 @@ describe('attributeRepoCommits', () => {
     expect(rows[0]).toMatchObject({ sessionId: 'claude:s1', sha: SHA_A, kind: 'declared', fileOverlap: true });
   });
 
-  test('时间窗内 → candidate;文件交集标 fileOverlap;窗外不关联', () => {
+  test('时间窗内 → candidate;有 touch 数据的 session 必须有文件交集;窗外不关联', () => {
     const s1 = session({ id: 'claude:s1', nativeId: 's1' });
     const git = () => gitLogRaw([
       { sha: SHA_A, iso: '2026-08-20T10:30:00.000Z', subject: 'in window, touched file', files: ['src/db.ts'] },
       { sha: SHA_B, iso: '2026-08-20T10:35:00.000Z', subject: 'in window, other file', files: ['docs/x.md'] },
       { sha: SHA_C, iso: '2026-08-25T10:30:00.000Z', subject: 'out of window', files: ['src/db.ts'] },
     ]);
+    // s1 有 touch 数据:无交集的 SHA_B 被砍
+    const rows = attributeRepoCommits({
+      repo, sessions: [s1], touchesBySession: touches, touchedSessionIds: new Set(['claude:s1']), git,
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ sha: SHA_A, kind: 'candidate', fileOverlap: true });
+    // 无 touch 数据的 session:时间窗内都保留,交集只是标注
+    const noTouch = attributeRepoCommits({
+      repo,
+      sessions: [session({ id: 'codex:s2', nativeId: 's2' })],
+      touchesBySession: new Map(),
+      touchedSessionIds: new Set(),
+      git,
+    });
+    expect(noTouch.map((r) => r.sha)).toEqual([SHA_A, SHA_B]);
+  });
+
+  test('stash subject 不进 candidate;declared 不受影响', () => {
+    const s1 = session({ id: 'claude:s1', nativeId: 's1' });
+    const git = () => gitLogRaw([
+      { sha: SHA_A, iso: '2026-08-20T10:30:00.000Z', subject: 'WIP on main: abc1234 x', files: ['src/db.ts'] },
+      { sha: SHA_B, iso: '2026-08-20T10:35:00.000Z', subject: 'On main: stashed', files: ['src/db.ts'] },
+      { sha: SHA_C, iso: '2026-08-20T10:40:00.000Z', subject: 'WIP on main: but declared', body: 'Harness-Session: s1\n', files: ['src/db.ts'] },
+    ]);
     const rows = attributeRepoCommits({ repo, sessions: [s1], touchesBySession: touches, git });
-    expect(rows).toHaveLength(2);
-    expect(rows.find((r) => r.sha === SHA_A)).toMatchObject({ kind: 'candidate', fileOverlap: true });
-    expect(rows.find((r) => r.sha === SHA_B)).toMatchObject({ kind: 'candidate', fileOverlap: false });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ sha: SHA_C, kind: 'declared' });
+  });
+
+  test('git 调用带 --no-merges(merge commit 在 git 层挡掉)', () => {
+    const s1 = session({ id: 'claude:s1', nativeId: 's1' });
+    let captured: string[] = [];
+    const git = (args: string[]) => { captured = args; return ''; };
+    attributeRepoCommits({ repo, sessions: [s1], touchesBySession: touches, git });
+    expect(captured).toContain('--no-merges');
+    expect(captured).toContain('--exclude=refs/stash');
+    // --exclude 必须在 --all 之前,否则 stash 排除不生效(实测)
+    expect(captured.indexOf('--exclude=refs/stash')).toBeLessThan(captured.indexOf('--all'));
   });
 
   test('candidate 每 commit 最多挂 5 个 session,文件交集优先', () => {
@@ -176,6 +210,31 @@ describe('collectSessionCommits', () => {
   test('git: null 整环关闭', async () => {
     const store = seededStore();
     expect(await collectSessionCommits(store, { since, until, git: null })).toBe(0);
+  });
+
+  test('无 touch 数据的 session:candidate 封顶 100 条,ts 近者优先', async () => {
+    const store = openMemoryDb();
+    const now = Date.now();
+    // 不带 touch 数据的 session(seededStore 有 touch,这里刻意不种)
+    store.upsertSessions([session({ id: 'codex:s2', nativeId: 's2', provider: 'codex', seenAt: now })]);
+    store.replaceSessionRepos('codex:s2', [{
+      sessionId: 'codex:s2', role: 'work', url: repo.url, root: '/repo', name: 'repo', evidenceKind: 'observed',
+    }]);
+    const commits = Array.from({ length: 150 }, (_, i) => ({
+      sha: String(i).padStart(40, '0'),
+      iso: new Date(Date.parse('2026-08-20T10:00:00.000Z') + i * 30_000).toISOString(),
+      subject: `commit ${i}`,
+      files: ['src/x.ts'],
+    }));
+    const git = () => gitLogRaw(commits);
+    const n = await collectSessionCommits(store, { since, until, git });
+    expect(n).toBe(100);
+    const rows = store.listSessionCommits('codex:s2');
+    expect(rows).toHaveLength(100);
+    // ts 近者优先:窗内共 141 条(i=0..140,窗口到 11:10),最早的 commit 0 被顶掉,
+    // 窗内最新的 commit 140 保留(141+ 在窗口外,本来就不会进)
+    expect(rows.some((r) => r.sha === String(0).padStart(40, '0'))).toBe(false);
+    expect(rows.some((r) => r.sha === String(140).padStart(40, '0'))).toBe(true);
   });
 });
 

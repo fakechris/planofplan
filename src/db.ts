@@ -1317,6 +1317,12 @@ export class Store {
     ).all(`${prefix.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`) as Array<{ sessionId: string; filePath: string }>;
   }
 
+  /** 有任何 touch 数据的 session 集合(commit 归因的分档依据)。 */
+  listTouchedSessionIds(): Set<string> {
+    const rows = this.db.query('SELECT DISTINCT session_id FROM session_file_touches').all() as Array<{ session_id: string }>;
+    return new Set(rows.map((row) => row.session_id));
+  }
+
   upsertSessionCommits(rows: SessionCommit[]): void {
     if (rows.length === 0) return;
     const stmt = this.db.query(
@@ -1344,6 +1350,13 @@ export class Store {
         `DELETE FROM session_commits WHERE session_id IN (${chunk.map(() => '?').join(',')})`,
       ).run(...chunk);
     }
+  }
+
+  /** 清掉已滚出扫描窗口的 session 的归因行(它们不会再被重算,留着只会腐烂)。 */
+  deleteSessionCommitsBefore(since: number): void {
+    this.db.query(
+      'DELETE FROM session_commits WHERE session_id IN (SELECT id FROM sessions WHERE updated_at < ?)',
+    ).run(since);
   }
 
   listSessionCommits(sessionId?: string): SessionCommit[] {
