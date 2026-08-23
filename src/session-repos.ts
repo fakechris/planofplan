@@ -142,7 +142,7 @@ export function touchReposFromRecords(
   }));
 }
 
-function parseTrailers(body: string): Array<{ key: string; value: string }> {
+export function parseTrailers(body: string): Array<{ key: string; value: string }> {
   const out: Array<{ key: string; value: string }> = [];
   if (!body) return out;
   const re = /^(Harness-Session):\s*(.+)$/gim;
@@ -154,7 +154,7 @@ function parseTrailers(body: string): Array<{ key: string; value: string }> {
   return out;
 }
 
-function sessionMatchesTrailer(session: SessionRecord, value: string): boolean {
+export function sessionMatchesTrailer(session: SessionRecord, value: string): boolean {
   const needle = value.trim();
   if (!needle) return false;
   return needle === session.id

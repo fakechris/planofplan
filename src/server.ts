@@ -202,7 +202,13 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
       if (requirement) requirements.set(session.id, requirement);
     }
     rows = rows.map((row) => ({ ...row, requirement: requirements.get(row.id) ?? null }));
-    const list = buildSessionList(rows, { since, until: now, generatedAt: now, requirements });
+    const list = buildSessionList(rows, {
+      since,
+      until: now,
+      generatedAt: now,
+      requirements,
+      commits: store.listSessionCommits(),
+    });
     return c.json({
       ...list,
       indexStatus: sessionIndexProcess ? 'running' : 'idle',
@@ -236,6 +242,25 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     const session = store.getSession(sessionId);
     if (!session) return c.json({ ok: false, error: 'unknown session' }, 404);
     return c.json({ sessionId, touches: store.listSessionTouches(sessionId) });
+  });
+
+  // session → 归因到的 commit(commit 归因第二环)
+  app.get('/api/sessions/:provider/:id/commits', (c) => {
+    const sessionId = `${c.req.param('provider')}:${c.req.param('id')}`;
+    const session = store.getSession(sessionId);
+    if (!session) return c.json({ ok: false, error: 'unknown session' }, 404);
+    return c.json({ sessionId, commits: store.listSessionCommits(sessionId) });
+  });
+
+  // commit → 关联 session 反查(支持短 sha 前缀)
+  app.get('/api/commits/:sha/sessions', (c) => {
+    const sha = c.req.param('sha').trim();
+    if (!sha) return c.json({ ok: false, error: 'sha is required' }, 400);
+    const rows = store.sessionsForCommit(sha).map((row) => {
+      const session = store.getSession(row.sessionId);
+      return { ...row, title: session?.title ?? null, provider: session?.provider ?? null };
+    });
+    return c.json({ sha, sessions: rows });
   });
 
   app.post('/api/sessions/:id/resume', (c) => {

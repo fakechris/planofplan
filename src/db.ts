@@ -4,6 +4,7 @@ import type {
   PlanConfig,
   PlanStateRow,
   QuotaWindow,
+  SessionCommit,
   SessionFileTouch,
   SessionIndexState,
   SessionMessageHit,
@@ -172,6 +173,19 @@ CREATE TABLE IF NOT EXISTS session_file_touches (
 );
 CREATE INDEX IF NOT EXISTS idx_session_file_touches_path ON session_file_touches(file_path);
 CREATE INDEX IF NOT EXISTS idx_session_file_touches_session ON session_file_touches(session_id, ordinal);
+-- commit 归因:session ↔ git commit(declared trailer / candidate 时间窗)。
+CREATE TABLE IF NOT EXISTS session_commits (
+  session_id TEXT NOT NULL,
+  repo TEXT NOT NULL,
+  sha TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  ts INTEGER,
+  summary TEXT,
+  file_overlap INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (session_id, sha)
+);
+CREATE INDEX IF NOT EXISTS idx_session_commits_sha ON session_commits(sha);
+CREATE INDEX IF NOT EXISTS idx_session_commits_repo ON session_commits(repo, ts);
 `;
 
 interface SnapshotRow {
@@ -1172,11 +1186,12 @@ export class Store {
     this.db.query('DELETE FROM session_messages WHERE session_id = ?').run(sessionId);
   }
 
-  /** 级联删除：session 本体 + repo 归属 + 消息索引 + 文件 touch(FTS 由触发器同步）。 */
+  /** 级联删除：session 本体 + repo 归属 + 消息索引 + 文件 touch + commit 归因(FTS 由触发器同步）。 */
   deleteSession(id: string): void {
     this.withTransaction(() => {
       this.db.query('DELETE FROM session_messages WHERE session_id = ?').run(id);
       this.db.query('DELETE FROM session_file_touches WHERE session_id = ?').run(id);
+      this.db.query('DELETE FROM session_commits WHERE session_id = ?').run(id);
       this.db.query('DELETE FROM session_repos WHERE session_id = ?').run(id);
       this.db.query('DELETE FROM sessions WHERE id = ?').run(id);
     });
@@ -1259,8 +1274,7 @@ export class Store {
   /**
    * 文件 → 碰过它的 session 列表(fileHistory)。精确匹配 ∪ 后缀匹配
    * (用户可能传相对路径),按最近触碰倒排。
-   */
-  fileTouchSessions(path: string, limit = 50): FileTouchSession[] {
+   */fileTouchSessions(path: string, limit = 50): FileTouchSession[] {
     const p = path.trim();
     if (!p) return [];
     const suffix = `%${p.replace(/[\\%_]/g, (ch) => `\\${ch}`)}`;
@@ -1291,6 +1305,83 @@ export class Store {
         ops: (row.ops ?? '').split(',').filter(Boolean).sort(),
       };
     });
+  }
+
+  /** 某 repo 根目录下的全部 touch(归因时换算成 repo 相对路径)。 */
+  listTouchesUnderRoot(root: string): Array<{ sessionId: string; filePath: string }> {
+    const prefix = root.endsWith('/') ? root : `${root}/`;
+    return this.db.query(
+      `SELECT session_id AS sessionId, file_path AS filePath
+       FROM session_file_touches
+       WHERE file_path LIKE ? ESCAPE '\\'`,
+    ).all(`${prefix.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`) as Array<{ sessionId: string; filePath: string }>;
+  }
+
+  upsertSessionCommits(rows: SessionCommit[]): void {
+    if (rows.length === 0) return;
+    const stmt = this.db.query(
+      `INSERT INTO session_commits (session_id, repo, sha, kind, ts, summary, file_overlap)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(session_id, sha) DO UPDATE SET
+         repo = excluded.repo,
+         kind = excluded.kind,
+         ts = excluded.ts,
+         summary = excluded.summary,
+         file_overlap = excluded.file_overlap`,
+    );
+    this.withTransaction(() => {
+      for (const row of rows) {
+        stmt.run(row.sessionId, row.repo, row.sha, row.kind, row.ts, row.summary, row.fileOverlap ? 1 : 0);
+      }
+    });
+  }
+
+  /** 重算前清掉指定 session 的旧归因(分块避免超长 IN)。 */
+  deleteSessionCommitsFor(sessionIds: string[]): void {
+    for (let i = 0; i < sessionIds.length; i += 500) {
+      const chunk = sessionIds.slice(i, i + 500);
+      this.db.query(
+        `DELETE FROM session_commits WHERE session_id IN (${chunk.map(() => '?').join(',')})`,
+      ).run(...chunk);
+    }
+  }
+
+  listSessionCommits(sessionId?: string): SessionCommit[] {
+    const rows = sessionId
+      ? this.db.query(
+          `SELECT session_id, repo, sha, kind, ts, summary, file_overlap
+           FROM session_commits WHERE session_id = ? ORDER BY ts`,
+        ).all(sessionId)
+      : this.db.query(
+          `SELECT session_id, repo, sha, kind, ts, summary, file_overlap
+           FROM session_commits ORDER BY ts`,
+        ).all();
+    return (rows as Array<{
+      session_id: string;
+      repo: string;
+      sha: string;
+      kind: string;
+      ts: number | null;
+      summary: string | null;
+      file_overlap: number;
+    }>).map(sessionCommitFromRow);
+  }
+
+  /** commit → 关联 session 反查(支持短 sha 前缀)。 */
+  sessionsForCommit(sha: string): SessionCommit[] {
+    const rows = this.db.query(
+      `SELECT session_id, repo, sha, kind, ts, summary, file_overlap
+       FROM session_commits WHERE sha = ? OR sha LIKE ? ORDER BY ts`,
+    ).all(sha, `${sha}%`) as Array<{
+      session_id: string;
+      repo: string;
+      sha: string;
+      kind: string;
+      ts: number | null;
+      summary: string | null;
+      file_overlap: number;
+    }>;
+    return rows.map(sessionCommitFromRow);
   }
 
   getSessionIndexState(path: string): SessionIndexState | null {
@@ -1382,9 +1473,28 @@ export class Store {
   }
 }
 
+function sessionCommitFromRow(row: {
+  session_id: string;
+  repo: string;
+  sha: string;
+  kind: string;
+  ts: number | null;
+  summary: string | null;
+  file_overlap: number;
+}): SessionCommit {
+  return {
+    sessionId: row.session_id,
+    repo: row.repo,
+    sha: row.sha,
+    kind: row.kind === 'declared' ? 'declared' : 'candidate',
+    ts: row.ts,
+    summary: row.summary ?? '',
+    fileOverlap: row.file_overlap === 1,
+  };
+}
+
 /** 命中行聚合成每 session 一条：保留最好（最靠前）的片段，统计命中条数。 */
-function aggregateMessageHits(rows: Array<{ sessionId: string; snippet: string }>): SessionMessageHit[] {
-  const bySession = new Map<string, SessionMessageHit>();
+function aggregateMessageHits(rows: Array<{ sessionId: string; snippet: string }>): SessionMessageHit[] {  const bySession = new Map<string, SessionMessageHit>();
   for (const row of rows) {
     const hit = bySession.get(row.sessionId);
     if (hit) {

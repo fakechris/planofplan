@@ -212,6 +212,20 @@ export interface FileTouchSession {
   ops: string[];
 }
 
+/** session_commits 表行:session ↔ commit 归因。 */
+export interface SessionCommit {
+  sessionId: string;
+  /** repo url,与 session_repos.url 对齐。 */
+  repo: string;
+  sha: string;
+  /** declared = Harness-Session trailer 显式声明;candidate = 时间窗匹配。 */
+  kind: 'declared' | 'candidate';
+  ts: number | null;
+  summary: string;
+  /** commit 触碰文件与 session_file_touches 有交集(candidate 里的强信号)。 */
+  fileOverlap: boolean;
+}
+
 export type GitRole = 'work' | 'touch' | 'commit';
 export type EvidenceKind = 'observed' | 'declared' | 'candidate';
 
@@ -248,7 +262,7 @@ export interface WorkProject {
 
 export interface WorkNode {
   id: string;
-  kind: 'session' | 'project' | 'requirement';
+  kind: 'session' | 'project' | 'requirement' | 'commit';
   label: string;
   provider?: string;
   sessionId?: string;

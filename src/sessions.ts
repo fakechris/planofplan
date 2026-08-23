@@ -24,7 +24,8 @@ import { repoRefOf, sessionProjectNames } from './repos.ts';
 import { attachRepos, extractSessionRepos, TOUCH_BYTES } from './session-repos.ts';
 import { messagesFromRecord, messagesFromZcodeDb } from './transcript.ts';
 import { touchesFromRecord } from './file-touches.ts';
-import type { SessionIndexState, SessionList, SessionRecord, SessionRepo } from './types.ts';
+import { collectSessionCommits } from './commit-attribution.ts';
+import type { SessionCommit, SessionIndexState, SessionList, SessionRecord, SessionRepo } from './types.ts';
 
 /** Subset of usage collect options — kept here to avoid a usage.ts cycle. */
 export interface SessionCollectOptions {
@@ -870,6 +871,13 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
     if (!existsSync(row.sourceFile)) store.deleteSession(row.id);
   }
   applySessionUsage(store, since, until);
+  // commit 归因(第二环):有界 git 调用(每 repo 一次 git log + timeout),
+  // 失败不拖垮目录扫描
+  try {
+    await collectSessionCommits(store, { since, until });
+  } catch {
+    /* commit attribution is best-effort */
+  }
   return scanned;
 }
 
@@ -968,7 +976,13 @@ function applySessionUsage(store: Store, since: number, until: number): void {
 
 export function buildSessionList(
   sessions: SessionRecord[],
-  options: { since: number; until: number; generatedAt?: number; requirements?: Map<string, string> },
+  options: {
+    since: number;
+    until: number;
+    generatedAt?: number;
+    requirements?: Map<string, string>;
+    commits?: SessionCommit[];
+  },
 ): SessionList {
   const inWindow = sessions.filter((session) => (
     session.updatedAt >= options.since && session.updatedAt < options.until
@@ -997,7 +1011,7 @@ export function buildSessionList(
     byProject: [...byProject.entries()]
       .map(([project, count]) => ({ project, count }))
       .sort((a, b) => b.count - a.count || a.project.localeCompare(b.project)),
-    graph: buildWorkGraph(sorted, options.requirements),
+    graph: buildWorkGraph(sorted, options.requirements, options.commits),
     indexedAt,
     indexStatus: 'idle',
   };

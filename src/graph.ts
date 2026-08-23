@@ -4,13 +4,14 @@
  * Git dimensions:
  *   session --worked-in--> work git (cwd walk-up, observed)
  *   session --touched--> touch git (tool paths, observed)  ← yarn / requirement
- *   session --landed-in--> commit git (git log; candidate unless trailer)
+ *   session --landed-in--> commit(session_commits 表;declared trailer / candidate 时间窗)
  *   session --has-requirement--> first long user request
  *   requirement --in-project--> first touch git (unmapped if none)
  *
  * Work git is never used as the requirement's project.
  */
 import type {
+  SessionCommit,
   SessionRecord,
   SessionRepo,
   WorkEdge,
@@ -66,7 +67,11 @@ function addSessionToProject(project: WorkProject, session: SessionRecord): void
   if (!project.providers.includes(session.provider)) project.providers.push(session.provider);
 }
 
-export function buildWorkGraph(sessions: SessionRecord[], requirements?: Map<string, string>): WorkGraph {
+export function buildWorkGraph(
+  sessions: SessionRecord[],
+  requirements?: Map<string, string>,
+  commits?: SessionCommit[],
+): WorkGraph {
   const nodes: WorkNode[] = [];
   const edges: WorkEdge[] = [];
   const projects = new Map<string, WorkProject>();
@@ -182,6 +187,35 @@ export function buildWorkGraph(sessions: SessionRecord[], requirements?: Map<str
       edges.push({
         from: reqId,
         to: `project:${project.id}`,
+        kind: 'in-project',
+        evidenceKind: 'observed',
+      });
+    }
+  }
+
+  // commit 归因(session_commits 表):session --landed-in--> commit --> in-project
+  // commit 的 repo url 与 session_repos.url 一致,project id 因而对齐已有 project 节点
+  const sessionIds = new Set(sessions.map((session) => session.id));
+  for (const commit of commits ?? []) {
+    if (!sessionIds.has(commit.sessionId)) continue;
+    const nodeId = `commit:${commit.sha}`;
+    nodes.push({
+      id: nodeId,
+      kind: 'commit',
+      label: commit.summary || commit.sha.slice(0, 8),
+      sessionId: commit.sessionId,
+    });
+    edges.push({
+      from: commit.sessionId,
+      to: nodeId,
+      kind: 'landed-in',
+      evidenceKind: commit.kind === 'declared' ? 'declared' : 'candidate',
+    });
+    const projectId = projectIdOfRepo({ url: commit.repo });
+    if (projects.has(projectId)) {
+      edges.push({
+        from: nodeId,
+        to: `project:${projectId}`,
         kind: 'in-project',
         evidenceKind: 'observed',
       });
