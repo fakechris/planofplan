@@ -170,6 +170,7 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     const project = c.req.query('project')?.trim() || null;
     const query = c.req.query('q')?.trim() || '';
     const refresh = c.req.query('refresh') === '1';
+    const includeSubagents = c.req.query('subagents') === '1';
     const now = Date.now();
     const since = now - days * 86_400_000;
     const allRows = store.listSessionRows();
@@ -208,6 +209,7 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
       generatedAt: now,
       requirements,
       commits: store.listSessionCommits(),
+      includeSubagents,
     });
     return c.json({
       ...list,

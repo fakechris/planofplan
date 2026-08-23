@@ -182,6 +182,7 @@ CREATE TABLE IF NOT EXISTS session_commits (
   ts INTEGER,
   summary TEXT,
   file_overlap INTEGER NOT NULL DEFAULT 0,
+  pushed INTEGER NOT NULL DEFAULT 1,
   PRIMARY KEY (session_id, sha)
 );
 CREATE INDEX IF NOT EXISTS idx_session_commits_sha ON session_commits(sha);
@@ -297,6 +298,16 @@ export class Store {
                SET day = strftime('%Y-%m-%d', timestamp / 1000, 'unixepoch', 'localtime')
                WHERE source = 'local'`);
       db.exec('PRAGMA user_version = 1');
+    }
+    // v2:session_commits 加 pushed 列(本地未推送的 commit 不渲染远端链接)。
+    // 新库已由 SCHEMA 带上该列,ALTER 会因重复列报错——容错跳过即可。
+    if (version < 2) {
+      try {
+        db.exec('ALTER TABLE session_commits ADD COLUMN pushed INTEGER NOT NULL DEFAULT 1');
+      } catch {
+        // 列已存在(新库 SCHEMA 已含)
+      }
+      db.exec('PRAGMA user_version = 2');
     }
   }
 
@@ -1326,18 +1337,20 @@ export class Store {
   upsertSessionCommits(rows: SessionCommit[]): void {
     if (rows.length === 0) return;
     const stmt = this.db.query(
-      `INSERT INTO session_commits (session_id, repo, sha, kind, ts, summary, file_overlap)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO session_commits (session_id, repo, sha, kind, ts, summary, file_overlap, pushed)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(session_id, sha) DO UPDATE SET
          repo = excluded.repo,
          kind = excluded.kind,
          ts = excluded.ts,
          summary = excluded.summary,
-         file_overlap = excluded.file_overlap`,
+         file_overlap = excluded.file_overlap,
+         pushed = excluded.pushed`,
     );
     this.withTransaction(() => {
       for (const row of rows) {
-        stmt.run(row.sessionId, row.repo, row.sha, row.kind, row.ts, row.summary, row.fileOverlap ? 1 : 0);
+        // pushed 未知(null)按已推送存(1),维持渲染链接的旧行为
+        stmt.run(row.sessionId, row.repo, row.sha, row.kind, row.ts, row.summary, row.fileOverlap ? 1 : 0, row.pushed === false ? 0 : 1);
       }
     });
   }
@@ -1362,11 +1375,11 @@ export class Store {
   listSessionCommits(sessionId?: string): SessionCommit[] {
     const rows = sessionId
       ? this.db.query(
-          `SELECT session_id, repo, sha, kind, ts, summary, file_overlap
+          `SELECT session_id, repo, sha, kind, ts, summary, file_overlap, pushed
            FROM session_commits WHERE session_id = ? ORDER BY ts`,
         ).all(sessionId)
       : this.db.query(
-          `SELECT session_id, repo, sha, kind, ts, summary, file_overlap
+          `SELECT session_id, repo, sha, kind, ts, summary, file_overlap, pushed
            FROM session_commits ORDER BY ts`,
         ).all();
     return (rows as Array<{
@@ -1377,13 +1390,14 @@ export class Store {
       ts: number | null;
       summary: string | null;
       file_overlap: number;
+      pushed: number;
     }>).map(sessionCommitFromRow);
   }
 
   /** commit → 关联 session 反查(支持短 sha 前缀)。 */
   sessionsForCommit(sha: string): SessionCommit[] {
     const rows = this.db.query(
-      `SELECT session_id, repo, sha, kind, ts, summary, file_overlap
+      `SELECT session_id, repo, sha, kind, ts, summary, file_overlap, pushed
        FROM session_commits WHERE sha = ? OR sha LIKE ? ORDER BY ts`,
     ).all(sha, `${sha}%`) as Array<{
       session_id: string;
@@ -1393,6 +1407,7 @@ export class Store {
       ts: number | null;
       summary: string | null;
       file_overlap: number;
+      pushed: number;
     }>;
     return rows.map(sessionCommitFromRow);
   }
@@ -1494,6 +1509,7 @@ function sessionCommitFromRow(row: {
   ts: number | null;
   summary: string | null;
   file_overlap: number;
+  pushed: number;
 }): SessionCommit {
   return {
     sessionId: row.session_id,
@@ -1503,6 +1519,7 @@ function sessionCommitFromRow(row: {
     ts: row.ts,
     summary: row.summary ?? '',
     fileOverlap: row.file_overlap === 1,
+    pushed: row.pushed !== 0,
   };
 }
 

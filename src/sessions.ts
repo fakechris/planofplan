@@ -982,6 +982,8 @@ export function buildSessionList(
     generatedAt?: number;
     requirements?: Map<string, string>;
     commits?: SessionCommit[];
+    /** true 时图谱包含 subagent 派工 session(默认排除,见其「需求」是派工 prompt)。 */
+    includeSubagents?: boolean;
   },
 ): SessionList {
   const inWindow = sessions.filter((session) => (
@@ -1011,7 +1013,7 @@ export function buildSessionList(
     byProject: [...byProject.entries()]
       .map(([project, count]) => ({ project, count }))
       .sort((a, b) => b.count - a.count || a.project.localeCompare(b.project)),
-    graph: buildWorkGraph(sorted, options.requirements, options.commits),
+    graph: buildWorkGraph(sorted, options.requirements, options.commits, options.includeSubagents ?? false),
     indexedAt,
     indexStatus: 'idle',
   };

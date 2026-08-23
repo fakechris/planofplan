@@ -207,6 +207,33 @@ describe('collectSessionCommits', () => {
     expect(store.listSessionCommits()).toHaveLength(0);
   });
 
+  test('pushed 标记:remote sha 命中/未命中', async () => {
+    const store = seededStore();
+    const git = (args: string[]) => {
+      if (args.includes('--remotes')) return `${SHA_A}\n`; // 远端只有 SHA_A
+      return gitLogRaw([
+        { sha: SHA_A, iso: '2026-08-20T10:30:00.000Z', subject: 'pushed one', files: ['src/db.ts'] },
+        { sha: SHA_B, iso: '2026-08-20T10:40:00.000Z', subject: 'local only', files: ['src/db.ts'] },
+      ]);
+    };
+    await collectSessionCommits(store, { since, until, git });
+    const rows = store.listSessionCommits('claude:s1');
+    expect(rows.find((r) => r.sha === SHA_A)?.pushed).toBe(true);
+    expect(rows.find((r) => r.sha === SHA_B)?.pushed).toBe(false);
+  });
+
+  test('远端查询失败:pushed 按未知落库(读出为 true,维持渲染链接的旧行为)', async () => {
+    const store = seededStore();
+    const git = (args: string[]) => {
+      if (args.includes('--remotes')) throw new Error('no remote configured');
+      return gitLogRaw([
+        { sha: SHA_A, iso: '2026-08-20T10:30:00.000Z', subject: 'x', files: ['src/db.ts'] },
+      ]);
+    };
+    await collectSessionCommits(store, { since, until, git });
+    expect(store.listSessionCommits('claude:s1')[0]?.pushed).toBe(true);
+  });
+
   test('git: null 整环关闭', async () => {
     const store = seededStore();
     expect(await collectSessionCommits(store, { since, until, git: null })).toBe(0);

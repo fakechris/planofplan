@@ -152,3 +152,35 @@ describe('sessions schema migration', () => {
     }
   });
 });
+
+describe('subagent filtering in work graph', () => {
+  // claude 布局:subagent transcript 在 <proj>/<uuid>/subagents/agent-*.jsonl,
+  // 其「需求」是父 agent 的派工 prompt,默认不进图
+  const main = session({
+    id: 'claude:main',
+    provider: 'claude',
+    nativeId: 'main',
+    title: '用户的真实需求',
+  });
+  const sub = session({
+    id: 'claude:sub1',
+    provider: 'claude',
+    nativeId: 'sub1',
+    title: '请审查以下改动(派工 prompt)',
+    sourceFile: '/Users/x/.claude/projects/-x/main-uuid/subagents/agent-abc.jsonl',
+  });
+
+  test('默认排除 /subagents/ 路径的 session(节点+边+requirement)', () => {
+    const graph = buildWorkGraph([main, sub]);
+    const sessionNodes = graph.nodes.filter((n) => n.kind === 'session');
+    expect(sessionNodes.map((n) => n.id)).toEqual(['claude:main']);
+    expect(graph.nodes.some((n) => n.kind === 'requirement' && n.sessionId === 'claude:sub1')).toBe(false);
+    expect(graph.edges.some((e) => e.from === 'claude:sub1' || e.to.includes('sub1'))).toBe(false);
+  });
+
+  test('includeSubagents=true 时保持现状', () => {
+    const graph = buildWorkGraph([main, sub], undefined, undefined, true);
+    const sessionNodes = graph.nodes.filter((n) => n.kind === 'session');
+    expect(sessionNodes.map((n) => n.id).sort()).toEqual(['claude:main', 'claude:sub1']);
+  });
+});

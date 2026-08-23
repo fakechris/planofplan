@@ -121,6 +121,11 @@ export interface AttributeRepoOptions {
    * 时间窗 candidate,由调用方按 session 封顶。declared(trailer)不受此限。
    */
   touchedSessionIds?: Set<string>;
+  /**
+   * 远端已有(remote-tracking)的 sha 集合,用于标 pushed。null = 远端查询
+   * 失败,pushed 置 undefined(调用方按已推送存,维持旧行为)。
+   */
+  remoteShas?: Set<string> | null;
   git: GitRunner;
   graceMs?: number;
   maxCommits?: number;
@@ -150,6 +155,10 @@ export function attributeRepoCommits(options: AttributeRepoOptions): SessionComm
     return []; // git 失败/超时:跳过该 repo,不拖垮整趟扫描
   }
   const out: SessionCommit[] = [];
+  const remoteShas = options.remoteShas ?? null;
+  const pushedOf = (sha: string): boolean | undefined => (
+    remoteShas == null ? undefined : remoteShas.has(sha)
+  );
   for (const commit of parseGitLogFiles(raw)) {
     if (commit.committedAt < since || commit.committedAt > until) continue;
     const overlapOf = (session: SessionRecord): boolean => {
@@ -170,6 +179,7 @@ export function attributeRepoCommits(options: AttributeRepoOptions): SessionComm
           ts: commit.committedAt,
           summary: commit.subject,
           fileOverlap: overlapOf(session),
+          pushed: pushedOf(commit.sha),
         });
       }
       continue;
@@ -196,6 +206,7 @@ export function attributeRepoCommits(options: AttributeRepoOptions): SessionComm
         ts: commit.committedAt,
         summary: commit.subject,
         fileOverlap: overlap,
+        pushed: pushedOf(commit.sha),
       });
     }
   }
@@ -252,8 +263,23 @@ export async function collectSessionCommits(
       set.add(rel);
       touchesBySession.set(row.sessionId, set);
     }
+    // pushed 标记:每 repo 一次有界调用拿 remote-tracking 已有的 sha 集合
+    //(以本地 fetch 状态为准,近似「GitHub 上是否存在」);失败 → null →
+    // pushed 全部按未知处理,不拖垮归因
+    let remoteShas: Set<string> | null = null;
     try {
-      all.push(...attributeRepoCommits({ repo, sessions: repoSessions, touchesBySession, touchedSessionIds, git }));
+      const raw = git([
+        '-C', repo.root!,
+        'log', '--remotes', '--format=%H',
+        `--since=${new Date(since).toISOString()}`,
+        '-n', '1000',
+      ]);
+      remoteShas = new Set(raw.split('\n').map((line) => line.trim()).filter(Boolean));
+    } catch {
+      remoteShas = null;
+    }
+    try {
+      all.push(...attributeRepoCommits({ repo, sessions: repoSessions, touchesBySession, touchedSessionIds, remoteShas, git }));
     } catch {
       /* 单 repo 归因失败不拖垮整趟扫描 */
     }

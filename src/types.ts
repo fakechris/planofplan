@@ -224,6 +224,11 @@ export interface SessionCommit {
   summary: string;
   /** commit 触碰文件与 session_file_touches 有交集(candidate 里的强信号)。 */
   fileOverlap: boolean;
+  /**
+   * 是否已推送到远端(以本地 remote-tracking refs 为准)。
+   * undefined = 未知(远端查询失败,按已推送处理,维持渲染链接的旧行为)。
+   */
+  pushed?: boolean;
 }
 
 export type GitRole = 'work' | 'touch' | 'commit';

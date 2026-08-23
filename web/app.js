@@ -566,13 +566,15 @@ function commitsBlockHtml(commits) {
   const rowHtml = (commit) => {
     // ● 高置信(trailer 声明 / 文件交集),○ 纯时间窗 candidate
     const strong = commit.kind === 'declared' || commit.fileOverlap;
-    const url = commitUrl(commit.repo, commit.sha);
+    // 本地未推送的 commit 渲染远端链接必然 404:pushed === false 时只显示纯文本 sha
+    const url = commit.pushed === false ? null : commitUrl(commit.repo, commit.sha);
     const sha = escapeHtml(commit.sha.slice(0, 8));
     const shaHtml = url
       ? `<a class="attr-sha" href="${escapeHtml(url)}" target="_blank" rel="noreferrer">${sha}</a>`
-      : `<span class="attr-sha">${sha}</span>`;
+      : `<span class="attr-sha${commit.pushed === false ? ' attr-dim' : ''}">${sha}</span>`;
+    const titleSuffix = commit.pushed === false ? ' · 本地提交,未推送' : '';
     return `
-    <div class="attr-row${strong ? '' : ' attr-dim'}" title="${escapeHtml(commit.sha)} · ${escapeHtml(commit.repo)}">
+    <div class="attr-row${strong ? '' : ' attr-dim'}" title="${escapeHtml(commit.sha)} · ${escapeHtml(commit.repo)}${titleSuffix}">
       <span class="attr-dot${strong ? ' attr-dot-strong' : ''}">${strong ? '●' : '○'}</span>
       ${shaHtml}
       <span class="attr-summary">${escapeHtml(commit.summary || '(no subject)')}</span>
@@ -600,6 +602,21 @@ const GRAPH_COMMITS_PER_SESSION = 8;
 const GRAPH_NODE_GUARD = 800;
 
 let graphShowCandidates = false;
+let graphIncludeSubagents = false;
+
+// subagent 过滤在服务端(buildWorkGraph includeSubagents),切换时需带参重取
+async function refreshGraph() {
+  if (graphIncludeSubagents) {
+    try {
+      const days = document.getElementById('usageDays')?.value || '30';
+      renderGraph(await request(`/api/sessions?days=${encodeURIComponent(days)}&subagents=1`));
+      return;
+    } catch {
+      /* 失败退回缓存数据 */
+    }
+  }
+  renderGraph(latestSessions);
+}
 
 function clipLabel(text, max) {
   const s = String(text || '');
@@ -1415,7 +1432,7 @@ async function render() {
     renderSummary(latestOverview);
     renderUsage(latestUsage);
     renderSessions(latestSessions);
-    if (currentTab() === 'graph') renderGraph(latestSessions);
+    if (currentTab() === 'graph') void refreshGraph();
     maybePollSessionIndex(latestSessions);
     if (dragInFlight) return;
     const grid = document.getElementById('grid');
@@ -1568,7 +1585,7 @@ function showTab(name) {
   document.querySelectorAll('.tab-panel').forEach((panel) => {
     panel.hidden = panel.getAttribute('data-panel') !== name;
   });
-  if (name === 'graph') renderGraph(latestSessions);
+  if (name === 'graph') void refreshGraph();
 }
 
 document.getElementById('graphCandidates')?.addEventListener('change', (event) => {
@@ -1576,6 +1593,10 @@ document.getElementById('graphCandidates')?.addEventListener('change', (event) =
   renderGraph(latestSessions);
 });
 document.getElementById('graphProject')?.addEventListener('change', () => renderGraph(latestSessions));
+document.getElementById('graphSubagents')?.addEventListener('change', (event) => {
+  graphIncludeSubagents = event.target.checked;
+  void refreshGraph();
+});
 
 document.querySelectorAll('[data-tab]').forEach((btn) => {
   btn.addEventListener('click', () => showTab(btn.getAttribute('data-tab')));

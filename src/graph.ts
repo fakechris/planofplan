@@ -71,11 +71,19 @@ export function buildWorkGraph(
   sessions: SessionRecord[],
   requirements?: Map<string, string>,
   commits?: SessionCommit[],
+  includeSubagents = false,
 ): WorkGraph {
   const nodes: WorkNode[] = [];
   const edges: WorkEdge[] = [];
   const projects = new Map<string, WorkProject>();
   const counted = new Map<string, Set<string>>();
+
+  // subagent 派工 session(claude 布局:source_file 路径含 /subagents/)的
+  // 「需求」是父 agent 的派工 prompt,不是用户意图,默认不进图;其它 provider
+  // 出现类似布局时在此扩展。project 计数、requirement、commit 边同步排除。
+  const visible = includeSubagents
+    ? sessions
+    : sessions.filter((session) => !session.sourceFile?.includes('/subagents/'));
 
   const noteSession = (project: WorkProject, session: SessionRecord): void => {
     const seen = counted.get(project.id) ?? new Set<string>();
@@ -85,7 +93,7 @@ export function buildWorkGraph(
     addSessionToProject(project, session);
   };
 
-  for (const session of sessions) {
+  for (const session of visible) {
     const repos = reposOf(session);
     const work = repos.filter((repo) => repo.role === 'work');
     const touch = repos.filter((repo) => repo.role === 'touch');
@@ -195,7 +203,7 @@ export function buildWorkGraph(
 
   // commit 归因(session_commits 表):session --landed-in--> commit --> in-project
   // commit 的 repo url 与 session_repos.url 一致,project id 因而对齐已有 project 节点
-  const sessionIds = new Set(sessions.map((session) => session.id));
+  const sessionIds = new Set(visible.map((session) => session.id));
   for (const commit of commits ?? []) {
     if (!sessionIds.has(commit.sessionId)) continue;
     const nodeId = `commit:${commit.sha}`;
