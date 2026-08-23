@@ -188,6 +188,30 @@ export interface SessionIndexState {
   parserVersion: number;
 }
 
+/** session_file_touches 表行:一次工具调用对一个文件的触碰。 */
+export interface SessionFileTouch {
+  id: string;
+  sessionId: string;
+  provider: string;
+  /** 规范化后的绝对路径(能 resolve 的话)。 */
+  filePath: string;
+  toolName: string;
+  /** read / write / edit / search / …(opOfTool 归类)。 */
+  op: string;
+  ts: number | null;
+  ordinal: number;
+}
+
+/** /api/files/sessions 的聚合行:一个文件被哪些 session 碰过。 */
+export interface FileTouchSession {
+  sessionId: string;
+  provider: string;
+  title: string | null;
+  lastTs: number | null;
+  touches: number;
+  ops: string[];
+}
+
 export type GitRole = 'work' | 'touch' | 'commit';
 export type EvidenceKind = 'observed' | 'declared' | 'candidate';
 

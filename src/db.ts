@@ -1,8 +1,10 @@
 import { Database } from 'bun:sqlite';
 import type {
+  FileTouchSession,
   PlanConfig,
   PlanStateRow,
   QuotaWindow,
+  SessionFileTouch,
   SessionIndexState,
   SessionMessageHit,
   SessionMessageRow,
@@ -157,6 +159,19 @@ CREATE TABLE IF NOT EXISTS session_index_state (
   lines INTEGER NOT NULL DEFAULT 0,
   parser_version INTEGER NOT NULL DEFAULT 1
 );
+-- 文件 touch 行为层:tool_use 入参里的结构化文件路径(Bash command 不解析)。
+CREATE TABLE IF NOT EXISTS session_file_touches (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  file_path TEXT NOT NULL,
+  tool_name TEXT NOT NULL,
+  op TEXT NOT NULL,
+  ts INTEGER,
+  ordinal INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_session_file_touches_path ON session_file_touches(file_path);
+CREATE INDEX IF NOT EXISTS idx_session_file_touches_session ON session_file_touches(session_id, ordinal);
 `;
 
 interface SnapshotRow {
@@ -1157,18 +1172,14 @@ export class Store {
     this.db.query('DELETE FROM session_messages WHERE session_id = ?').run(sessionId);
   }
 
-  /** 级联删除：session 本体 + repo 归属 + 消息索引（FTS 由触发器同步）。 */
+  /** 级联删除：session 本体 + repo 归属 + 消息索引 + 文件 touch(FTS 由触发器同步）。 */
   deleteSession(id: string): void {
-    this.db.exec('BEGIN');
-    try {
+    this.withTransaction(() => {
       this.db.query('DELETE FROM session_messages WHERE session_id = ?').run(id);
+      this.db.query('DELETE FROM session_file_touches WHERE session_id = ?').run(id);
       this.db.query('DELETE FROM session_repos WHERE session_id = ?').run(id);
       this.db.query('DELETE FROM sessions WHERE id = ?').run(id);
-      this.db.exec('COMMIT');
-    } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
-    }
+    });
   }
 
   countSessionMessages(sessionId?: string): number {
@@ -1193,6 +1204,93 @@ export class Store {
       map.set(row.session_id, list);
     }
     return map;
+  }
+
+  upsertSessionTouches(rows: SessionFileTouch[]): void {
+    if (rows.length === 0) return;
+    const stmt = this.db.query(
+      `INSERT INTO session_file_touches (id, session_id, provider, file_path, tool_name, op, ts, ordinal)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         file_path = excluded.file_path,
+         tool_name = excluded.tool_name,
+         op = excluded.op,
+         ts = excluded.ts,
+         ordinal = excluded.ordinal`,
+    );
+    this.withTransaction(() => {
+      for (const row of rows) {
+        stmt.run(row.id, row.sessionId, row.provider, row.filePath, row.toolName, row.op, row.ts, row.ordinal);
+      }
+    });
+  }
+
+  deleteSessionTouches(sessionId: string): void {
+    this.db.query('DELETE FROM session_file_touches WHERE session_id = ?').run(sessionId);
+  }
+
+  /** 一个 session 的文件 touch 时间线(按 ordinal 排序,即源文件出现顺序)。 */
+  listSessionTouches(sessionId: string): SessionFileTouch[] {
+    const rows = this.db.query(
+      `SELECT id, session_id, provider, file_path, tool_name, op, ts, ordinal
+       FROM session_file_touches WHERE session_id = ? ORDER BY ordinal`,
+    ).all(sessionId) as Array<{
+      id: string;
+      session_id: string;
+      provider: string;
+      file_path: string;
+      tool_name: string;
+      op: string;
+      ts: number | null;
+      ordinal: number;
+    }>;
+    return rows.map((row) => ({
+      id: row.id,
+      sessionId: row.session_id,
+      provider: row.provider,
+      filePath: row.file_path,
+      toolName: row.tool_name,
+      op: row.op,
+      ts: row.ts,
+      ordinal: row.ordinal,
+    }));
+  }
+
+  /**
+   * 文件 → 碰过它的 session 列表(fileHistory)。精确匹配 ∪ 后缀匹配
+   * (用户可能传相对路径),按最近触碰倒排。
+   */
+  fileTouchSessions(path: string, limit = 50): FileTouchSession[] {
+    const p = path.trim();
+    if (!p) return [];
+    const suffix = `%${p.replace(/[\\%_]/g, (ch) => `\\${ch}`)}`;
+    const rows = this.db.query(
+      `SELECT t.session_id AS sessionId,
+              MAX(t.ts) AS lastTs,
+              COUNT(*) AS touches,
+              GROUP_CONCAT(DISTINCT t.op) AS ops
+       FROM session_file_touches t
+       WHERE t.file_path = ? OR t.file_path LIKE ? ESCAPE '\\'
+       GROUP BY t.session_id
+       ORDER BY lastTs DESC
+       LIMIT ?`,
+    ).all(p, suffix, limit) as Array<{
+      sessionId: string;
+      lastTs: number | null;
+      touches: number;
+      ops: string | null;
+    }>;
+    return rows.map((row) => {
+      const session = this.getSession(row.sessionId);
+      return {
+        sessionId: row.sessionId,
+        provider: session?.provider ?? 'unknown',
+        title: session?.title ?? null,
+        lastTs: row.lastTs,
+        touches: row.touches,
+        ops: (row.ops ?? '').split(',').filter(Boolean).sort(),
+      };
+    });
   }
 
   getSessionIndexState(path: string): SessionIndexState | null {

@@ -23,6 +23,7 @@ import { buildWorkGraph } from './graph.ts';
 import { repoRefOf, sessionProjectNames } from './repos.ts';
 import { attachRepos, extractSessionRepos, TOUCH_BYTES } from './session-repos.ts';
 import { messagesFromRecord, messagesFromZcodeDb } from './transcript.ts';
+import { touchesFromRecord } from './file-touches.ts';
 import type { SessionIndexState, SessionList, SessionRecord, SessionRepo } from './types.ts';
 
 /** Subset of usage collect options — kept here to avoid a usage.ts cycle. */
@@ -588,8 +589,8 @@ function yieldEventLoop(): Promise<void> {
 // 水位存 session_index_state(path → mtime/parsedBytes/lines/parserVersion)。
 // 文件只在尾部增长时从字节偏移续读;压缩文件(zstd)无法按字节续扫,整量重解。
 
-/** 消息抽取规则版本:改 messagesFromX 行为时 +1,老水位自动失效触发全量重扫。 */
-export const MESSAGE_PARSER_VERSION = 1;
+/** 消息抽取规则版本:改 messagesFromX / 加 touch 行为层时 +1,老水位自动失效触发全量重扫。 */
+export const MESSAGE_PARSER_VERSION = 2;
 const MSG_BATCH = 400;
 
 interface StreamedLine {
@@ -744,16 +745,24 @@ function indexSessionFileMessages(
     && readSize > state.parsedBytes;
   const baseLines = canAppend && state ? state.lines : 0;
   const repoRecords: unknown[] = [];
-  // 整个文件的消息写入包在一个事务里:WAL 下每次 COMMIT 都是一次 fsync,
+  // 整个文件的消息/touch 写入包在一个事务里:WAL 下每次 COMMIT 都是一次 fsync,
   // 按批提交会把活跃 session 的续扫拖慢一个数量级
   store.withTransaction(() => {
-    if (!canAppend) store.deleteSessionMessages(session.id);
+    if (!canAppend) {
+      store.deleteSessionMessages(session.id);
+      store.deleteSessionTouches(session.id);
+    }
     const r = streamJsonlFrom(readPath, canAppend && state ? state.parsedBytes : 0, baseLines, (lines) => {
       const messages = lines.flatMap(({ record, line }) => (
         messagesFromRecord(session.provider, session.id, record, line)
       ));
+      // 同趟 parse 顺手产出文件 touch(从原始入参对象取,不受 text 截断影响)
+      const touches = lines.flatMap(({ record, line }) => (
+        touchesFromRecord(session.provider, session.id, record, line, session.cwd)
+      ));
       try {
         store.upsertSessionMessages(messages);
+        store.upsertSessionTouches(touches);
       } catch {
         /* 单批写入失败不拖垮整趟目录扫描 */
       }

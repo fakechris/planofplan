@@ -223,6 +223,21 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     return c.json(await readTranscript(session));
   });
 
+  // 文件 → 碰过它的 session(obelisk fileHistory 的对应物)
+  app.get('/api/files/sessions', (c) => {
+    const path = c.req.query('path')?.trim() ?? '';
+    if (!path) return c.json({ ok: false, error: 'path is required' }, 400);
+    return c.json({ path, sessions: store.fileTouchSessions(path) });
+  });
+
+  // session → 它碰过的文件时间线
+  app.get('/api/sessions/:provider/:id/touches', (c) => {
+    const sessionId = `${c.req.param('provider')}:${c.req.param('id')}`;
+    const session = store.getSession(sessionId);
+    if (!session) return c.json({ ok: false, error: 'unknown session' }, 404);
+    return c.json({ sessionId, touches: store.listSessionTouches(sessionId) });
+  });
+
   app.post('/api/sessions/:id/resume', (c) => {
     const id = decodeURIComponent(c.req.param('id'));
     const session = store.getSession(id);
