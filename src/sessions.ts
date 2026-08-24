@@ -35,6 +35,7 @@ import {
   classifySessionPath,
 } from './session-origin.ts';
 import { claudeParentOfPath, materializeSessionLinks } from './session-links.ts';
+import { materializeRequirements } from './requirements.ts';
 import type { SessionCommit, SessionIndexState, SessionList, SessionRecord, SessionRepo } from './types.ts';
 
 /** Subset of usage collect options — kept here to avoid a usage.ts cycle. */
@@ -943,6 +944,13 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
   } catch {
     /* launch link materialization is best-effort */
   }
+  // 需求实体物化(IA 第三步):user 消息流规则抽取 + span 级项目归因,
+  // 全量重导,确定性 id,幂等
+  try {
+    materializeRequirements(store);
+  } catch {
+    /* requirement materialization is best-effort */
+  }
   return scanned;
 }
 
@@ -1046,6 +1054,8 @@ export function buildSessionList(
     until: number;
     generatedAt?: number;
     requirements?: Map<string, string>;
+    /** requirement 的 §1.5 origin 分级(图谱节点着色)。 */
+    requirementLevels?: Map<string, string>;
     commits?: SessionCommit[];
     /** true 时图谱包含 subagent 派工 session(默认排除,见其「需求」是派工 prompt)。 */
     includeSubagents?: boolean;
@@ -1078,7 +1088,13 @@ export function buildSessionList(
     byProject: [...byProject.entries()]
       .map(([project, count]) => ({ project, count }))
       .sort((a, b) => b.count - a.count || a.project.localeCompare(b.project)),
-    graph: buildWorkGraph(sorted, options.requirements, options.commits, options.includeSubagents ?? false),
+    graph: buildWorkGraph(
+      sorted,
+      options.requirements,
+      options.commits,
+      options.includeSubagents ?? false,
+      options.requirementLevels,
+    ),
     indexedAt,
     indexStatus: 'idle',
   };

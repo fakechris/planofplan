@@ -743,11 +743,72 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         ensureDaemon()
         refreshOverview()
+        offerAutoLaunchIfNeeded()
         pollTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refreshOverview() }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             self?.startSafariPermissionOnboardingIfNeeded()
+        }
+    }
+
+    /// 首次启动：若 LaunchAgent 还没装，弹窗问用户要不要开机自启。
+    /// 用户回答过（包括拒绝）就只问一次，记在 UserDefaults。
+    private func offerAutoLaunchIfNeeded() {
+        let plistPath = "\(NSHomeDirectory())/Library/LaunchAgents/local.planofplan.daemon.plist"
+        if FileManager.default.fileExists(atPath: plistPath) { return }
+        if UserDefaults.standard.bool(forKey: "planofplan.autoLaunchOffered") { return }
+        UserDefaults.standard.set(true, forKey: "planofplan.autoLaunchOffered")
+
+        let alert = NSAlert()
+        alert.messageText = "登录时自动启动 planofplan？"
+        alert.informativeText = "开启后崩溃/重启会自动拉起 daemon（launchd 守护）。Dashboard 顶部的「开机自启」开关可随时关闭。"
+        alert.addButton(withTitle: "开启")
+        alert.addButton(withTitle: "暂不")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        installLaunchAgent(plistPath: plistPath)
+    }
+
+    private func installLaunchAgent(plistPath: String) {
+        let logPath = "\(NSHomeDirectory())/.planofplan/serve.log"
+        let plist = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+          <key>Label</key>
+          <string>local.planofplan.daemon</string>
+          <key>ProgramArguments</key>
+          <array>
+            <string>/Applications/planofplan.app/Contents/MacOS/planofplan-daemon</string>
+            <string>serve</string>
+            <string>--port</string>
+            <string>\(port)</string>
+          </array>
+          <key>RunAtLoad</key>
+          <true/>
+          <key>KeepAlive</key>
+          <true/>
+          <key>ThrottleInterval</key>
+          <integer>10</integer>
+          <key>StandardOutPath</key>
+          <string>\(logPath)</string>
+          <key>StandardErrorPath</key>
+          <string>\(logPath)</string>
+        </dict>
+        </plist>
+        """
+        do {
+            let launchAgentsDir = "\(NSHomeDirectory())/Library/LaunchAgents"
+            try FileManager.default.createDirectory(atPath: launchAgentsDir, withIntermediateDirectories: true)
+            try plist.write(toFile: plistPath, atomically: true, encoding: .utf8)
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+            task.arguments = ["bootstrap", "gui/\(getuid())", plistPath]
+            try task.run()
+            task.waitUntilExit()
+        } catch {
+            NSLog("planofplan: failed to install LaunchAgent: \(error)")
         }
     }
 
@@ -912,23 +973,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func startDaemon() {
         guard daemon == nil || daemon?.isRunning == false else { return }
-        guard let bun = findExecutable(
-            candidates: [
-                ProcessInfo.processInfo.environment["PLANOFPLAN_BUN_PATH"],
-                ProcessInfo.processInfo.environment["BUN_INSTALL"].map { "\($0)/bin/bun" },
-                "\(NSHomeDirectory())/.bun/bin/bun",
-                "/opt/homebrew/bin/bun",
-                "/usr/local/bin/bun",
-            ]
-        ) else {
-            NSLog("planofplan: Bun not found; set PLANOFPLAN_BUN_PATH")
+        let binary = bundleDaemonURL()
+        guard FileManager.default.isExecutableFile(atPath: binary.path) else {
+            NSLog("planofplan: bundled daemon missing at \(binary.path)")
             return
         }
 
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: bun)
-        process.arguments = ["src/cli.ts", "serve", "--port", String(port)]
-        process.currentDirectoryURL = URL(fileURLWithPath: projectRoot())
+        process.executableURL = binary
+        process.arguments = ["serve", "--port", String(port)]
         var environment = ProcessInfo.processInfo.environment
         environment["PLANOFPPLAN_BUILD_COMMIT"] = buildMetadata.commitSHA
         environment["PLANOFPPLAN_BUILD_SHORT"] = buildMetadata.shortCommitSHA
@@ -946,8 +999,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.refreshOverview()
             }
         } catch {
-            NSLog("planofplan: failed to start Bun daemon: \(error)")
+            NSLog("planofplan: failed to start bundled daemon: \(error)")
         }
+    }
+
+    /// Path to the standalone daemon compiled into the bundle by build-menubar.sh.
+    /// Falls back to the installed app location for dev runs outside /Applications.
+    private func bundleDaemonURL() -> URL {
+        if let url = Bundle.main.url(forResource: "planofplan-daemon", withExtension: nil, subdirectory: "MacOS") {
+            return url
+        }
+        return URL(fileURLWithPath: "/Applications/planofplan.app/Contents/MacOS/planofplan-daemon")
     }
 
     private func findExecutable(candidates: [String?]) -> String? {
@@ -955,15 +1017,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return candidate
         }
         return nil
-    }
-
-    private func projectRoot() -> String {
-        if let file = Bundle.main.url(forResource: "project-root", withExtension: nil),
-           let root = try? String(contentsOf: file, encoding: .utf8)
-        {
-            return root.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        return ProcessInfo.processInfo.environment["PLANOFPPLAN_ROOT"] ?? FileManager.default.currentDirectoryPath
     }
 
     private func configuredPort() -> Int {

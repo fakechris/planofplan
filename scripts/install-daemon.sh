@@ -22,10 +22,11 @@ cat > "$PLIST" <<EOF
   <string>$LABEL</string>
   <key>ProgramArguments</key>
   <array>
-    <string>$ROOT/scripts/daemon-entry.sh</string>
+    <string>/Applications/planofplan.app/Contents/MacOS/planofplan-daemon</string>
+    <string>serve</string>
+    <string>--port</string>
+    <string>$PORT</string>
   </array>
-  <key>WorkingDirectory</key>
-  <string>$ROOT</string>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>

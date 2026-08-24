@@ -60,6 +60,10 @@ STAGED_APP="$STAGING_ROOT/planofplan.app"
 
 swift build --package-path "$PACKAGE" -c release
 
+# Compile the Bun daemon into the bundle as a standalone executable. No runtime
+# dependency on bun or the source checkout — the .app becomes portable.
+( cd "$ROOT" && bun build --compile src/cli.ts --outfile "$STAGED_APP/Contents/MacOS/planofplan-daemon" )
+
 mkdir -p "$STAGED_APP/Contents/MacOS" "$STAGED_APP/Contents/Resources"
 cp "$PACKAGE/.build/arm64-apple-macosx/release/PlanofplanMenuBar" "$STAGED_APP/Contents/MacOS/PlanofplanMenuBar"
 cp "$PACKAGE/Info.plist" "$STAGED_APP/Contents/Info.plist"
@@ -69,7 +73,6 @@ fi
 /usr/libexec/PlistBuddy -c "Set :PlanofplanCommitSHA $COMMIT_SHA" "$STAGED_APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :PlanofplanCommitShortSHA $SHORT_COMMIT_SHA" "$STAGED_APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :PlanofplanBuildTimestamp $BUILD_TIMESTAMP" "$STAGED_APP/Contents/Info.plist"
-printf '%s\n' "$ROOT" > "$STAGED_APP/Contents/Resources/project-root"
 printf '%s\n' "${PLANOFPPLAN_MENUBAR_PORT:-9291}" > "$STAGED_APP/Contents/Resources/port"
 
 if ! codesign --force --sign "$IDENTITY" --identifier "$IDENTIFIER" --timestamp=none "$STAGED_APP"; then

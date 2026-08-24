@@ -13,8 +13,8 @@ import { getBuildInfo } from './build-info.ts';
 import { buildUsageReport } from './usage.ts';
 import { buildSessionList, searchSessions } from './sessions.ts';
 import { pickRequirement } from './motivation.ts';
-import { sessionProjectNames } from './repos.ts';
-import type { ProjectAgentStat, ProjectListItem } from './types.ts';
+import { nameOfUrl, sessionProjectNames } from './repos.ts';
+import type { ProjectAgentStat, ProjectListItem, RequirementRecord } from './types.ts';
 import { readTranscript } from './transcript.ts';
 import { launchResume } from './resume.ts';
 import { getStartupSettings, setLaunchOnStartup } from './startup.ts';
@@ -196,19 +196,30 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
       }
       rows = matched.map((row) => ({ ...row, messageHit: hitBySession.get(row.id) ?? null }));
     }
-    // 动机抽取 v2:从消息流抽需求,替代 head 解析的 title(含 meta 信封噪音)
+    // 需求(§1.5 实体化):user session 读 requirements 表(首条,显式
+    // 优先,带 origin 分级);非 user(subagent 派工 prompt 等)保持消息流
+    // 现场抽取——它们不建实体,但列表行还要展示
+    const firstRequirements = store.firstRequirementBySession();
     const userTexts = store.listSessionUserTexts();
     const requirements = new Map<string, string>();
-    for (const session of rows) {
-      const requirement = pickRequirement(userTexts.get(session.id) ?? []);
-      if (requirement) requirements.set(session.id, requirement);
-    }
-    rows = rows.map((row) => ({ ...row, requirement: requirements.get(row.id) ?? null }));
+    const requirementLevels = new Map<string, string>();
+    rows = rows.map((row) => {
+      const fromStore = firstRequirements.get(row.id);
+      if (fromStore) {
+        requirements.set(row.id, fromStore.text);
+        requirementLevels.set(row.id, fromStore.originLevel);
+        return { ...row, requirement: fromStore.text };
+      }
+      const text = pickRequirement(userTexts.get(row.id) ?? []);
+      if (text) requirements.set(row.id, text);
+      return { ...row, requirement: text ?? null };
+    });
     const list = buildSessionList(rows, {
       since,
       until: now,
       generatedAt: now,
       requirements,
+      requirementLevels,
       commits: store.listSessionCommits(),
       includeSubagents,
     });
@@ -293,6 +304,7 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     project: { id: string; url: string; name: string; root: string | null; createdAt: number; lastSeenAt: number },
     agg: { sessions: Set<string>; userSessions: Set<string>; agents: Map<string, ProjectAgentStat>; lastActive: number } | undefined,
     commitCount: number,
+    requirementCount: number | null,
   ): ProjectListItem => ({
     ...project,
     sessionCount: agg?.sessions.size ?? 0,
@@ -300,7 +312,7 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     agents: [...(agg?.agents.values() ?? [])].sort((a, b) => b.sessions - a.sessions || a.provider.localeCompare(b.provider)),
     lastActive: agg?.lastActive || null,
     commitCount,
-    requirementCount: null, // 预留字段,v1 不算
+    requirementCount,
   });
 
   app.get('/api/projects', (c) => {
@@ -309,8 +321,9 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     const since = now - days * 86_400_000;
     const aggregates = projectAggregates(since, now);
     const commitCounts = store.projectCommitCounts(since);
+    const requirementCounts = store.projectRequirementCounts(since);
     const projects = store.listProjects()
-      .map((project) => toListItem(project, aggregates.get(project.url), commitCounts.get(project.url) ?? 0))
+      .map((project) => toListItem(project, aggregates.get(project.url), commitCounts.get(project.url) ?? 0, requirementCounts.get(project.url) ?? 0))
       .sort((a, b) => (b.lastActive ?? 0) - (a.lastActive ?? 0) || b.sessionCount - a.sessionCount);
     return c.json({ days, since, until: now, projects });
   });
@@ -334,7 +347,7 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     const aggregates = projectAggregates(since, now);
     const commitCounts = store.projectCommitCounts(since);
     return c.json({
-      ...toListItem(project, aggregates.get(project.url), commitCounts.get(project.url) ?? 0),
+      ...toListItem(project, aggregates.get(project.url), commitCounts.get(project.url) ?? 0, requirements.length),
       sessions,
       requirements,
       commits: store.projectCommits(project.url, since),
@@ -358,6 +371,117 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     const session = store.getSession(sessionId);
     if (!session) return c.json({ ok: false, error: 'unknown session' }, 404);
     return c.json({ sessionId, ...store.linksForSession(sessionId) });
+  });
+
+  // ── 需求实体(ia-redesign §1.5 / §2.3)──────────────────────────
+
+  app.get('/api/requirements', (c) => {
+    const days = Math.min(365, Math.max(1, Number(c.req.query('days') ?? 30) || 30));
+    const project = c.req.query('project')?.trim() || null;
+    const provider = c.req.query('provider')?.trim() || null;
+    const level = c.req.query('level')?.trim() || null;
+    const now = Date.now();
+    const since = now - days * 86_400_000;
+    const sessions = new Map(store.listSessionRows().map((row) => [row.id, row]));
+    interface Item extends RequirementRecord {
+      provider: string;
+      updatedAt: number;
+      repoNames: string[];
+    }
+    const items: Item[] = [];
+    for (const req of store.listRequirements()) {
+      const session = sessions.get(req.sessionId);
+      if (!session) continue; // 悬空(session 被清)防御
+      const ts = req.ts ?? session.updatedAt;
+      if (ts < since || ts >= now) continue;
+      items.push({
+        ...req,
+        provider: session.provider,
+        updatedAt: session.updatedAt,
+        repoNames: req.repos.map((url) => nameOfUrl(url)),
+      });
+    }
+    // facet 惯例(c8ed083):各维度计数互不吃对方的选择
+    const byProvider = new Map<string, number>();
+    const byLevel = new Map<string, number>();
+    const sortDesc = (a: [string, number], b: [string, number]) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0]));
+    const projectFacetSource = items
+      .filter((item) => (!provider || item.provider === provider) && (!level || item.originLevel === level));
+    const providerFacetSource = items
+      .filter((item) => (!project || item.repoNames.includes(project)) && (!level || item.originLevel === level));
+    const levelFacetSource = items
+      .filter((item) => (!project || item.repoNames.includes(project)) && (!provider || item.provider === provider));
+    const projectCounts = new Map<string, number>();
+    for (const item of projectFacetSource) for (const name of item.repoNames) projectCounts.set(name, (projectCounts.get(name) ?? 0) + 1);
+    for (const item of providerFacetSource) byProvider.set(item.provider, (byProvider.get(item.provider) ?? 0) + 1);
+    for (const item of levelFacetSource) byLevel.set(item.originLevel, (byLevel.get(item.originLevel) ?? 0) + 1);
+    const filtered = items.filter((item) => (
+      (!project || item.repoNames.includes(project))
+      && (!provider || item.provider === provider)
+      && (!level || item.originLevel === level)
+    )).sort((a, b) => (b.ts ?? b.updatedAt) - (a.ts ?? a.updatedAt));
+    return c.json({
+      days,
+      since,
+      until: now,
+      requirements: filtered,
+      byProject: [...projectCounts.entries()].sort(sortDesc).map(([name, count]) => ({ name, count })),
+      byProvider: [...byProvider.entries()].sort(sortDesc).map(([name, count]) => ({ name, count })),
+      byLevel: [...byLevel.entries()].sort(sortDesc).map(([name, count]) => ({ name, count })),
+    });
+  });
+
+  app.get('/api/requirements/:id', (c) => {
+    const id = c.req.param('id');
+    const req = store.requirementById(id);
+    if (!req) return c.json({ ok: false, error: 'unknown requirement' }, 404);
+    const session = store.getSession(req.sessionId);
+    if (!session) return c.json({ ok: false, error: 'session missing' }, 404);
+    // span:本条需求 seq → 下一条需求 seq(推断退化实体 seq=-1 → 覆盖全 session)
+    const sameSession = store.listRequirements()
+      .filter((row) => row.sessionId === req.sessionId && row.seq > req.seq)
+      .sort((a, b) => a.seq - b.seq);
+    const next = sameSession[0] ?? null;
+    const fromSeq = req.seq >= 0 ? req.seq : 0;
+    const touches = store.spanTouches(req.sessionId, fromSeq, next ? next.seq : null);
+    const files = new Map<string, { path: string; ops: Set<string>; count: number; lastTs: number | null }>();
+    for (const touch of touches) {
+      const entry = files.get(touch.filePath) ?? { path: touch.filePath, ops: new Set<string>(), count: 0, lastTs: null };
+      entry.ops.add(touch.op);
+      entry.count += 1;
+      if (touch.ts != null && (entry.lastTs == null || touch.ts > entry.lastTs)) entry.lastTs = touch.ts;
+      files.set(touch.filePath, entry);
+    }
+    const fileList = [...files.values()]
+      .sort((a, b) => b.count - a.count || a.path.localeCompare(b.path))
+      .slice(0, 30)
+      .map((entry) => ({ path: entry.path, ops: [...entry.ops], count: entry.count }));
+    // span 内 commit:ts 落在本条需求与下一条需求之间
+    const fromTs = req.ts ?? session.startedAt ?? session.updatedAt;
+    const toTs = next?.ts ?? Number.POSITIVE_INFINITY;
+    const commits = store.listSessionCommits(req.sessionId)
+      .filter((commit) => commit.ts != null && commit.ts >= fromTs && commit.ts < toTs)
+      .map((commit) => ({
+        sha: commit.sha,
+        summary: commit.summary,
+        kind: commit.kind,
+        pushed: commit.pushed,
+        ts: commit.ts,
+      }));
+    return c.json({
+      requirement: { ...req, repoNames: req.repos.map((url) => nameOfUrl(url)) },
+      session: {
+        id: session.id,
+        provider: session.provider,
+        title: session.title,
+        cwd: session.cwd,
+        updatedAt: session.updatedAt,
+      },
+      files,
+      filesTop: fileList,
+      commits,
+      nextRequirementId: next?.id ?? null,
+    });
   });
 
   app.post('/api/sessions/:id/resume', (c) => {

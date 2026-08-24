@@ -6,6 +6,7 @@ import type {
   PlanStateRow,
   Project,
   QuotaWindow,
+  RequirementRecord,
   SessionCommit,
   SessionFileTouch,
   SessionLink,
@@ -23,6 +24,7 @@ import { buildUsageReport } from './usage.ts';
 import { nameOfUrl } from './repos.ts';
 import { isKnownEnvelope } from './motivation.ts';
 import { backfillLaunchLinks } from './session-links.ts';
+import { materializeRequirements } from './requirements.ts';
 
 /** projects.id:url 的确定性短 hash(sha1 前 12 位)。无 remote 的 repo 用
  *  root path 做输入(dsh-track 同款退化),同输入必得同 id,物化幂等。 */
@@ -224,6 +226,26 @@ CREATE TABLE IF NOT EXISTS session_links (
   PRIMARY KEY (from_session, to_session, kind)
 );
 CREATE INDEX IF NOT EXISTS idx_session_links_to ON session_links(to_session, kind);
+-- 需求实体(ia-redesign §1.5):从 user 消息流规则抽取,origin 分级 + span
+-- 级项目归因(requirement_repos,证据窗口内实际碰的 repo)。
+CREATE TABLE IF NOT EXISTS requirements (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  text TEXT NOT NULL,
+  origin_level TEXT NOT NULL,
+  ts INTEGER,
+  created_at INTEGER NOT NULL,
+  UNIQUE (session_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_requirements_session ON requirements(session_id);
+CREATE INDEX IF NOT EXISTS idx_requirements_ts ON requirements(ts);
+CREATE TABLE IF NOT EXISTS requirement_repos (
+  requirement_id TEXT NOT NULL,
+  url TEXT NOT NULL,
+  PRIMARY KEY (requirement_id, url)
+);
+CREATE INDEX IF NOT EXISTS idx_requirement_repos_url ON requirement_repos(url);
 `;
 
 interface SnapshotRow {
@@ -375,6 +397,12 @@ export class Store {
       }
       backfillLaunchLinks(this);
       db.exec('PRAGMA user_version = 6');
+    }
+    // v7:Requirement 实体。表结构由 SCHEMA 建好;backfill 从已索引的
+    // session_messages / file_touches / session_repos 全量重导(幂等)。
+    if (version < 7) {
+      materializeRequirements(this);
+      db.exec('PRAGMA user_version = 7');
     }
   }
 
@@ -1586,6 +1614,8 @@ export class Store {
       this.db.query('DELETE FROM session_file_touches WHERE session_id = ?').run(id);
       this.db.query('DELETE FROM session_commits WHERE session_id = ?').run(id);
       this.db.query('DELETE FROM session_links WHERE from_session = ? OR to_session = ?').run(id, id);
+      this.db.query('DELETE FROM requirement_repos WHERE requirement_id IN (SELECT id FROM requirements WHERE session_id = ?)').run(id);
+      this.db.query('DELETE FROM requirements WHERE session_id = ?').run(id);
       this.db.query('DELETE FROM session_repos WHERE session_id = ?').run(id);
       this.db.query('DELETE FROM sessions WHERE id = ?').run(id);
     });
@@ -1613,6 +1643,115 @@ export class Store {
       map.set(row.session_id, list);
     }
     return map;
+  }
+
+  /** 全部用户消息行(seq 升序,带时间戳),需求实体推导的原料。 */
+  listUserMessageRows(): Array<{ sessionId: string; seq: number; ts: number | null; text: string }> {
+    return this.db.query(
+      `SELECT session_id AS sessionId, seq, timestamp AS ts, text
+       FROM session_messages
+       WHERE role = 'user' AND kind = 'text' AND text IS NOT NULL
+       ORDER BY session_id, seq`,
+    ).all() as Array<{ sessionId: string; seq: number; ts: number | null; text: string }>;
+  }
+
+  /** 需求物化专用:全量替换(确定性 id,重导即幂等)。 */
+  replaceAllRequirements(rows: RequirementRecord[]): void {
+    this.withTransaction(() => {
+      this.db.query('DELETE FROM requirement_repos').run();
+      this.db.query('DELETE FROM requirements').run();
+      const req = this.db.query(
+        `INSERT INTO requirements (id, session_id, seq, text, origin_level, ts, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      );
+      const repo = this.db.query('INSERT INTO requirement_repos (requirement_id, url) VALUES (?, ?)');
+      const now = Date.now();
+      for (const row of rows) {
+        req.run(row.id, row.sessionId, row.seq, row.text, row.originLevel, row.ts, now);
+        for (const url of row.repos) repo.run(row.id, url);
+      }
+    });
+  }
+
+  listRequirements(): RequirementRecord[] {
+    const rows = this.db.query(
+      `SELECT r.id, r.session_id, r.seq, r.text, r.origin_level, r.ts
+       FROM requirements r
+       ORDER BY r.session_id, r.seq`,
+    ).all() as Array<{ id: string; session_id: string; seq: number; text: string; origin_level: string; ts: number | null }>;
+    if (rows.length === 0) return [];
+    const repoRows = this.db.query('SELECT requirement_id, url FROM requirement_repos').all() as Array<{
+      requirement_id: string;
+      url: string;
+    }>;
+    const repos = new Map<string, string[]>();
+    for (const row of repoRows) {
+      const list = repos.get(row.requirement_id) ?? [];
+      list.push(row.url);
+      repos.set(row.requirement_id, list);
+    }
+    return rows.map((row) => ({
+      id: row.id,
+      sessionId: row.session_id,
+      seq: row.seq,
+      text: row.text,
+      originLevel: row.origin_level === 'user_explicit' ? 'user_explicit' : 'system_inferred',
+      ts: row.ts,
+      repos: repos.get(row.id) ?? [],
+    }));
+  }
+
+  requirementById(id: string): RequirementRecord | null {
+    return this.listRequirements().find((row) => row.id === id) ?? null;
+  }
+
+  /** 每 session 的首条需求(显式优先):/api/sessions requirement 字段的数据源。 */
+  firstRequirementBySession(): Map<string, RequirementRecord> {
+    const map = new Map<string, RequirementRecord>();
+    for (const row of this.listRequirements()) {
+      if (!map.has(row.sessionId)) map.set(row.sessionId, row);
+    }
+    return map;
+  }
+
+  /** 项目 → 窗口内需求数(去重,按 span 归因的 repo url 聚合)。 */
+  projectRequirementCounts(since: number): Map<string, number> {
+    const rows = this.db.query(
+      `SELECT rr.url AS url, COUNT(DISTINCT r.id) AS n
+       FROM requirement_repos rr
+       JOIN requirements r ON r.id = rr.requirement_id
+       WHERE COALESCE(r.ts, r.created_at) >= ?
+       GROUP BY rr.url`,
+    ).all(since) as Array<{ url: string; n: number }>;
+    return new Map(rows.map((row) => [row.url, row.n]));
+  }
+
+  /** span 内的 touch 行(需求详情的证据窗口)。ordinal 与消息 seq 同空间。 */
+  spanTouches(sessionId: string, fromSeq: number, toSeqExclusive: number | null): Array<{
+    filePath: string;
+    toolName: string;
+    op: string;
+    ts: number | null;
+    ordinal: number;
+  }> {
+    const from = fromSeq * 1000;
+    const to = toSeqExclusive == null ? Number.POSITIVE_INFINITY : toSeqExclusive * 1000;
+    const rows = toSeqExclusive == null
+      ? this.db.query(
+        `SELECT file_path, tool_name, op, ts, ordinal FROM session_file_touches
+         WHERE session_id = ? AND ordinal >= ? ORDER BY ordinal`,
+      ).all(sessionId, from)
+      : this.db.query(
+        `SELECT file_path, tool_name, op, ts, ordinal FROM session_file_touches
+         WHERE session_id = ? AND ordinal >= ? AND ordinal < ? ORDER BY ordinal`,
+      ).all(sessionId, from, to);
+    return (rows as Array<{ file_path: string; tool_name: string; op: string; ts: number | null; ordinal: number }>).map((row) => ({
+      filePath: row.file_path,
+      toolName: row.tool_name,
+      op: row.op,
+      ts: row.ts,
+      ordinal: row.ordinal,
+    }));
   }
 
   upsertSessionTouches(rows: SessionFileTouch[]): void {
