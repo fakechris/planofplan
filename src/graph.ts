@@ -164,8 +164,10 @@ export function buildWorkGraph(
       });
     }
 
-    // 需求文本:优先消息流抽取(motivation v2),没有再退回 head 解析的 title
-    const text = requirements?.get(session.id)?.trim() || session.title?.trim();
+    // 需求文本:只认需求层(user 会话来自 requirements 实体表,subagent
+    // 视图来自派工 prompt 现场抽取)。不再退回 title——title 取自首条
+    // 消息,派工/注入类消息的 title 会把已清理的噪音又带回图谱
+    const text = requirements?.get(session.id)?.trim();
     if (!text) continue;
     const reqId = `req:${session.id}`;
     const touchProject = touch[0];

@@ -90,7 +90,20 @@ describe('work graph and search', () => {
         gitUrl: '/tmp/other',
       }),
     ];
-    const graph = buildWorkGraph(sessions);
+    // 需求节点只认需求层输入(实体表/派工抽取),title 不再兜底;需求挂到
+    // project 需要 touch repos(此前 fixture 缺失,是该测试 pre-existing
+    // 失败的真因)
+    const graph = buildWorkGraph(sessions.map((row) => (row.gitUrl === 'https://example.com/planofplan.git'
+      ? {
+          ...row,
+          repos: [{
+            sessionId: row.id, role: 'touch', url: row.gitUrl, root: row.gitRoot ?? '', name: row.gitName ?? '', evidenceKind: 'observed' as const,
+          }],
+        }
+      : row)), new Map([
+      ['grok:1', '修 Resume PATH'],
+      ['codex:2', '做 session 搜索'],
+    ]));
     expect(graph.projects[0]?.name).toBe('planofplan');
     expect(graph.projects[0]?.sessionCount).toBe(2);
     expect(graph.projects[0]?.requirements.map((row) => row.text).sort()).toEqual([

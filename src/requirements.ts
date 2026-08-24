@@ -25,6 +25,9 @@ export type RequirementOriginLevel = 'user_explicit' | 'system_inferred';
 /** 实体文本上限:存原话(详情页要高亮展示),超长截断;列表展示层再截。 */
 const TEXT_MAX = 2000;
 
+/** 推断退化(title)时跳过的占位标题。 */
+const PLACEHOLDER_TITLES = new Set(['new session', 'untitled', 'no title', '(no title)', '无标题']);
+
 // 执行步骤类:本身不是需求,是「怎么做」。短消息才按 directive 处理,
 // 长消息即使以这些词开头也更可能是带上下文的真实需求。
 const DIRECTIVE_RE = /^(?:继续|接着|再来一次|重试|重启|重新启动|部署|上线|发布|装(?:个|一下)?依赖|安装依赖|跑(?:一下)?测试|commit\b|push\b|merge\b|rebase\b|git\s+(?:add|commit|push|checkout|stash|rebase)|npm\s+(?:i|install)|bun\s+i|pip\s+install|run\s+tests?|restart\b|retry\b|开个?pr|发个?pr|提个?pr|(?:请你?)?开始(?:运行|执行))/i;
@@ -38,14 +41,46 @@ const PASTE_PATH_RE = /^(?:\/|[\w.-]+\/)[\w./~+-]*\.[A-Za-z0-9]{1,8}$/;
 // 工具/传输注入:zcode 等把系统提醒写进 user 消息流(实测 30 天 442 条),
 // 以及连接失败的错误回显。
 const TOOL_REMINDER_RE = /^The Todo(?:Write)? tool hasn't been used/i;
-const ERROR_ECHO_RE = /^(?:Unable to establish|API Error\b|Error:)/i;
+const ERROR_ECHO_RE = /^(?:Unable to establish|API Error\b|Error:|The AI model timed out|This site can)/i;
+// 运行时信封/通知(英文侧):claude/dsh 把 hook 激活、后台任务、限流、安全
+// review 注入、会话续接摘要等写进 user 消息流。真实库 top 前缀扫描,
+// 仅 Warning 一类就有 1533 条。
+const ENVELOPE_EN_RE = new RegExp(
+  '^(?:'
+  + 'Warning:'
+  + '|Background task (?:completed|failed|error)'
+  + '|Request (?:cancel{1,2}ed|interrupted)\\b'
+  + '|Skill tool load'
+  + "|You've reached"
+  + '|Your credit li'
+  + '|Called the \\w+ tool'
+  + '|Base directory'
+  + '|A session-scoped \\S+ hook is now active'
+  + '|This session is being continued'
+  + '|The user sent a message while you were working'
+  + '|Review (?:this|the|these) changes?'
+  + ')',
+  'i',
+);
+// 派工/人格设定 prompt(agent 间,不是用户需求):中文「你是…」(疑问句
+// 「你是…吗?」是真实提问,放行)、「作为一名/个…」;英文 "You are a/
+// the/researching…"。
+const DISPATCH_EN_RE = /^You are (?:a|an|the)\b|^You are (?:researching|tasked|acting)/i;
+const CAPTURE_TOOL_RE = /^用 capture_thought/;
 
 /** 单条用户消息的意图(v1 规则)。 */
 export function classifyMessageIntent(text: string): MessageIntent {
   const trimmed = text.trim();
   if (!trimmed || isShortAck(trimmed) || isMetaEnvelope(trimmed)) return 'noise';
   if (PASTE_HEADING_RE.test(trimmed) || PASTE_PATH_RE.test(trimmed)) return 'noise';
+  if (/^[-*•]\s/.test(trimmed)) return 'noise'; // 列表粘贴(命令输出/文档片段)
   if (TOOL_REMINDER_RE.test(trimmed) || ERROR_ECHO_RE.test(trimmed)) return 'noise';
+  if (ENVELOPE_EN_RE.test(trimmed)) return 'noise';
+  if (CAPTURE_TOOL_RE.test(trimmed)) return 'noise';
+  const firstLine = trimmed.split('\n')[0] ?? trimmed;
+  if (/^你是/.test(firstLine) && !/[吗?？]\s*$/.test(firstLine)) return 'noise';
+  if (/^作为一?[名个位]/.test(firstLine)) return 'noise';
+  if (DISPATCH_EN_RE.test(firstLine)) return 'noise';
   if (INTERRUPTION_RE.test(trimmed) && trimmed.length <= DIRECTIVE_MAX_LEN * 2) return 'interruption';
   if (DIRECTIVE_RE.test(trimmed) && trimmed.length <= DIRECTIVE_MAX_LEN) return 'directive';
   return 'requirement';
@@ -88,7 +123,11 @@ export function deriveSessionRequirements(
   }
   if (explicit.length > 0) return explicit;
   const title = session.title?.trim();
-  if (!title) return [];
+  // 占位标题(factory 的 'New Session' 等)不值得当需求,宁缺毋滥;
+  // title 本身取自首条用户消息——派工/注入类消息的 title 同样是噪音,
+  // 推断退化也必须过分类器,否则泄漏会借 title 复活(实测 56 条)
+  if (!title || PLACEHOLDER_TITLES.has(title.toLowerCase())) return [];
+  if (classifyMessageIntent(title) !== 'requirement') return [];
   return [{
     id: `req:${session.id}:-1`,
     sessionId: session.id,

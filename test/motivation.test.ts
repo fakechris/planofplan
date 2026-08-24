@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { isMetaEnvelope, pickRequirement } from '../src/motivation.ts';
 import { openMemoryDb } from '../src/db.ts';
+import { materializeRequirements } from '../src/requirements.ts';
 import { createServer } from '../src/server.ts';
 import { DEFAULT_PLANS } from '../src/config.ts';
 import type { SessionMessageRow } from '../src/types.ts';
@@ -92,6 +93,8 @@ describe('server /api/sessions requirement', () => {
       messageRow({ id: 'm3', sessionId: 'codex:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', seq: 3, text: '把用量页的高峰低谷标注做出来' }),
       messageRow({ id: 'm4', sessionId: 'codex:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', seq: 4, role: 'assistant', text: '好的' }),
     ]);
+    // 需求实体化后,/api/sessions 与图谱从 requirements 表读
+    materializeRequirements(store);
     const response = await createServer(store, scheduler as never, { port: 9291, plans: DEFAULT_PLANS })
       .request('http://localhost/api/sessions?days=7');
     expect(response.status).toBe(200);
