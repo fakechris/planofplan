@@ -20,6 +20,7 @@
       <button type="button" role="tab" data-tab="sessions" aria-selected="false">对话</button>
       <button type="button" role="tab" data-tab="projects" aria-selected="false">项目</button>
       <button type="button" role="tab" data-tab="requirements" aria-selected="false">需求</button>
+      <button type="button" role="tab" data-tab="plans" aria-selected="false">计划</button>
       <button type="button" role="tab" data-tab="graph" aria-selected="false">图谱</button>
       <button type="button" role="tab" data-tab="usage" aria-selected="false">Token</button>
     </nav>
@@ -137,6 +138,26 @@
         <div class="usage-empty">
           <strong>从左边选一条需求</strong>
           <span>看原话、span 内触碰的文件和产出的 commit,可跳回源对话。</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="panel-plans" class="tab-panel" data-panel="plans" hidden>
+    <section class="hero">
+      <div>
+        <p class="eyebrow">PLANS</p>
+        <h1>计划</h1>
+        <p class="hero-copy">agent 写在磁盘上的计划与进展文件:身份锚文件、演进是快照序列——不做推断,只做观察。</p>
+      </div>
+    </section>
+    <p class="session-foot">来源:planning-with-files(task_plan/progress/findings)、PLAN.md、todo/backlog、docs/plans、HANDOFF-*.md。谁在推进来自文件触碰归因。</p>
+    <div class="session-workbench">
+      <div id="planList" class="session-list"></div>
+      <div id="planReader" class="session-reader">
+        <div class="usage-empty">
+          <strong>从左边选一个计划文件</strong>
+          <span>看快照时间线(checkbox 进度 + 所在 commit)、当前阶段和谁在推进。</span>
         </div>
       </div>
     </div>
