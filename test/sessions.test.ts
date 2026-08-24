@@ -115,6 +115,52 @@ describe('session catalog extractors', () => {
     }
   });
 
+  test('DSH subagent 头部(origin + parentSession)标记 subagent 并带父 id', () => {
+    const root = tempRoot();
+    const parentId = 'session-c56c015a-8009-4d8d-9b03-a77423e06eeb';
+    const file = join(root, '--Users-chris-source-dsh-explorer--', '004f77e4-55b2-4128-8b5b-824fbab89176', 'session.jsonl');
+    try {
+      mkdirSync(join(file, '..'), { recursive: true });
+      writeFileSync(file, jsonl([
+        { type: 'session', id: '004f77e4-55b2-4128-8b5b-824fbab89176', cwd: '/Users/chris/source/dsh/explorer', createdAt: 1786440969796, origin: 'subagent', parentSession: parentId, delegationDepth: 1 },
+        { type: 'subagent/descriptor', seq: 0, data: { label: 'Deep-dive', agentProvider: 'deepseek-official' } },
+      ]), 'utf8');
+      const row = extractSessionFile('dsh', file, 1786440969796);
+      expect(row).toMatchObject({
+        origin: 'subagent',
+        parentId: `dsh:${parentId}`,
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('factory Worker 会话(callingSessionId)标记 subagent 并带父 id;普通会话不动', () => {
+    const root = tempRoot();
+    const dir = join(root, '-Users-chris-workspace-planofplan');
+    try {
+      mkdirSync(dir, { recursive: true });
+      const worker = join(dir, '71129b6f-bc0d-46b5-b686-9d8f9f550014.jsonl');
+      writeFileSync(worker, jsonl([
+        { type: 'session_start', id: '71129b6f-bc0d-46b5-b686-9d8f9f550014', title: 'Worker: Research CodexBar providers', owner: 'chris', callingSessionId: '7e73b9de-b025-4bb5-94f2-a39e774dfb49', callingToolUseId: 'call_v2v5', version: 2, cwd: '/Users/chris/workspace/planofplan' },
+      ]), 'utf8');
+      const workerRow = extractSessionFile('factory', worker, Date.now());
+      expect(workerRow).toMatchObject({
+        origin: 'subagent',
+        parentId: 'factory:7e73b9de-b025-4bb5-94f2-a39e774dfb49',
+      });
+      const plain = join(dir, '31a94f5a-23e7-409a-b228-bd7e2097befd.jsonl');
+      writeFileSync(plain, jsonl([
+        { type: 'session_start', id: '31a94f5a-23e7-409a-b228-bd7e2097befd', title: 'New Session', owner: 'chris', version: 2, cwd: '/Users/chris/Documents/baolijinjian' },
+      ]), 'utf8');
+      const plainRow = extractSessionFile('factory', plain, Date.now());
+      expect(plainRow?.origin ?? 'user').toBe('user');
+      expect(plainRow?.parentId ?? null).toBeNull();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test('collectSessionCatalog upserts four providers and fills tokens from usage_records', async () => {
     const root = tempRoot();
     const store = openMemoryDb();

@@ -8,6 +8,8 @@ import type {
   QuotaWindow,
   SessionCommit,
   SessionFileTouch,
+  SessionLink,
+  SessionLinkView,
   SessionIndexState,
   SessionMessageHit,
   SessionMessageRow,
@@ -19,6 +21,8 @@ import type {
 } from './types.ts';
 import { buildUsageReport } from './usage.ts';
 import { nameOfUrl } from './repos.ts';
+import { isKnownEnvelope } from './motivation.ts';
+import { backfillLaunchLinks } from './session-links.ts';
 
 /** projects.id:url 的确定性短 hash(sha1 前 12 位)。无 remote 的 repo 用
  *  root path 做输入(dsh-track 同款退化),同输入必得同 id,物化幂等。 */
@@ -115,7 +119,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   git_url TEXT,
   git_name TEXT,
   origin TEXT NOT NULL DEFAULT 'user',
-  parent_id TEXT
+  parent_id TEXT,
+  origin_detail TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_native ON sessions(provider, native_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);
@@ -208,6 +213,17 @@ CREATE TABLE IF NOT EXISTS projects (
   created_at INTEGER NOT NULL,
   last_seen_at INTEGER NOT NULL
 );
+-- session↔session 关系边(Launch 实体,ia-redesign §1.4b)。首值 kind='spawned-by',
+-- 方向:from=被拉起的(子)→ to=发起者(父)。to 允许悬空(窗口外/已删)。
+CREATE TABLE IF NOT EXISTS session_links (
+  from_session TEXT NOT NULL,
+  to_session TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  evidence_kind TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (from_session, to_session, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_session_links_to ON session_links(to_session, kind);
 `;
 
 interface SnapshotRow {
@@ -348,6 +364,18 @@ export class Store {
       this.materializeProjects();
       db.exec('PRAGMA user_version = 5');
     }
+    // v6:Launch 实体(session_links 由 SCHEMA 建好;sessions 加 origin_detail)。
+    // backfill(claude parent / 边物化 / plugin 回链,纯 SQL+路径)在
+    // session-links.ts,幂等;herdr 的 origin_detail 由 collect 时的 herdr pass 补。
+    if (version < 6) {
+      try {
+        db.exec('ALTER TABLE sessions ADD COLUMN origin_detail TEXT');
+      } catch {
+        // 列已存在(新库 SCHEMA 已含)
+      }
+      backfillLaunchLinks(this);
+      db.exec('PRAGMA user_version = 6');
+    }
   }
 
   getUserVersion(): number {
@@ -479,7 +507,7 @@ export class Store {
       `SELECT DISTINCT s.id, s.provider, s.native_id, s.cwd, s.title, s.source_file,
               s.started_at, s.updated_at, s.input_tokens, s.output_tokens, s.total_tokens,
               s.estimated_cost_usd, s.seen_at, s.git_root, s.git_url, s.git_name,
-              s.origin, s.parent_id
+              s.origin, s.parent_id, s.origin_detail
        FROM sessions s
        JOIN session_repos r ON r.session_id = s.id
        WHERE r.url = ? AND s.updated_at >= ? AND s.updated_at < ?
@@ -503,6 +531,7 @@ export class Store {
       git_name: string | null;
       origin: string | null;
       parent_id: string | null;
+      origin_detail: string | null;
     }>;
     return rows.map((row) => sessionFromRow(row));
   }
@@ -1221,15 +1250,130 @@ export class Store {
     });
   }
 
-  /** origin 修正入口:backfill / herdr 升级专用,不走 upsert 的 COALESCE 语义。 */
-  updateSessionOrigins(patches: Array<{ id: string; origin: string; parentId?: string | null }>): void {
+  /** origin 修正入口:backfill / herdr 升级 / Launch 补链专用,不走 upsert 的 COALESCE 语义。 */
+  updateSessionOrigins(patches: Array<{
+    id: string;
+    origin?: string | null;
+    parentId?: string | null;
+    originDetail?: string | null;
+  }>): void {
     if (patches.length === 0) return;
-    const stmt = this.db.query('UPDATE sessions SET origin = ?, parent_id = COALESCE(?, parent_id) WHERE id = ?');
+    const stmt = this.db.query(
+      `UPDATE sessions SET
+         origin = COALESCE(?, origin),
+         parent_id = COALESCE(?, parent_id),
+         origin_detail = COALESCE(?, origin_detail)
+       WHERE id = ?`,
+    );
     this.withTransaction(() => {
       for (const patch of patches) {
-        stmt.run(patch.origin, patch.parentId ?? null, patch.id);
+        stmt.run(patch.origin ?? null, patch.parentId ?? null, patch.originDetail ?? null, patch.id);
       }
     });
+  }
+
+  upsertSessionLinks(rows: SessionLink[]): void {
+    if (rows.length === 0) return;
+    const stmt = this.db.query(
+      `INSERT INTO session_links (from_session, to_session, kind, evidence_kind, created_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(from_session, to_session, kind) DO UPDATE SET
+         evidence_kind = excluded.evidence_kind`,
+    );
+    this.withTransaction(() => {
+      for (const row of rows) {
+        stmt.run(row.fromSession, row.toSession, row.kind, row.evidenceKind, row.createdAt);
+      }
+    });
+  }
+
+  /** 全量 Launch 边(物化/图构建用;行数小,内存过滤)。 */
+  listSessionLinks(kind = 'spawned-by'): SessionLink[] {
+    const rows = this.db.query(
+      'SELECT from_session, to_session, kind, evidence_kind, created_at FROM session_links WHERE kind = ?',
+    ).all(kind) as Array<{
+      from_session: string;
+      to_session: string;
+      kind: string;
+      evidence_kind: string;
+      created_at: number;
+    }>;
+    return rows.map((row) => ({
+      fromSession: row.from_session,
+      toSession: row.to_session,
+      kind: row.kind,
+      evidenceKind: row.evidence_kind === 'declared' ? 'declared' : row.evidence_kind === 'observed' ? 'observed' : 'candidate',
+      createdAt: row.created_at,
+    }));
+  }
+
+  /**
+   * 双向查 Launch 边:spawnedBy(谁发起了它)/ spawned(它发起了谁)。
+   * 对端不在库里的悬空边照常返回,dangling=true。
+   */
+  linksForSession(id: string): { spawnedBy: SessionLinkView[]; spawned: SessionLinkView[] } {
+    const out = this.db.query(
+      `SELECT l.to_session AS sessionId, l.evidence_kind AS evidenceKind,
+              s.provider AS provider, s.title AS title
+       FROM session_links l LEFT JOIN sessions s ON s.id = l.to_session
+       WHERE l.from_session = ? AND l.kind = 'spawned-by'
+       ORDER BY l.created_at DESC`,
+    ).all(id) as Array<{ sessionId: string; evidenceKind: string; provider: string | null; title: string | null }>;
+    const into = this.db.query(
+      `SELECT l.from_session AS sessionId, l.evidence_kind AS evidenceKind,
+              s.provider AS provider, s.title AS title
+       FROM session_links l LEFT JOIN sessions s ON s.id = l.from_session
+       WHERE l.to_session = ? AND l.kind = 'spawned-by'
+       ORDER BY l.created_at DESC`,
+    ).all(id) as Array<{ sessionId: string; evidenceKind: string; provider: string | null; title: string | null }>;
+    const map = (row: { sessionId: string; evidenceKind: string; provider: string | null; title: string | null }): SessionLinkView => ({
+      sessionId: row.sessionId,
+      evidenceKind: row.evidenceKind === 'declared' ? 'declared' : row.evidenceKind === 'observed' ? 'observed' : 'candidate',
+      provider: row.provider,
+      title: row.title,
+      dangling: row.provider === null,
+    });
+    return { spawnedBy: out.map(map), spawned: into.map(map) };
+  }
+
+  /**
+   * plugin 回链的 declared 匹配:claude 的 tool 消息(role=tool,含命令行/
+   * Task 入参 JSON)里出现过这段 prompt 片段。按消息行返回(带消息时间
+   * 戳),调用方自己做时间窗过滤 —— 长寿命 claude 会话的 updated_at 可以
+   * 比拉起时刻晚好几天,不能当 spawn 时刻用。
+   */
+  claudeSessionsWithToolText(needle: string, limit = 40): Array<{ sessionId: string; ts: number | null; updatedAt: number }> {
+    const pattern = `%${needle.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
+    return this.db.query(
+      `SELECT s.id AS sessionId, m.timestamp AS ts, s.updated_at AS updatedAt
+       FROM session_messages m
+       JOIN sessions s ON s.id = m.session_id
+       WHERE s.provider = 'claude' AND m.role = 'tool' AND m.text LIKE ? ESCAPE '\\'
+       ORDER BY m.timestamp DESC
+       LIMIT ?`,
+    ).all(pattern, limit) as Array<{ sessionId: string; ts: number | null; updatedAt: number }>;
+  }
+
+  /**
+   * session 首条真实用户 prompt(plugin 回链的原料)。跳过
+   * <recommended_plugins> 等已知注入信封(isKnownEnvelope);<task> 包裹是
+   * companion 插件的任务正文,剥掉首行取 body(正文可能被逐字传进
+   * claude 的命令行,匹配要拿到裸正文)。
+   */
+  firstUserText(sessionId: string): string | null {
+    const rows = this.db.query(
+      `SELECT text FROM session_messages
+       WHERE session_id = ? AND role = 'user' AND kind = 'text'
+       ORDER BY seq LIMIT 20`,
+    ).all(sessionId) as Array<{ text: string | null }>;
+    for (const row of rows) {
+      const text = row.text?.trim();
+      if (!text || isKnownEnvelope(text)) continue;
+      const task = /^<task[^>]*>[^\S\n]*/.exec(text);
+      if (task) return text.slice(task[0].length).trim() || null;
+      return text;
+    }
+    return null;
   }
 
   updateSessionTokens(patches: Array<{
@@ -1261,7 +1405,7 @@ export class Store {
     const rows = this.db.query(
       `SELECT id, provider, native_id, cwd, title, source_file, started_at, updated_at,
               input_tokens, output_tokens, total_tokens, estimated_cost_usd, seen_at,
-              git_root, git_url, git_name, origin, parent_id
+              git_root, git_url, git_name, origin, parent_id, origin_detail
        FROM sessions`,
     ).all() as Array<{
       id: string;
@@ -1282,6 +1426,7 @@ export class Store {
       git_name: string | null;
       origin: string | null;
       parent_id: string | null;
+      origin_detail: string | null;
     }>;
     return this.attachSessionRepos(rows.map(sessionFromRow));
   }
@@ -1290,7 +1435,7 @@ export class Store {
     const row = this.db.query(
       `SELECT id, provider, native_id, cwd, title, source_file, started_at, updated_at,
               input_tokens, output_tokens, total_tokens, estimated_cost_usd, seen_at,
-              git_root, git_url, git_name, origin, parent_id
+              git_root, git_url, git_name, origin, parent_id, origin_detail
        FROM sessions WHERE id = ?`,
     ).get(id) as {
       id: string;
@@ -1311,6 +1456,7 @@ export class Store {
       git_name: string | null;
       origin: string | null;
       parent_id: string | null;
+      origin_detail: string | null;
     } | null;
     if (!row) return null;
     return this.attachSessionRepos([sessionFromRow(row)])[0] ?? null;
@@ -1433,12 +1579,13 @@ export class Store {
     this.db.query('DELETE FROM session_messages WHERE session_id = ?').run(sessionId);
   }
 
-  /** 级联删除：session 本体 + repo 归属 + 消息索引 + 文件 touch + commit 归因(FTS 由触发器同步）。 */
+  /** 级联删除：session 本体 + repo 归属 + 消息索引 + 文件 touch + commit 归因 + Launch 边(FTS 由触发器同步）。 */
   deleteSession(id: string): void {
     this.withTransaction(() => {
       this.db.query('DELETE FROM session_messages WHERE session_id = ?').run(id);
       this.db.query('DELETE FROM session_file_touches WHERE session_id = ?').run(id);
       this.db.query('DELETE FROM session_commits WHERE session_id = ?').run(id);
+      this.db.query('DELETE FROM session_links WHERE from_session = ? OR to_session = ?').run(id, id);
       this.db.query('DELETE FROM session_repos WHERE session_id = ?').run(id);
       this.db.query('DELETE FROM sessions WHERE id = ?').run(id);
     });
@@ -1822,6 +1969,7 @@ function sessionFromRow(row: {
   git_name?: string | null;
   origin?: string | null;
   parent_id?: string | null;
+  origin_detail?: string | null;
 }): SessionRecord {
   return {
     id: row.id,
@@ -1842,6 +1990,7 @@ function sessionFromRow(row: {
     gitName: row.git_name ?? null,
     origin: (row.origin ?? 'user') as SessionRecord['origin'],
     parentId: row.parent_id ?? null,
+    originDetail: row.origin_detail ?? null,
   };
 }
 

@@ -25,7 +25,16 @@ import { attachRepos, extractSessionRepos, TOUCH_BYTES } from './session-repos.t
 import { messagesFromRecord, messagesFromZcodeDb } from './transcript.ts';
 import { touchesFromRecord } from './file-touches.ts';
 import { collectSessionCommits } from './commit-attribution.ts';
-import { applyHerdrOrigin, backfillSessionOrigins, classifyCodexMeta, classifySessionPath } from './session-origin.ts';
+import {
+  applyHerdrOrigin,
+  backfillDshFactoryOrigins,
+  backfillSessionOrigins,
+  classifyCodexMeta,
+  classifyDshHeader,
+  classifyFactoryStart,
+  classifySessionPath,
+} from './session-origin.ts';
+import { claudeParentOfPath, materializeSessionLinks } from './session-links.ts';
 import type { SessionCommit, SessionIndexState, SessionList, SessionRecord, SessionRepo } from './types.ts';
 
 /** Subset of usage collect options — kept here to avoid a usage.ts cycle. */
@@ -283,6 +292,8 @@ function extractClaude(path: string, mtimeMs: number): SessionRecord | null {
     estimatedCostUsd: null,
     // subagent transcript 布局:<proj>/<uuid>/subagents/agent-*.jsonl
     ...(classifySessionPath('claude', path) ?? {}),
+    // Launch 边:父 session id 也在路径上(顶层 subagents/ 形态返回 null)
+    parentId: claudeParentOfPath(path),
     seenAt: Date.now(),
   };
 }
@@ -370,6 +381,8 @@ function extractDsh(path: string, mtimeMs: number): SessionRecord | null {
     provider: 'dsh',
     nativeId,
     cwd: typeof header?.cwd === 'string' ? header.cwd : null,
+    // 头部自带 declared 级标记:origin:'subagent' + parentSession
+    ...(classifyDshHeader(header) ?? {}),
     title,
     sourceFile: path,
     startedAt: header ? parseTimestamp(header.createdAt ?? header.time, mtimeMs) : null,
@@ -456,6 +469,8 @@ function extractFactory(path: string, mtimeMs: number): SessionRecord | null {
     provider: 'factory',
     nativeId,
     cwd: typeof start?.cwd === 'string' ? start.cwd : null,
+    // Worker 子会话:callingSessionId = 发起它的 droid session
+    ...(classifyFactoryStart(start) ?? {}),
     title: typeof start?.title === 'string' ? titleify(start.title) || null : null,
     sourceFile: path,
     startedAt: parseTimestamp(start?.timestamp, mtimeMs),
@@ -906,9 +921,11 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
     /* commit attribution is best-effort */
   }
   // origin 归因:一次性 backfill(user_version <4 时跑,重读 codex 文件头 +
-  // claude 路径判断)+ 每轮 herdr 升级。单文件读、有界,失败不拖垮目录
+  // claude 路径判断;dsh/factory 是独立哨兵的二次 pass)+ 每轮 herdr 升级。
+  // 单文件读、有界,失败不拖垮目录扫描
   try {
     backfillSessionOrigins(store);
+    backfillDshFactoryOrigins(store);
     applyHerdrOrigin(store);
   } catch {
     /* origin attribution is best-effort */
@@ -918,6 +935,13 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
     store.materializeProjects();
   } catch {
     /* project materialization is best-effort */
+  }
+  // Launch 边物化(IA 第二步):claude parent 补链 + parent_id → 边 +
+  // plugin:claude 回链,幂等
+  try {
+    materializeSessionLinks(store);
+  } catch {
+    /* launch link materialization is best-effort */
   }
   return scanned;
 }
