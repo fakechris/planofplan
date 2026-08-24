@@ -72,6 +72,7 @@ export function buildWorkGraph(
   requirements?: Map<string, string>,
   commits?: SessionCommit[],
   includeSubagents = false,
+  requirementLevels?: Map<string, string>,
 ): WorkGraph {
   const nodes: WorkNode[] = [];
   const edges: WorkEdge[] = [];
@@ -168,6 +169,7 @@ export function buildWorkGraph(
     if (!text) continue;
     const reqId = `req:${session.id}`;
     const touchProject = touch[0];
+    const originLevel = requirementLevels?.get(session.id);
     const requirement: WorkRequirement = {
       id: reqId,
       sessionId: session.id,
@@ -175,6 +177,7 @@ export function buildWorkGraph(
       provider: session.provider,
       project: touchProject?.name ?? UNMAPPED_PROJECT,
       updatedAt: session.updatedAt,
+      ...(originLevel ? { originLevel } : {}),
     };
     nodes.push({
       id: reqId,
@@ -182,6 +185,7 @@ export function buildWorkGraph(
       label: text,
       provider: session.provider,
       sessionId: session.id,
+      ...(originLevel ? { originLevel } : {}),
     });
     edges.push({
       from: session.id,

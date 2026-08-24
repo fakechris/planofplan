@@ -206,6 +206,21 @@ export interface SessionLinkView {
   dangling: boolean;
 }
 
+/** requirements 表行(Requirement 实体,§1.5)。 */
+export interface RequirementRecord {
+  /** 确定性 id:req:<session_id>:<seq>(推断退化实体 seq = -1)。 */
+  id: string;
+  sessionId: string;
+  /** 证据锚点:user 消息 seq;-1 = 无消息锚点(从 title 退化推断)。 */
+  seq: number;
+  text: string;
+  /** v1 两档;user_confirmed / agent_proposed 是 HITL 后话。 */
+  originLevel: 'user_explicit' | 'system_inferred';
+  ts: number | null;
+  /** span 归因到的 repo url(§1.5:证据窗口内实际碰的 repo)。 */
+  repos: string[];
+}
+
 /** session_index_state 表行：消息级索引的行级续扫水位。 */
 export interface SessionIndexState {
   path: string;
@@ -339,6 +354,8 @@ export interface WorkRequirement {
   /** Touch-git display name, or '(unmapped)' when the span touched no repo. */
   project: string;
   updatedAt: number;
+  /** §1.5 origin 分级(user_explicit / system_inferred),图谱着色用。 */
+  originLevel?: string;
 }
 
 export interface WorkProject {
@@ -359,6 +376,8 @@ export interface WorkNode {
   sessionId?: string;
   /** commit 节点专用:与 session 的文件触碰有交集(candidate 里的强信号)。 */
   fileOverlap?: boolean;
+  /** requirement 节点专用:§1.5 origin 分级,着色用。 */
+  originLevel?: string;
 }
 
 export interface WorkEdge {
