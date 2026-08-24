@@ -14,6 +14,7 @@ import { buildUsageReport } from './usage.ts';
 import { buildSessionList, searchSessions } from './sessions.ts';
 import { pickRequirement } from './motivation.ts';
 import { sessionProjectNames } from './repos.ts';
+import type { ProjectAgentStat, ProjectListItem } from './types.ts';
 import { readTranscript } from './transcript.ts';
 import { launchResume } from './resume.ts';
 import { getStartupSettings, setLaunchOnStartup } from './startup.ts';
@@ -252,6 +253,92 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     const session = store.getSession(sessionId);
     if (!session) return c.json({ ok: false, error: 'unknown session' }, 404);
     return c.json({ sessionId, commits: store.listSessionCommits(sessionId) });
+  });
+
+  // ── 项目页(IA 重设计第一步)──────────────────────────────────
+
+  /** 列表/详情共用的聚合:projectActivity 行 → 每个 url 的 agents 分解与计数。 */
+  const projectAggregates = (since: number, until: number) => {
+    const byUrl = new Map<string, {
+      sessions: Set<string>;
+      userSessions: Set<string>;
+      agents: Map<string, ProjectAgentStat>;
+      lastActive: number;
+    }>();
+    for (const row of store.projectActivity(since, until)) {
+      let agg = byUrl.get(row.url);
+      if (!agg) {
+        agg = { sessions: new Set(), userSessions: new Set(), agents: new Map(), lastActive: 0 };
+        byUrl.set(row.url, agg);
+      }
+      agg.sessions.add(row.sessionId);
+      const isUser = row.origin === 'user';
+      if (isUser) agg.userSessions.add(row.sessionId);
+      let agent = agg.agents.get(row.provider);
+      if (!agent) {
+        agent = { provider: row.provider, sessions: 0, userSessions: 0, automatedSessions: 0, tokens: 0, lastActive: null };
+        agg.agents.set(row.provider, agent);
+      }
+      agent.sessions += 1;
+      if (isUser) agent.userSessions += 1;
+      else agent.automatedSessions += 1;
+      agent.tokens += row.totalTokens;
+      if (row.updatedAt > (agent.lastActive ?? 0)) agent.lastActive = row.updatedAt;
+      if (row.updatedAt > agg.lastActive) agg.lastActive = row.updatedAt;
+    }
+    return byUrl;
+  };
+
+  const toListItem = (
+    project: { id: string; url: string; name: string; root: string | null; createdAt: number; lastSeenAt: number },
+    agg: { sessions: Set<string>; userSessions: Set<string>; agents: Map<string, ProjectAgentStat>; lastActive: number } | undefined,
+    commitCount: number,
+  ): ProjectListItem => ({
+    ...project,
+    sessionCount: agg?.sessions.size ?? 0,
+    userSessionCount: agg?.userSessions.size ?? 0,
+    agents: [...(agg?.agents.values() ?? [])].sort((a, b) => b.sessions - a.sessions || a.provider.localeCompare(b.provider)),
+    lastActive: agg?.lastActive || null,
+    commitCount,
+    requirementCount: null, // 预留字段,v1 不算
+  });
+
+  app.get('/api/projects', (c) => {
+    const days = Math.min(365, Math.max(1, Number(c.req.query('days') ?? 30) || 30));
+    const now = Date.now();
+    const since = now - days * 86_400_000;
+    const aggregates = projectAggregates(since, now);
+    const commitCounts = store.projectCommitCounts(since);
+    const projects = store.listProjects()
+      .map((project) => toListItem(project, aggregates.get(project.url), commitCounts.get(project.url) ?? 0))
+      .sort((a, b) => (b.lastActive ?? 0) - (a.lastActive ?? 0) || b.sessionCount - a.sessionCount);
+    return c.json({ days, since, until: now, projects });
+  });
+
+  app.get('/api/projects/:id', (c) => {
+    const days = Math.min(365, Math.max(1, Number(c.req.query('days') ?? 30) || 30));
+    const now = Date.now();
+    const since = now - days * 86_400_000;
+    const project = store.getProject(c.req.param('id'));
+    if (!project) return c.json({ ok: false, error: 'unknown project' }, 404);
+    const sessions = store.projectSessions(project.url, since, now);
+    // requirements:窗口内 user session 的推导需求(复用 motivation 抽取)
+    const userTexts = store.listSessionUserTexts();
+    const requirements = sessions
+      .filter((session) => (session.origin ?? 'user') === 'user')
+      .map((session) => {
+        const text = pickRequirement(userTexts.get(session.id) ?? []);
+        return text ? { sessionId: session.id, text, provider: session.provider, updatedAt: session.updatedAt } : null;
+      })
+      .filter((item) => item !== null);
+    const aggregates = projectAggregates(since, now);
+    const commitCounts = store.projectCommitCounts(since);
+    return c.json({
+      ...toListItem(project, aggregates.get(project.url), commitCounts.get(project.url) ?? 0),
+      sessions,
+      requirements,
+      commits: store.projectCommits(project.url, since),
+    });
   });
 
   // commit → 关联 session 反查(支持短 sha 前缀)

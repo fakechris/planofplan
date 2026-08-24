@@ -149,12 +149,17 @@ describe('upsert 不洗掉已有 origin(回归:VALUES 里 COALESCE 曾污染 exc
     expect(store.getSession('claude:agent-y')?.origin).toBe('user');
     backfillSessionOrigins(store);
     expect(store.getSession('claude:agent-y')?.origin).toBe('subagent');
-    expect(store.getUserVersion()).toBe(4);
+    // 完成标记是哨兵行,不是 user_version(schema 迁移也会推它,双用途会互相踩)
+    expect(store.getSessionIndexState('__origin_backfill__')).not.toBeNull();
+    // 重跑被哨兵挡住
+    store.updateSessionOrigins([{ id: 'claude:agent-y', origin: 'user' }]);
+    backfillSessionOrigins(store);
+    expect(store.getSession('claude:agent-y')?.origin).toBe('user');
   });
 });
 
 describe('backfillSessionOrigins', () => {
-  test('codex 重读文件头分类、claude 路径判断、幂等、版本推进', () => {
+  test('codex 重读文件头分类、claude 路径判断、幂等、哨兵标记', () => {
     const root = mkdtempSync(join(tmpdir(), 'planofplan-origin-backfill-'));
     const codexFile = join(root, 'rollout-2026-08-20T10-00-00-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb.jsonl');
     try {
@@ -163,7 +168,6 @@ describe('backfillSessionOrigins', () => {
         payload: { id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', originator: 'Claude Code', source: 'cli' },
       })}\n`);
       const store = openMemoryDb();
-      expect(store.getUserVersion()).toBe(2); // 新库列由 SCHEMA 带齐,但版本号要等 backfill 完成才推 4
       store.upsertSessions([
         session({ id: 'codex:bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', provider: 'codex', nativeId: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', sourceFile: codexFile }),
         session({ id: 'claude:c1', provider: 'claude', nativeId: 'c1', sourceFile: '/x/.claude/projects/-p/uuid/subagents/agent-a.jsonl' }),
@@ -175,7 +179,7 @@ describe('backfillSessionOrigins', () => {
       expect(store.getSession('claude:c1')?.origin).toBe('subagent');
       expect(store.getSession('claude:plain')?.origin).toBe('user');
       expect(store.getSession('codex:gone')?.origin).toBe('user'); // 文件不在 → 跳过
-      expect(store.getUserVersion()).toBe(4);
+      expect(store.getSessionIndexState('__origin_backfill__')).not.toBeNull();
       // 幂等:重跑不报错、结果不变
       backfillSessionOrigins(store);
       expect(store.getSession('codex:bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb')?.origin).toBe('plugin:claude');
@@ -184,10 +188,10 @@ describe('backfillSessionOrigins', () => {
     }
   });
 
-  test('老库(v2)升级:列补全 + backfill 后版本推到 3', () => {
-    // 用 ALTER 前的老 schema 模拟:openMemoryDb 走的是新 SCHEMA,这里验证
-    // getUserVersion 语义与重复 ALTER 容错即可(真实老库迁移由 v1→v2→v3 链覆盖)
+  test('getUserVersion/setUserVersion 语义(重复 ALTER 容错)', () => {
+    // openMemoryDb 走新 SCHEMA + 全部迁移;真实老库迁移由 v1→…→v5 链覆盖
     const store = openMemoryDb();
+    expect(store.getUserVersion()).toBe(5);
     expect(() => store.setUserVersion(4)).not.toThrow();
     expect(store.getUserVersion()).toBe(4);
   });

@@ -129,15 +129,15 @@ export function applyHerdrOrigin(
 }
 
 /**
- * 一次性 backfill(user_version < 4 时跑):为升级前已落库的 session 补 origin。
- * codex 重读 source_file 第一行(文件不在则跳过);claude 走路径判断。
- * 完成后把 user_version 推到 4。幂等:重复跑结果相同。
- * (v3 是列迁移;v4 = 修复 upsertSessions 的 COALESCE 顺序 bug 后重跑:
- * excluded.origin 引用 VALUES 最终值,VALUES 里的 COALESCE 曾让重扫把
- * 已有 origin 洗回 'user'。)
+ * 一次性 backfill:为升级前已落库的 session 补 origin。codex 重读
+ * source_file 第一行(文件不在则跳过);claude 走路径判断。幂等。
+ *
+ * 完成标记用 session_index_state 的哨兵行 '__origin_backfill__',不复用
+ * PRAGMA user_version —— schema 迁移(v5 projects)也会推它,双用途曾把
+ * backfill 门永久关掉(v4 的教训)。
  */
 export function backfillSessionOrigins(store: Store): void {
-  if (store.getUserVersion() >= 4) return;
+  if (store.getSessionIndexState('__origin_backfill__')) return;
   const patches: Array<{ id: string; origin: SessionOrigin; parentId?: string | null }> = [];
   for (const session of store.listSessionRows()) {
     const byPath = session.sourceFile ? classifySessionPath(session.provider, session.sourceFile) : null;
@@ -165,5 +165,12 @@ export function backfillSessionOrigins(store: Store): void {
     }
   }
   store.updateSessionOrigins(patches);
-  store.setUserVersion(4);
+  store.upsertSessionIndexState({
+    path: '__origin_backfill__',
+    mtimeMs: Date.now(),
+    size: 0,
+    parsedBytes: 0,
+    lines: 0,
+    parserVersion: 0,
+  });
 }

@@ -1,8 +1,10 @@
 import { Database } from 'bun:sqlite';
+import { createHash } from 'node:crypto';
 import type {
   FileTouchSession,
   PlanConfig,
   PlanStateRow,
+  Project,
   QuotaWindow,
   SessionCommit,
   SessionFileTouch,
@@ -16,6 +18,13 @@ import type {
   UsageScanFile,
 } from './types.ts';
 import { buildUsageReport } from './usage.ts';
+import { nameOfUrl } from './repos.ts';
+
+/** projects.id:url 的确定性短 hash(sha1 前 12 位)。无 remote 的 repo 用
+ *  root path 做输入(dsh-track 同款退化),同输入必得同 id,物化幂等。 */
+export function projectEntityId(url: string): string {
+  return createHash('sha1').update(url).digest('hex').slice(0, 12);
+}
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS plans (
@@ -189,6 +198,16 @@ CREATE TABLE IF NOT EXISTS session_commits (
 );
 CREATE INDEX IF NOT EXISTS idx_session_commits_sha ON session_commits(sha);
 CREATE INDEX IF NOT EXISTS idx_session_commits_repo ON session_commits(repo, ts);
+-- 一等项目实体:身份 = git remote URL(无 remote 退化为 root path)。
+-- 从 session_repos 物化(collectSessionCatalog 末尾增量 upsert + v5 迁移 backfill)。
+CREATE TABLE IF NOT EXISTS projects (
+  id TEXT PRIMARY KEY,
+  url TEXT UNIQUE NOT NULL,
+  name TEXT NOT NULL,
+  root TEXT,
+  created_at INTEGER NOT NULL,
+  last_seen_at INTEGER NOT NULL
+);
 `;
 
 interface SnapshotRow {
@@ -323,6 +342,12 @@ export class Store {
         }
       }
     }
+    // v5:projects 实体表。表结构由 SCHEMA 建好,这里从 session_repos backfill
+    // 物化一遍(幂等,与 collectSessionCatalog 末尾的增量物化同一条路径)。
+    if (version < 5) {
+      this.materializeProjects();
+      db.exec('PRAGMA user_version = 5');
+    }
   }
 
   getUserVersion(): number {
@@ -331,6 +356,173 @@ export class Store {
 
   setUserVersion(version: number): void {
     this.db.exec(`PRAGMA user_version = ${Math.floor(version)}`);
+  }
+
+  /**
+   * 从 session_repos 物化 projects(root 取多数值,name 取首个非空)。
+   * 幂等:collectSessionCatalog 末尾增量调用,v5 迁移 backfill 也走这里。
+   */
+  materializeProjects(): number {
+    const rows = this.db.query('SELECT url, name, root FROM session_repos').all() as Array<{
+      url: string;
+      name: string | null;
+      root: string | null;
+    }>;
+    const byUrl = new Map<string, { name: string; roots: Map<string, number> }>();
+    for (const row of rows) {
+      if (!row.url) continue;
+      let group = byUrl.get(row.url);
+      if (!group) {
+        group = { name: row.name ?? '', roots: new Map() };
+        byUrl.set(row.url, group);
+      }
+      if (!group.name && row.name) group.name = row.name;
+      if (row.root) group.roots.set(row.root, (group.roots.get(row.root) ?? 0) + 1);
+    }
+    const now = Date.now();
+    const stmt = this.db.query(
+      `INSERT INTO projects (id, url, name, root, created_at, last_seen_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(url) DO UPDATE SET
+         name = COALESCE(NULLIF(excluded.name, ''), projects.name),
+         root = COALESCE(excluded.root, projects.root),
+         last_seen_at = excluded.last_seen_at`,
+    );
+    this.withTransaction(() => {
+      for (const [url, group] of byUrl) {
+        const root = [...group.roots.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+        stmt.run(projectEntityId(url), url, group.name || nameOfUrl(url), root, now, now);
+      }
+    });
+    return byUrl.size;
+  }
+
+  listProjects(): Project[] {
+    const rows = this.db.query(
+      'SELECT id, url, name, root, created_at, last_seen_at FROM projects ORDER BY last_seen_at DESC',
+    ).all() as Array<{
+      id: string;
+      url: string;
+      name: string;
+      root: string | null;
+      created_at: number;
+      last_seen_at: number;
+    }>;
+    return rows.map((row) => ({
+      id: row.id,
+      url: row.url,
+      name: row.name,
+      root: row.root,
+      createdAt: row.created_at,
+      lastSeenAt: row.last_seen_at,
+    }));
+  }
+
+  getProject(id: string): Project | null {
+    const row = this.db.query(
+      'SELECT id, url, name, root, created_at, last_seen_at FROM projects WHERE id = ?',
+    ).get(id) as {
+      id: string;
+      url: string;
+      name: string;
+      root: string | null;
+      created_at: number;
+      last_seen_at: number;
+    } | null;
+    if (!row) return null;
+    return {
+      id: row.id,
+      url: row.url,
+      name: row.name,
+      root: row.root,
+      createdAt: row.created_at,
+      lastSeenAt: row.last_seen_at,
+    };
+  }
+
+  /** 窗口内 session↔project 活动(列表/详情聚合的公共原料,已按 url+session 去重)。 */
+  projectActivity(since: number, until: number): Array<{
+    url: string;
+    sessionId: string;
+    provider: string;
+    origin: string;
+    totalTokens: number;
+    updatedAt: number;
+  }> {
+    return this.db.query(
+      `SELECT DISTINCT r.url AS url, s.id AS sessionId, s.provider AS provider,
+              s.origin AS origin, s.total_tokens AS totalTokens, s.updated_at AS updatedAt
+       FROM session_repos r
+       JOIN sessions s ON s.id = r.session_id
+       WHERE s.updated_at >= ? AND s.updated_at < ?`,
+    ).all(since, until) as Array<{
+      url: string;
+      sessionId: string;
+      provider: string;
+      origin: string;
+      totalTokens: number;
+      updatedAt: number;
+    }>;
+  }
+
+  /** 窗口内各 repo 的 commit 计数。 */
+  projectCommitCounts(since: number): Map<string, number> {
+    const rows = this.db.query(
+      'SELECT repo, COUNT(*) AS n FROM session_commits WHERE ts >= ? GROUP BY repo',
+    ).all(since) as Array<{ repo: string; n: number }>;
+    return new Map(rows.map((row) => [row.repo, row.n]));
+  }
+
+  /** 详情:窗口内该项目的 session 时间线(updated_at 倒排)。 */
+  projectSessions(url: string, since: number, until: number): SessionRecord[] {
+    const rows = this.db.query(
+      `SELECT DISTINCT s.id, s.provider, s.native_id, s.cwd, s.title, s.source_file,
+              s.started_at, s.updated_at, s.input_tokens, s.output_tokens, s.total_tokens,
+              s.estimated_cost_usd, s.seen_at, s.git_root, s.git_url, s.git_name,
+              s.origin, s.parent_id
+       FROM sessions s
+       JOIN session_repos r ON r.session_id = s.id
+       WHERE r.url = ? AND s.updated_at >= ? AND s.updated_at < ?
+       ORDER BY s.updated_at DESC`,
+    ).all(url, since, until) as Array<{
+      id: string;
+      provider: string;
+      native_id: string;
+      cwd: string | null;
+      title: string | null;
+      source_file: string | null;
+      started_at: number | null;
+      updated_at: number;
+      input_tokens: number;
+      output_tokens: number;
+      total_tokens: number;
+      estimated_cost_usd: number | null;
+      seen_at: number;
+      git_root: string | null;
+      git_url: string | null;
+      git_name: string | null;
+      origin: string | null;
+      parent_id: string | null;
+    }>;
+    return rows.map((row) => sessionFromRow(row));
+  }
+
+  /** 详情:窗口内落在该项目的 commit(ts 倒排)。 */
+  projectCommits(url: string, since: number): SessionCommit[] {
+    const rows = this.db.query(
+      `SELECT session_id, repo, sha, kind, ts, summary, file_overlap, pushed
+       FROM session_commits WHERE repo = ? AND ts >= ? ORDER BY ts DESC`,
+    ).all(url, since) as Array<{
+      session_id: string;
+      repo: string;
+      sha: string;
+      kind: string;
+      ts: number | null;
+      summary: string | null;
+      file_overlap: number;
+      pushed: number;
+    }>;
+    return rows.map(sessionCommitFromRow);
   }
 
   /** 配置 → db plans 表（INSERT OR IGNORE；已存在时只更新非运行时字段） */

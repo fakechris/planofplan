@@ -235,6 +235,60 @@ export interface SessionCommit {
   pushed?: boolean;
 }
 
+/** projects 表行:一等项目实体,身份 = git remote URL(无 remote 退化为 root path)。 */
+export interface Project {
+  /** url 的确定性短 hash(sha1 前 12 位,见 db.ts projectEntityId)。 */
+  id: string;
+  url: string;
+  name: string;
+  /** 本地主根(session_repos.root 的多数值)。 */
+  root: string | null;
+  createdAt: number;
+  lastSeenAt: number;
+}
+
+/** 项目页列表/详情的 agent 分解行。 */
+export interface ProjectAgentStat {
+  provider: string;
+  /** 全部 session 数(含自动化)。 */
+  sessions: number;
+  /** origin='user' 的 session 数。 */
+  userSessions: number;
+  /** 非 user(subagent/plugin/exec/herdr)的 session 数。 */
+  automatedSessions: number;
+  tokens: number;
+  lastActive: number | null;
+}
+
+export interface ProjectListItem extends Project {
+  /** 窗口内 session 数(全部 origin)。 */
+  sessionCount: number;
+  /** 窗口内 origin='user' 的 session 数。 */
+  userSessionCount: number;
+  /** 按 sessions 倒排。 */
+  agents: ProjectAgentStat[];
+  lastActive: number | null;
+  commitCount: number;
+  /** 预留:窗口内推导需求数(v1 不算,恒 null)。 */
+  requirementCount: number | null;
+}
+
+export interface ProjectRequirementItem {
+  sessionId: string;
+  text: string;
+  provider: string;
+  updatedAt: number;
+}
+
+export interface ProjectDetail extends ProjectListItem {
+  /** 窗口内 session 时间线(updatedAt 倒排,带 origin/parentId)。 */
+  sessions: SessionRecord[];
+  /** 窗口内 user session 的推导需求(motivation 抽取)。 */
+  requirements: ProjectRequirementItem[];
+  /** 窗口内落在该项目的 commit(session_commits where repo = url)。 */
+  commits: SessionCommit[];
+}
+
 export type GitRole = 'work' | 'touch' | 'commit';
 export type EvidenceKind = 'observed' | 'declared' | 'candidate';
 

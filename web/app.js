@@ -889,6 +889,149 @@ function renderGraph(list) {
   el.replaceChildren(svg);
 }
 
+// ── 项目页(IA 重设计第一步)────────────────────────────────────
+// 列表态 = 项目卡片行;详情态 = agent × 活动 / 需求流 / 产出 commit /
+// session 时间线。数据失败静默降级(区块留空,不影响其它 tab)。
+
+let latestProjects = null;
+let openProjectId = null;
+
+async function refreshProjects() {
+  const listEl = document.getElementById('projectList');
+  if (!listEl) return;
+  try {
+    const days = document.getElementById('usageDays')?.value || '30';
+    latestProjects = await request(`/api/projects?days=${encodeURIComponent(days)}`);
+  } catch {
+    latestProjects = null;
+  }
+  renderProjects();
+}
+
+function projectItemHtml(project) {
+  const agents = (project.agents || []).slice(0, 4)
+    .map((agent) => escapeHtml(agent.provider))
+    .join(' · ');
+  return `
+    <button type="button" class="session-item${project.id === openProjectId ? ' active' : ''}" data-project-id="${escapeHtml(project.id)}">
+      <strong>${escapeHtml(project.name)}</strong>
+      <span>${agents || '(窗口内无活动)'}</span>
+      <span>${project.sessionCount} 对话(${project.userSessionCount} 用户) · ${project.commitCount} commit${project.lastActive ? ` · ${fmtAgo(project.lastActive, Date.now())}` : ''}</span>
+    </button>
+  `;
+}
+
+function renderProjects() {
+  const listEl = document.getElementById('projectList');
+  const readerEl = document.getElementById('projectReader');
+  if (!listEl || !readerEl) return;
+  const projects = latestProjects?.projects || [];
+  if (!latestProjects) {
+    listEl.innerHTML = '<div class="usage-empty"><strong>项目数据不可用</strong><span>daemon 连接失败。</span></div>';
+    return;
+  }
+  if (projects.length === 0) {
+    listEl.innerHTML = '<div class="usage-empty"><strong>还没有项目</strong><span>session 索引出 git 归属后会出现在这里。</span></div>';
+    return;
+  }
+  listEl.innerHTML = projects.map(projectItemHtml).join('');
+  listEl.querySelectorAll('[data-project-id]').forEach((row) => {
+    row.addEventListener('click', () => {
+      openProjectId = row.getAttribute('data-project-id');
+      renderProjects();
+    });
+  });
+  const open = projects.find((project) => project.id === openProjectId);
+  if (open) {
+    readerEl.innerHTML = '<div class="muted">读取项目详情…</div>';
+    void loadProjectDetail(open.id);
+  } else {
+    readerEl.innerHTML = `
+      <div class="usage-empty">
+        <strong>从左边选一个项目</strong>
+        <span>看 agent × 活动、需求流、产出 commit 和 session 时间线。</span>
+      </div>
+    `;
+  }
+}
+
+async function loadProjectDetail(id) {
+  const readerEl = document.getElementById('projectReader');
+  if (!readerEl) return;
+  try {
+    const days = document.getElementById('usageDays')?.value || '30';
+    const detail = await request(`/api/projects/${encodeURIComponent(id)}?days=${encodeURIComponent(days)}`);
+    if (openProjectId !== id) return; // 已切走
+    readerEl.innerHTML = projectDetailHtml(detail);
+    readerEl.querySelectorAll('[data-req-session]').forEach((row) => {
+      row.addEventListener('click', () => {
+        openSessionId = row.getAttribute('data-req-session');
+        showTab('sessions');
+        renderSessions(latestSessions);
+      });
+    });
+  } catch {
+    readerEl.innerHTML = '<div class="usage-empty"><strong>详情加载失败</strong><span>稍后再试。</span></div>';
+  }
+}
+
+function projectDetailHtml(detail) {
+  // agent × 活动:本页核心视角,放最上面
+  const agentsHtml = (detail.agents || []).map((agent) => `
+    <div class="attr-row">
+      <span class="attr-path">${escapeHtml(agent.provider)}</span>
+      <span class="attr-meta">${agent.sessions} 对话(${agent.userSessions} 用户${agent.automatedSessions ? ` + ${agent.automatedSessions} 自动化` : ''}) · ${fmtTokens(agent.tokens)}${agent.lastActive ? ` · ${fmtAgo(agent.lastActive, Date.now())}` : ''}</span>
+    </div>
+  `).join('');
+
+  const requirementsHtml = (detail.requirements || []).map((req) => `
+    <button type="button" class="session-related-req" data-req-session="${escapeHtml(req.sessionId)}">
+      ${escapeHtml(req.text)}
+      <span>${escapeHtml(req.provider)} · ${fmtAgo(req.updatedAt, Date.now())}</span>
+    </button>
+  `).join('');
+
+  const commitsHtml = (detail.commits || []).map((commit) => {
+    const strong = commit.kind === 'declared' || commit.fileOverlap;
+    const url = commit.pushed === false ? null : commitUrl(commit.repo, commit.sha);
+    const sha = escapeHtml(commit.sha.slice(0, 8));
+    const shaHtml = url
+      ? `<a class="attr-sha" href="${escapeHtml(url)}" target="_blank" rel="noreferrer">${sha}</a>`
+      : `<span class="attr-sha${commit.pushed === false ? ' attr-dim' : ''}">${sha}</span>`;
+    return `
+    <div class="attr-row${strong ? '' : ' attr-dim'}" title="${escapeHtml(commit.sha)}">
+      <span class="attr-dot${strong ? ' attr-dot-strong' : ''}">${strong ? '●' : '○'}</span>
+      ${shaHtml}
+      <span class="attr-summary">${escapeHtml(commit.summary || '(no subject)')}</span>
+      <span class="attr-meta">${commit.ts ? fmtAgo(commit.ts, Date.now()) : ''}</span>
+    </div>`;
+  }).join('');
+
+  // session 时间线:倒排;parentId 命中列表内父 session 的 subagent 缩进
+  const ids = new Set((detail.sessions || []).map((session) => session.id));
+  const sessionsHtml = (detail.sessions || []).map((session) => {
+    const origin = session.origin && session.origin !== 'user' ? (ORIGIN_LABELS[session.origin] || session.origin) : '';
+    const nested = session.parentId && ids.has(session.parentId);
+    return `
+    <div class="attr-row${nested ? ' project-subagent' : ''}" title="${escapeHtml(session.id)}">
+      <span class="attr-path">${nested ? '↳ ' : ''}${escapeHtml(session.title || '无标题')}</span>
+      <span class="attr-meta">${escapeHtml(session.provider)}${origin ? ` · ${escapeHtml(origin)}` : ''} · ${fmtAgo(session.updatedAt, Date.now())}</span>
+    </div>`;
+  }).join('');
+
+  return `
+    <div class="session-detail-grid">
+      <dt>项目</dt><dd>${escapeHtml(detail.name)}</dd>
+      <dt>url</dt><dd>${escapeHtml(detail.url)}</dd>
+      <dt>本地根</dt><dd>${escapeHtml(detail.root || '--')}</dd>
+    </div>
+    <div class="session-attrs"><h3>Agent × 活动</h3>${agentsHtml || '<div class="muted">窗口内无活动</div>'}</div>
+    <div class="session-attrs"><h3>需求流</h3>${requirementsHtml || '<div class="muted">窗口内没有可推导的需求</div>'}</div>
+    <div class="session-attrs"><h3>产出 commit <span class="muted">● 声明/文件交集 · ○ 时间窗</span></h3>${commitsHtml || '<div class="muted">窗口内无归因 commit</div>'}</div>
+    <div class="session-attrs"><h3>Session 时间线</h3>${sessionsHtml || '<div class="muted">窗口内无 session</div>'}</div>
+  `;
+}
+
 function sessionDetailHtml(session, pool) {
   const mine = new Set(sessionProjectNames(session));
   const related = (pool || []).filter((row) => (
@@ -1462,6 +1605,7 @@ async function render() {
     renderUsage(latestUsage);
     renderSessions(latestSessions);
     if (currentTab() === 'graph') void refreshGraph();
+    if (currentTab() === 'projects') void refreshProjects();
     maybePollSessionIndex(latestSessions);
     if (dragInFlight) return;
     const grid = document.getElementById('grid');
@@ -1602,11 +1746,11 @@ document.querySelectorAll('[data-session-view]').forEach((btn) => {
 
 function currentTab() {
   const hash = (location.hash || '#plans').replace('#', '');
-  return ['plans', 'sessions', 'graph', 'usage'].includes(hash) ? hash : 'plans';
+  return ['plans', 'sessions', 'projects', 'graph', 'usage'].includes(hash) ? hash : 'plans';
 }
 
 function showTab(name) {
-  if (!['plans', 'sessions', 'graph', 'usage'].includes(name)) name = 'plans';
+  if (!['plans', 'sessions', 'projects', 'graph', 'usage'].includes(name)) name = 'plans';
   const hash = `#${name}`;
   if (location.hash !== hash) location.hash = hash;
   document.querySelectorAll('[data-tab]').forEach((btn) => {
@@ -1616,6 +1760,7 @@ function showTab(name) {
     panel.hidden = panel.getAttribute('data-panel') !== name;
   });
   if (name === 'graph') void refreshGraph();
+  if (name === 'projects') void refreshProjects();
 }
 
 document.getElementById('graphCandidates')?.addEventListener('change', (event) => {

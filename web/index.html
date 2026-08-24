@@ -18,6 +18,7 @@
     <nav class="tabs" role="tablist">
       <button type="button" role="tab" data-tab="plans" aria-selected="true">额度</button>
       <button type="button" role="tab" data-tab="sessions" aria-selected="false">对话</button>
+      <button type="button" role="tab" data-tab="projects" aria-selected="false">项目</button>
       <button type="button" role="tab" data-tab="graph" aria-selected="false">图谱</button>
       <button type="button" role="tab" data-tab="usage" aria-selected="false">Token</button>
     </nav>
@@ -82,6 +83,25 @@
         <div class="usage-empty">
           <strong>从左边选一条对话</strong>
           <span>这里读正文。有 CLI 时可以 Resume 接着做。</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="panel-projects" class="tab-panel" data-panel="projects" hidden>
+    <section class="hero">
+      <div>
+        <p class="eyebrow">PROJECTS</p>
+        <h1>项目</h1>
+        <p class="hero-copy">这个项目上有哪些 agent 干过什么。</p>
+      </div>
+    </section>
+    <div class="session-workbench">
+      <div id="projectList" class="session-list"></div>
+      <div id="projectReader" class="session-reader">
+        <div class="usage-empty">
+          <strong>从左边选一个项目</strong>
+          <span>看 agent × 活动、需求流、产出 commit 和 session 时间线。</span>
         </div>
       </div>
     </div>

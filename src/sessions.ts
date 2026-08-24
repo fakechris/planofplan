@@ -905,13 +905,19 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
   } catch {
     /* commit attribution is best-effort */
   }
-  // origin 归因:一次性 backfill(user_version 2→3,重读 codex 文件头 +
+  // origin 归因:一次性 backfill(user_version <4 时跑,重读 codex 文件头 +
   // claude 路径判断)+ 每轮 herdr 升级。单文件读、有界,失败不拖垮目录
   try {
     backfillSessionOrigins(store);
     applyHerdrOrigin(store);
   } catch {
     /* origin attribution is best-effort */
+  }
+  // projects 实体物化(IA 第一步):从 session_repos 增量 upsert,幂等
+  try {
+    store.materializeProjects();
+  } catch {
+    /* project materialization is best-effort */
   }
   return scanned;
 }
