@@ -61,8 +61,12 @@ STAGED_APP="$STAGING_ROOT/planofplan.app"
 swift build --package-path "$PACKAGE" -c release
 
 # Compile the Bun daemon into the bundle as a standalone executable. No runtime
-# dependency on bun or the source checkout — the .app becomes portable.
+# dependency on bun or the source checkout — the .app becomes portable. The bun
+# toolchain leaves an adhoc linker signature on the output that conflicts with
+# our stable-identity bundle signature; strip it before staging.
 ( cd "$ROOT" && bun build --compile src/cli.ts --outfile "$STAGED_APP/Contents/MacOS/planofplan-daemon" )
+mkdir -p "$STAGED_APP/Contents/MacOS"
+codesign --remove-signature "$STAGED_APP/Contents/MacOS/planofplan-daemon" 2>/dev/null || true
 
 mkdir -p "$STAGED_APP/Contents/MacOS" "$STAGED_APP/Contents/Resources"
 cp "$PACKAGE/.build/arm64-apple-macosx/release/PlanofplanMenuBar" "$STAGED_APP/Contents/MacOS/PlanofplanMenuBar"
