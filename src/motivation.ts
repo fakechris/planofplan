@@ -11,6 +11,15 @@ const KNOWN_ENVELOPE_RE = /^<\s*(?:recommended_plugins|system-reminder|command-|
 const XML_ENVELOPE_RE = /^<[a-zA-Z][a-zA-Z0-9_-]*(?:\s[^>]*)?>/;
 
 /**
+ * 判断一条用户消息是不是已知的工具/系统注入信封(recommended_plugins、
+ * system-reminder 等)。比 isMetaEnvelope 窄:不把任意 XML 标签当信封
+ * ——<task> 这类承载任务正文的包裹由调用方自行剥壳。
+ */
+export function isKnownEnvelope(text: string): boolean {
+  return KNOWN_ENVELOPE_RE.test(text.trim());
+}
+
+/**
  * 判断一条用户消息是不是 meta 信封(系统注入/命令包装/环境快照),
  * 而不是用户自己的需求文本。
  */

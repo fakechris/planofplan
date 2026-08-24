@@ -4,12 +4,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   applyHerdrOrigin,
+  backfillDshFactoryOrigins,
   backfillSessionOrigins,
   classifyCodexMeta,
+  classifyDshHeader,
+  classifyFactoryStart,
   classifySessionPath,
   herdrPaneCwd,
   parseHerdrLog,
 } from '../src/session-origin.ts';
+import { materializeSessionLinks } from '../src/session-links.ts';
 import { openMemoryDb } from '../src/db.ts';
 import type { SessionRecord } from '../src/types.ts';
 
@@ -119,6 +123,7 @@ describe('herdr 关联(fixture,不依赖真机文件)', () => {
     const upgraded = applyHerdrOrigin(store, logPath, jsonPath);
     expect(upgraded).toBe(1);
     expect(store.getSession('codex:hit')?.origin).toBe('herdr');
+    expect(store.getSession('codex:hit')?.originDetail).toBe('herdr:pane:1');
     expect(store.getSession('codex:late')?.origin).toBe('user');
     expect(store.getSession('codex:wrongdir')?.origin).toBe('user');
     expect(store.getSession('claude:sub')?.origin).toBe('subagent');
@@ -189,10 +194,83 @@ describe('backfillSessionOrigins', () => {
   });
 
   test('getUserVersion/setUserVersion 语义(重复 ALTER 容错)', () => {
-    // openMemoryDb 走新 SCHEMA + 全部迁移;真实老库迁移由 v1→…→v5 链覆盖
+    // openMemoryDb 走新 SCHEMA + 全部迁移;真实老库迁移由 v1→…→v6 链覆盖
     const store = openMemoryDb();
-    expect(store.getUserVersion()).toBe(5);
+    expect(store.getUserVersion()).toBe(6);
     expect(() => store.setUserVersion(4)).not.toThrow();
     expect(store.getUserVersion()).toBe(4);
+  });
+});
+
+describe('dsh / factory 子代理分类', () => {
+  test('classifyDshHeader:头部 origin=subagent + parentSession → subagent + dsh 父', () => {
+    expect(classifyDshHeader({
+      type: 'session', id: '004f77e4-55b2-4128-8b5b-824fbab89176',
+      origin: 'subagent', parentSession: 'session-c56c015a-8009-4d8d-9b03-a77423e06eeb',
+      delegationDepth: 1,
+    })).toEqual({ origin: 'subagent', parentId: 'dsh:session-c56c015a-8009-4d8d-9b03-a77423e06eeb' });
+  });
+
+  test('classifyDshHeader:user 头部 / 缺 parentSession / 回指自身 → 不带或抑制 parentId', () => {
+    expect(classifyDshHeader({ type: 'session', id: 'session-x', cwd: '/repo', delegationDepth: 0 })).toBeNull();
+    expect(classifyDshHeader({ type: 'session', id: 'x', origin: 'subagent' })).toEqual({ origin: 'subagent', parentId: null });
+    expect(classifyDshHeader({ type: 'session', id: 'same', origin: 'subagent', parentSession: 'same' }))
+      .toEqual({ origin: 'subagent', parentId: null });
+    expect(classifyDshHeader(undefined)).toBeNull();
+  });
+
+  test('classifyFactoryStart:callingSessionId → subagent + factory 父;普通会话 → null', () => {
+    expect(classifyFactoryStart({
+      type: 'session_start', id: '71129b6f', title: 'Worker: Research',
+      callingSessionId: '7e73b9de', callingToolUseId: 'call_x',
+    })).toEqual({ origin: 'subagent', parentId: 'factory:7e73b9de' });
+    expect(classifyFactoryStart({ type: 'session_start', id: 'a', title: 'New Session' })).toBeNull();
+    // 回指自身抑制
+    expect(classifyFactoryStart({ type: 'session_start', id: 'a', callingSessionId: 'a' })).toBeNull();
+    expect(classifyFactoryStart(undefined)).toBeNull();
+  });
+});
+
+describe('backfillDshFactoryOrigins', () => {
+  test('存量行重读首行分类、幂等哨兵、已识别的不动', () => {
+    const root = mkdtempSync(join(tmpdir(), 'planofplan-origin-dsh-factory-'));
+    try {
+      const dshSub = join(root, 'session.jsonl');
+      writeFileSync(dshSub, `${JSON.stringify({
+        type: 'session', id: 'sub-uuid', cwd: '/repo',
+        origin: 'subagent', parentSession: 'session-parent-uuid', delegationDepth: 1,
+      })}\n`);
+      const dshUser = join(root, 'user-session.jsonl');
+      writeFileSync(dshUser, `${JSON.stringify({ type: 'session', id: 'user-uuid', cwd: '/repo', delegationDepth: 0 })}\n`);
+      const factoryWorker = join(root, 'worker.jsonl');
+      writeFileSync(factoryWorker, `${JSON.stringify({
+        type: 'session_start', id: 'w1', title: 'Worker: Research',
+        callingSessionId: 'p1', callingToolUseId: 'call_x',
+      })}\n`);
+      const store = openMemoryDb();
+      store.upsertSessions([
+        session({ id: 'dsh:sub-uuid', provider: 'dsh', nativeId: 'sub-uuid', sourceFile: dshSub }),
+        session({ id: 'dsh:user-uuid', provider: 'dsh', nativeId: 'user-uuid', sourceFile: dshUser }),
+        session({ id: 'factory:w1', provider: 'factory', nativeId: 'w1', sourceFile: factoryWorker }),
+        // 已识别的不动(herdr 强于无标记,但这里只验证不被覆盖)
+        session({ id: 'factory:marked', provider: 'factory', nativeId: 'marked', origin: 'herdr', sourceFile: join(root, 'gone.jsonl') }),
+      ]);
+      backfillDshFactoryOrigins(store);
+      expect(store.getSession('dsh:sub-uuid')).toMatchObject({ origin: 'subagent', parentId: 'dsh:session-parent-uuid' });
+      expect(store.getSession('dsh:user-uuid')?.origin).toBe('user');
+      expect(store.getSession('factory:w1')).toMatchObject({ origin: 'subagent', parentId: 'factory:p1' });
+      expect(store.getSession('factory:marked')?.origin).toBe('herdr');
+      // 哨兵置位;重跑不报错
+      expect(store.getSessionIndexState('__origin_backfill_dsh_factory__')).not.toBeNull();
+      backfillDshFactoryOrigins(store);
+      expect(store.getSession('dsh:sub-uuid')?.origin).toBe('subagent');
+      // parentId 落库后,Launch 边物化统一接手(provider 无关)
+      materializeSessionLinks(store);
+      expect(store.linksForSession('dsh:sub-uuid').spawnedBy[0]).toMatchObject({ evidenceKind: 'observed' });
+      rmSync(root, { recursive: true, force: true });
+    } catch (error) {
+      rmSync(root, { recursive: true, force: true });
+      throw error;
+    }
   });
 });

@@ -248,23 +248,30 @@ function sessionProjectName(session) {
 function fillSessionFilters(list) {
   const providerSel = document.getElementById('sessionProvider');
   const projectSel = document.getElementById('sessionProject');
+  const cwdSel = document.getElementById('sessionCwd');
   if (!providerSel || !projectSel || !list) return;
   const provider = providerSel.value;
   const project = projectSel.value;
+  const cwd = cwdSel?.value || '';
   // 计数口径与列表一致:先吃「自动化 + 隐藏无标题」两个开关,再现场聚合。
-  // facet 惯例:provider 计数不吃 project 选择、project 计数不吃 provider
-  // 选择,搜索词不影响计数。服务端 byProvider/byProject 保持全量(图谱用)。
+  // facet 惯例:各维度计数互不吃对方的选择,搜索词不影响计数。
+  // 服务端 byProvider/byProject 保持全量(图谱用)。
   const hideUntitled = document.getElementById('sessionHideUntitled')?.checked;
   const showAutomated = document.getElementById('sessionShowAutomated')?.checked;
+  const base = (list.sessions || []).filter((session) => {
+    if (!showAutomated && (session.origin || 'user') !== 'user') return false;
+    if (hideUntitled && !(session.title || '').trim()) return false;
+    return true;
+  });
   const byProvider = new Map();
   const byProject = new Map();
-  for (const session of list.sessions || []) {
-    if (!showAutomated && (session.origin || 'user') !== 'user') continue;
-    if (hideUntitled && !(session.title || '').trim()) continue;
+  const byCwd = new Map();
+  for (const session of base) {
     byProvider.set(session.provider, (byProvider.get(session.provider) ?? 0) + 1);
     for (const name of sessionProjectNames(session)) {
       byProject.set(name, (byProject.get(name) ?? 0) + 1);
     }
+    if (session.cwd) byCwd.set(session.cwd, (byCwd.get(session.cwd) ?? 0) + 1);
   }
   const sortDesc = (a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0]));
   providerSel.innerHTML = '<option value="">全部来源</option>' + [...byProvider.entries()].sort(sortDesc).map(([name, count]) => (
@@ -273,6 +280,18 @@ function fillSessionFilters(list) {
   projectSel.innerHTML = '<option value="">全部项目</option>' + [...byProject.entries()].sort(sortDesc).map(([name, count]) => (
     `<option value="${escapeHtml(name)}">${escapeHtml(name)} (${count})</option>`
   )).join('');
+  if (cwdSel) {
+    // 目录:按 session 数倒排,超 50 截断;显示最后两段路径,全路径放 title
+    const cwdLabel = (path) => path.replace(/[/\\]+$/, '').split('/').slice(-2).join('/') || path;
+    const cwdEntries = [...byCwd.entries()].sort(sortDesc);
+    cwdSel.innerHTML = '<option value="">全部目录</option>' + cwdEntries.slice(0, 50).map(([path, count]) => (
+      `<option value="${escapeHtml(path)}" title="${escapeHtml(path)}">${escapeHtml(cwdLabel(path))} (${count})</option>`
+    )).join('') + (cwdEntries.length > 50
+      ? `<option value="" disabled>… 还有 ${cwdEntries.length - 50} 个目录,用搜索收窄</option>`
+      : '');
+    if ([...cwdSel.options].some((option) => option.value === cwd)) cwdSel.value = cwd;
+    else cwdSel.value = '';
+  }
   if ([...providerSel.options].some((option) => option.value === provider)) providerSel.value = provider;
   if ([...projectSel.options].some((option) => option.value === project)) projectSel.value = project;
 }
@@ -280,6 +299,7 @@ function fillSessionFilters(list) {
 function filteredSessions(list) {
   const provider = document.getElementById('sessionProvider')?.value || '';
   const project = document.getElementById('sessionProject')?.value || '';
+  const cwd = document.getElementById('sessionCwd')?.value || '';
   const query = (document.getElementById('sessionSearch')?.value || '').trim().toLowerCase();
   const hideUntitled = document.getElementById('sessionHideUntitled')?.checked;
   const showAutomated = document.getElementById('sessionShowAutomated')?.checked;
@@ -291,6 +311,8 @@ function filteredSessions(list) {
     if (hideUntitled && untitled) return false;
     if (provider && session.provider !== provider) return false;
     if (project && !sessionProjectNames(session).includes(project)) return false;
+    // 目录(cwd)和项目(git repo)是两个独立维度,交集生效
+    if (cwd && session.cwd !== cwd) return false;
     // 与已发往服务端的 q 一致时,列表已是「元数据 ∪ 消息正文 FTS」的并集,
     // 本地再按元数据过滤会把 FTS 命中的条目误杀
     if (query && query !== sessionServerQuery) {
@@ -350,6 +372,15 @@ function renderSessions(list) {
       renderSessions(latestSessions);
     });
   });
+  listEl.querySelectorAll('[data-toggle-subagents]').forEach((row) => {
+    row.addEventListener('click', (event) => {
+      event.stopPropagation();
+      const id = row.getAttribute('data-toggle-subagents');
+      if (expandedParents.has(id)) expandedParents.delete(id);
+      else expandedParents.add(id);
+      renderSessions(latestSessions);
+    });
+  });
   listEl.querySelector('[data-more]')?.addEventListener('click', () => {
     sessionVisibleCount += 40;
     renderSessions(latestSessions);
@@ -381,6 +412,7 @@ function renderSessions(list) {
     });
     void loadSessionTranscript(open.id);
     void loadSessionAttribution(open);
+    void loadSessionLaunch(open);
   } else {
     readerEl.innerHTML = `
       <div class="usage-empty">
@@ -399,7 +431,7 @@ const ORIGIN_LABELS = {
   herdr: 'herdr',
 };
 
-function sessionItemHtml(session) {
+function sessionItemHtml(session, nested = false) {
   const hit = session.messageHit;
   const hitHtml = hit
     ? `<span class="session-hit">${highlightHit(hit.snippet)} · ${hit.count} 处命中</span>`
@@ -407,8 +439,8 @@ function sessionItemHtml(session) {
   const originLabel = ORIGIN_LABELS[session.origin] || '';
   const originHtml = originLabel ? ` · <i class="session-origin">${originLabel}</i>` : '';
   return `
-    <button type="button" class="session-item${session.id === openSessionId ? ' active' : ''}" data-session-id="${escapeHtml(session.id)}">
-      <strong>${escapeHtml(session.requirement || session.title || '无标题')}</strong>
+    <button type="button" class="session-item${session.id === openSessionId ? ' active' : ''}${nested ? ' session-item-sub' : ''}" data-session-id="${escapeHtml(session.id)}">
+      <strong>${nested ? '↳ ' : ''}${escapeHtml(session.requirement || session.title || '无标题')}</strong>
       <span>${escapeHtml(session.provider)} · ${escapeHtml(sessionProjectName(session))} · ${fmtAgo(session.updatedAt, Date.now())}${session.totalTokens ? ` · ${fmtTokens(session.totalTokens)}` : ''}${originHtml}</span>
       ${hitHtml}
     </button>
@@ -420,8 +452,34 @@ function highlightHit(snippet) {
   return escapeHtml(snippet || '').replaceAll('\u0001', '<b>').replaceAll('\u0002', '</b>');
 }
 
+// subagent 折叠:parentId 命中同列表父 session 的不独立成行,折叠进父行;
+// 展开状态内存级(刷新重置)。父不在列表(窗口外/被过滤)时正常成行。
+const expandedParents = new Set();
+
 function sessionListHtml(visible, total) {
-  return visible.map(sessionItemHtml).join('') + (total > visible.length
+  const ids = new Set(visible.map((session) => session.id));
+  const childrenOf = new Map();
+  const tops = [];
+  for (const session of visible) {
+    if (session.parentId && ids.has(session.parentId)) {
+      const kids = childrenOf.get(session.parentId) ?? [];
+      kids.push(session);
+      childrenOf.set(session.parentId, kids);
+    } else {
+      tops.push(session);
+    }
+  }
+  const rows = tops.map((session) => {
+    let html = sessionItemHtml(session);
+    const kids = childrenOf.get(session.id);
+    if (kids?.length) {
+      const open = expandedParents.has(session.id);
+      html += `<button type="button" class="session-subagent-toggle" data-toggle-subagents="${escapeHtml(session.id)}" aria-expanded="${open}">${open ? '▾' : '▸'} ${kids.length} 个子代理</button>`;
+      if (open) html += kids.map((kid) => sessionItemHtml(kid, true)).join('');
+    }
+    return html;
+  }).join('');
+  return rows + (total > visible.length
     ? `<button type="button" class="session-more" data-more>还有 ${total - visible.length} 条，显示更多</button>`
     : '');
 }
@@ -527,6 +585,39 @@ function bindAttrFold(el) {
     el.querySelector('[data-attr-rest]')?.removeAttribute('hidden');
     btn.remove();
   });
+}
+
+// 「启动」行:非 user origin 时显示 Launch 边(谁发起了它)。
+// spawned-by 链接优先,其次 origin_detail(herdr pane),兜底 origin 标签。
+async function loadSessionLaunch(session) {
+  const el = document.getElementById('sessionLaunchInfo');
+  if (!el) return;
+  const originLabel = ORIGIN_LABELS[session.origin] || session.origin || '--';
+  try {
+    const sep = session.id.indexOf(':');
+    const data = await request(`/api/sessions/${encodeURIComponent(session.id.slice(0, sep))}/${encodeURIComponent(session.id.slice(sep + 1))}/links`);
+    const parent = (data.spawnedBy || [])[0];
+    if (parent) {
+      const evidence = ` <i class="session-origin">${escapeHtml(parent.evidenceKind)}</i>`;
+      if (parent.dangling) {
+        el.innerHTML = `由 ${escapeHtml(parent.sessionId)}(已不在库)发起${evidence}`;
+      } else {
+        const label = `${parent.provider}:${parent.title || parent.sessionId}`;
+        el.innerHTML = `由 <button type="button" class="inline-link" data-launch-parent="${escapeHtml(parent.sessionId)}">${escapeHtml(label)}</button> 发起${evidence}`;
+        el.querySelector('[data-launch-parent]')?.addEventListener('click', (event) => {
+          event.stopPropagation();
+          openSessionId = event.currentTarget.getAttribute('data-launch-parent');
+          renderSessions(latestSessions);
+        });
+      }
+    } else if (session.originDetail) {
+      el.textContent = session.originDetail;
+    } else {
+      el.textContent = originLabel;
+    }
+  } catch {
+    el.textContent = originLabel;
+  }
 }
 
 // 路径显示:能相对项目根(cwd / gitRoot / work repo root)就显示相对部分;
@@ -1056,6 +1147,9 @@ function sessionDetailHtml(session, pool) {
       <dt>提交 git</dt><dd>${escapeHtml(sessionRepos(session, 'commit').map((repo) => `${repo.name} (${repo.evidenceKind})`).join(', ') || '--')}</dd>
       <dt>Id</dt><dd>${escapeHtml(session.id)}</dd>
       <dt>cwd</dt><dd>${escapeHtml(session.cwd || '--')}</dd>
+      ${session.origin && session.origin !== 'user'
+        ? '<dt>启动</dt><dd id="sessionLaunchInfo" class="muted">读取中…</dd>'
+        : ''}
       <dt>git</dt><dd>${escapeHtml(session.gitRoot || '--')}</dd>
       <dt>日志</dt><dd>${escapeHtml(session.sourceFile || '--')}</dd>
       <dt>开始</dt><dd>${session.startedAt ? fmtTime(session.startedAt, true) : '--'}</dd>
@@ -1712,6 +1806,7 @@ function resetSessionFilters() {
 }
 document.getElementById('sessionProvider')?.addEventListener('change', resetSessionFilters);
 document.getElementById('sessionProject')?.addEventListener('change', resetSessionFilters);
+document.getElementById('sessionCwd')?.addEventListener('change', resetSessionFilters);
 document.getElementById('sessionHideUntitled')?.addEventListener('change', resetSessionFilters);
 document.getElementById('sessionShowAutomated')?.addEventListener('change', resetSessionFilters);
 // 搜索框:输入即本地过滤元数据,停顿 300ms 后带 q 问服务端(并集消息正文 FTS)

@@ -352,6 +352,14 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     return c.json({ sha, sessions: rows });
   });
 
+  // Launch 边:谁发起了这个 session / 它发起了谁(对端悬空也返回)
+  app.get('/api/sessions/:provider/:id/links', (c) => {
+    const sessionId = `${c.req.param('provider')}:${c.req.param('id')}`;
+    const session = store.getSession(sessionId);
+    if (!session) return c.json({ ok: false, error: 'unknown session' }, 404);
+    return c.json({ sessionId, ...store.linksForSession(sessionId) });
+  });
+
   app.post('/api/sessions/:id/resume', (c) => {
     const id = decodeURIComponent(c.req.param('id'));
     const session = store.getSession(id);

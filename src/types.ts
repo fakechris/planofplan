@@ -145,8 +145,10 @@ export interface SessionRecord {
   gitName?: string | null;
   /** 会话来源归因(session-origin.ts);未标记即真实用户会话。 */
   origin?: SessionOrigin;
-  /** codex subagent 的父 session id(codex:<parent_native_id>)。 */
+  /** codex/claude subagent 的父 session id(provider:<parent_native_id>)。 */
   parentId?: string | null;
+  /** 环境型启动方标识(如 `herdr:pane:10`);不进 session_links 边表。 */
+  originDetail?: string | null;
   /** 需求文本:从 session_messages 用户消息流抽取(motivation.ts),由读侧附上。 */
   requirement?: string | null;
   /**
@@ -180,6 +182,28 @@ export interface SessionMessageHit {
   sessionId: string;
   count: number;
   snippet: string;
+}
+
+/** session_links 表行:session ↔ session 关系边(Launch 实体,§1.4b)。 */
+export interface SessionLink {
+  /** 被拉起的 session(子)。 */
+  fromSession: string;
+  /** 发起者 session(父);可能悬空(窗口外/已删),查询侧容忍。 */
+  toSession: string;
+  /** 首值 'spawned-by'。 */
+  kind: string;
+  evidenceKind: EvidenceKind;
+  createdAt: number;
+}
+
+/** /api/sessions/:provider/:id/links 的解析行(带对端 session 摘要)。 */
+export interface SessionLinkView {
+  sessionId: string;
+  evidenceKind: EvidenceKind;
+  provider: string | null;
+  title: string | null;
+  /** true = 对端 session 不在库里(悬空)。 */
+  dangling: boolean;
 }
 
 /** session_index_state 表行：消息级索引的行级续扫水位。 */

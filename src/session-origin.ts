@@ -4,6 +4,8 @@
  * 分类(优先级从高到低):
  *   claude:source_file 含 /subagents/                    → subagent
  *   codex:source.subagent.thread_spawn                   → subagent(记 parentId)
+ *   dsh:头部 origin === 'subagent' + parentSession       → subagent(记 parentId)
+ *   factory:session_start.callingSessionId               → subagent(记 parentId)
  *   codex:originator == 'Claude Code'                    → plugin:claude
  *   codex:originator == 'codex_exec' || source == 'exec' → exec
  *   其余                                                 → user
@@ -12,6 +14,7 @@
  * 等于该 pane 在 session.json 里的 cwd。herdr 不存在/解析失败 → 跳过。
  */
 import { existsSync, readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { Store } from './db.ts';
@@ -46,6 +49,35 @@ export function classifyCodexMeta(payload: Record<string, unknown>): OriginTag |
 export function classifySessionPath(provider: string, sourceFile: string): OriginTag | null {
   if (provider === 'claude' && sourceFile.includes('/subagents/')) return { origin: 'subagent' };
   return null;
+}
+
+/**
+ * dsh session 头(type:'session' 首行)→ origin。头部自带 declared 级标记:
+ *   "origin":"subagent" + "parentSession":"session-<uuid>"(父是 dsh session id)
+ * user 会话(delegationDepth 0)头部没有这两个字段 → null。
+ */
+export function classifyDshHeader(header: Record<string, unknown> | undefined | null): OriginTag | null {
+  if (!header || header.type !== 'session' || header.origin !== 'subagent') return null;
+  const parentSession = typeof header.parentSession === 'string' && header.parentSession.trim()
+    && header.parentSession !== header.id
+    ? header.parentSession
+    : null;
+  return { origin: 'subagent', parentId: parentSession ? `dsh:${parentSession}` : null };
+}
+
+/**
+ * factory(droid)session_start 首行 → origin。Worker 子会话自带
+ * callingSessionId(发起它的 droid session id)+ callingToolUseId;
+ * 用户手开的会话没有该字段 → null。
+ */
+export function classifyFactoryStart(start: Record<string, unknown> | undefined | null): OriginTag | null {
+  if (!start || start.type !== 'session_start') return null;
+  const callingSessionId = typeof start.callingSessionId === 'string' && start.callingSessionId.trim()
+    && start.callingSessionId !== start.id
+    ? start.callingSessionId
+    : null;
+  if (!callingSessionId) return null;
+  return { origin: 'subagent', parentId: `factory:${callingSessionId}` };
 }
 
 // ── herdr 关联 ──────────────────────────────────────────────────
@@ -111,16 +143,20 @@ export function applyHerdrOrigin(
   const paneCwd = herdrPaneCwd(readFileSync(sessionJsonPath, 'utf8'));
   if (events.length === 0 || paneCwd.size === 0) return 0;
 
-  const patches: Array<{ id: string; origin: SessionOrigin }> = [];
+  // user → herdr 升级;已是 herdr 的顺手补 origin_detail(v6 前的存量)。
+  // 更强标记(subagent/plugin/exec)不动。
+  const patches: Array<{ id: string; origin: SessionOrigin; originDetail: string }> = [];
   for (const session of store.listSessionRows()) {
-    if ((session.origin ?? 'user') !== 'user') continue; // 不覆盖更强标记
+    const origin = session.origin ?? 'user';
+    if (origin !== 'user' && origin !== 'herdr') continue;
+    if (origin === 'herdr' && session.originDetail) continue;
     const started = session.startedAt ?? session.updatedAt;
     for (const event of events) {
       const provider = HERDR_AGENT_PROVIDER[event.agent];
       if (provider !== session.provider) continue;
       if (Math.abs(started - event.ts) > HERDR_WINDOW_MS) continue;
       if (paneCwd.get(event.pane) !== session.cwd) continue;
-      patches.push({ id: session.id, origin: 'herdr' });
+      patches.push({ id: session.id, origin: 'herdr', originDetail: `herdr:pane:${event.pane}` });
       break;
     }
   }
@@ -167,6 +203,54 @@ export function backfillSessionOrigins(store: Store): void {
   store.updateSessionOrigins(patches);
   store.upsertSessionIndexState({
     path: '__origin_backfill__',
+    mtimeMs: Date.now(),
+    size: 0,
+    parsedBytes: 0,
+    lines: 0,
+    parserVersion: 0,
+  });
+}
+
+/** 单行头部读取:dsh 是 zstd 压缩(与 sessions.ts 的 readZstdHead 同一套
+ * zstd 解析),factory 是明文 jsonl;两类头部都固定在首行。 */
+function readFirstJsonLine(path: string): Record<string, unknown> | null {
+  try {
+    let line: string;
+    if (path.endsWith('.jsonl.zstd') || path.endsWith('.jsonl.zst')) {
+      const zstd = process.env.ZSTD_PATH?.trim()
+        || (existsSync('/opt/homebrew/bin/zstd') ? '/opt/homebrew/bin/zstd' : 'zstd');
+      line = execFileSync(zstd, ['-dc', path], { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 })
+        .split('\n', 1)[0] ?? '';
+    } else {
+      line = readFileSync(path, 'utf8').split('\n', 1)[0] ?? '';
+    }
+    const record = JSON.parse(line) as unknown;
+    return record && typeof record === 'object' ? record as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * dsh / factory 子代理的存量 backfill。独立哨兵:__origin_backfill__ 是 v4
+ * 时代的 codex/claude pass,已置位不会重跑。只补 origin 仍为 user 的行
+ * (识别过的/更强标记的不动);upsert 的 COALESCE 语义保证重扫不洗掉。
+ */
+export function backfillDshFactoryOrigins(store: Store): void {
+  if (store.getSessionIndexState('__origin_backfill_dsh_factory__')) return;
+  const patches: Array<{ id: string; origin: SessionOrigin; parentId?: string | null }> = [];
+  for (const session of store.listSessionRows()) {
+    if ((session.provider !== 'dsh' && session.provider !== 'factory') || !session.sourceFile) continue;
+    if ((session.origin ?? 'user') !== 'user') continue;
+    if (!existsSync(session.sourceFile)) continue;
+    const record = readFirstJsonLine(session.sourceFile);
+    if (!record) continue;
+    const tag = session.provider === 'dsh' ? classifyDshHeader(record) : classifyFactoryStart(record);
+    if (tag) patches.push({ id: session.id, origin: tag.origin, parentId: tag.parentId ?? null });
+  }
+  store.updateSessionOrigins(patches);
+  store.upsertSessionIndexState({
+    path: '__origin_backfill_dsh_factory__',
     mtimeMs: Date.now(),
     size: 0,
     parsedBytes: 0,
