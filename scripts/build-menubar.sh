@@ -76,6 +76,10 @@ fi
 /usr/libexec/PlistBuddy -c "Set :PlanofplanBuildTimestamp $BUILD_TIMESTAMP" "$STAGED_APP/Contents/Info.plist"
 printf '%s\n' "${PLANOFPPLAN_MENUBAR_PORT:-9291}" > "$STAGED_APP/Contents/Resources/port"
 
+# Bundle the static frontend next to the compiled daemon. WEB_DIR in server.ts
+# resolves to <Contents>/web from the binary's location, so we mirror that here.
+cp -R "$ROOT/web" "$STAGED_APP/Contents/web"
+
 if ! codesign --force --sign "$IDENTITY" --identifier "$IDENTIFIER" --timestamp=none "$STAGED_APP/Contents/MacOS/planofplan-daemon"; then
   echo "Failed to sign bundled daemon" >&2
   exit 1

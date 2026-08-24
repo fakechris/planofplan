@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
-import { join, resolve, isAbsolute } from 'node:path';
+import { dirname, join, resolve, isAbsolute } from 'node:path';
+import { existsSync } from 'node:fs';
 import type { AppConfig } from './config.ts';
 import type { Store } from './db.ts';
 import type { Scheduler } from './core.ts';
@@ -19,7 +20,17 @@ import { readTranscript } from './transcript.ts';
 import { launchResume } from './resume.ts';
 import { getStartupSettings, setLaunchOnStartup } from './startup.ts';
 
-const WEB_DIR = resolve(import.meta.dir, '../web');
+// In dev (bun src/cli.ts), import.meta.dir points at src/ and ../web = repo/web.
+// In a bun build --compile binary, import.meta.dir is a virtual $bunfs/root path
+// that has no on-disk web/ sibling; fall back to the executable's real location
+// (Contents/MacOS/planofplan-daemon -> Contents/web).
+const WEB_DIR = (() => {
+  const candidates = [
+    resolve(import.meta.dir, '../web'),
+    resolve(dirname(process.execPath), '../web'),
+  ];
+  return candidates.find((dir) => existsSync(dir)) ?? candidates[0];
+})();
 
 export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig): Hono {
   const app = new Hono();
