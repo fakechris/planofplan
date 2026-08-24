@@ -6,11 +6,15 @@ import type {
   PlanStateRow,
   Project,
   QuotaWindow,
+  PlanFileRecord,
+  PlanSection,
+  PlanSnapshotRecord,
   RequirementRecord,
   SessionCommit,
   SessionFileTouch,
   SessionLink,
   SessionLinkView,
+  TodoSnapshotRecord,
   SessionIndexState,
   SessionMessageHit,
   SessionMessageRow,
@@ -25,6 +29,7 @@ import { nameOfUrl } from './repos.ts';
 import { isKnownEnvelope } from './motivation.ts';
 import { backfillLaunchLinks } from './session-links.ts';
 import { materializeRequirements } from './requirements.ts';
+import { materializePlanFiles, materializeTodoSnapshots } from './plans.ts';
 
 /** projects.id:url 的确定性短 hash(sha1 前 12 位)。无 remote 的 repo 用
  *  root path 做输入(dsh-track 同款退化),同输入必得同 id,物化幂等。 */
@@ -246,6 +251,46 @@ CREATE TABLE IF NOT EXISTS requirement_repos (
   PRIMARY KEY (requirement_id, url)
 );
 CREATE INDEX IF NOT EXISTS idx_requirement_repos_url ON requirement_repos(url);
+-- 计划态实体(§5 计划研究):plan 文件身份锚路径,append-only 快照序列;
+-- todo_snapshots 是消息层(TodoWrite)的演进快照。不做任务级身份(thin-observer 教训)。
+CREATE TABLE IF NOT EXISTS plan_files (
+  id TEXT PRIMARY KEY,
+  path TEXT NOT NULL UNIQUE,
+  kind TEXT NOT NULL,
+  title TEXT,
+  goal TEXT,
+  current_phase TEXT,
+  repo TEXT,
+  first_seen_at INTEGER NOT NULL,
+  last_seen_at INTEGER NOT NULL,
+  missing_since INTEGER,
+  last_snapshot_id TEXT,
+  last_snapshot_mtime_ms INTEGER,
+  last_snapshot_hash TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_plan_files_repo ON plan_files(repo);
+CREATE TABLE IF NOT EXISTS plan_snapshots (
+  id TEXT PRIMARY KEY,
+  plan_file_id TEXT NOT NULL,
+  raw_hash TEXT NOT NULL,
+  mtime_ms INTEGER NOT NULL,
+  commit_sha TEXT,
+  sections_json TEXT NOT NULL,
+  checkbox_checked INTEGER NOT NULL,
+  checkbox_total INTEGER NOT NULL,
+  current_phase TEXT,
+  captured_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_plan_snapshots_file ON plan_snapshots(plan_file_id, captured_at);
+CREATE TABLE IF NOT EXISTS todo_snapshots (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  ts INTEGER,
+  items_json TEXT NOT NULL,
+  UNIQUE (session_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_todo_snapshots_session ON todo_snapshots(session_id, seq);
 `;
 
 interface SnapshotRow {
@@ -403,6 +448,17 @@ export class Store {
     if (version < 7) {
       materializeRequirements(this);
       db.exec('PRAGMA user_version = 7');
+    }
+    // v8:计划态实体。todo 快照纯库内重导;plan 文件扫盘(mtime 门控,
+    // 之后每轮 collect 增量)。git/FS 调用一次性,失败不阻塞迁移。
+    if (version < 8) {
+      try {
+        materializeTodoSnapshots(this);
+        materializePlanFiles(this);
+      } catch {
+        /* backfill is best-effort;collect 轮会补 */
+      }
+      db.exec('PRAGMA user_version = 8');
     }
   }
 
@@ -1616,6 +1672,7 @@ export class Store {
       this.db.query('DELETE FROM session_links WHERE from_session = ? OR to_session = ?').run(id, id);
       this.db.query('DELETE FROM requirement_repos WHERE requirement_id IN (SELECT id FROM requirements WHERE session_id = ?)').run(id);
       this.db.query('DELETE FROM requirements WHERE session_id = ?').run(id);
+      this.db.query('DELETE FROM todo_snapshots WHERE session_id = ?').run(id);
       this.db.query('DELETE FROM session_repos WHERE session_id = ?').run(id);
       this.db.query('DELETE FROM sessions WHERE id = ?').run(id);
     });
@@ -1727,8 +1784,7 @@ export class Store {
   }
 
   /** span 内的 touch 行(需求详情的证据窗口)。ordinal 与消息 seq 同空间。 */
-  spanTouches(sessionId: string, fromSeq: number, toSeqExclusive: number | null): Array<{
-    filePath: string;
+  spanTouches(sessionId: string, fromSeq: number, toSeqExclusive: number | null): Array<{    filePath: string;
     toolName: string;
     op: string;
     ts: number | null;
@@ -1752,6 +1808,167 @@ export class Store {
       ts: row.ts,
       ordinal: row.ordinal,
     }));
+  }
+
+  // ── 计划态实体(v8:PlanFile / 快照 / TodoWrite)──────────────────
+
+  /** plan 文件发现根:session cwd ∪ project root。 */
+  sessionCwds(): string[] {
+    const rows = this.db.query('SELECT DISTINCT cwd FROM sessions WHERE cwd IS NOT NULL').all() as Array<{ cwd: string }>;
+    return rows.map((row) => row.cwd);
+  }
+
+  projectRoots(): string[] {
+    const rows = this.db.query('SELECT DISTINCT root FROM projects WHERE root IS NOT NULL').all() as Array<{ root: string }>;
+    return rows.map((row) => row.root);
+  }
+
+  /** 消息层 todo 快照原料(role=tool 且 tool_name 含 todo)。 */
+  todoToolRows(): Array<{ sessionId: string; seq: number; ts: number | null; text: string }> {
+    return this.db.query(
+      `SELECT session_id AS sessionId, seq, timestamp AS ts, text
+       FROM session_messages
+       WHERE role = 'tool' AND lower(tool_name) LIKE '%todo%' AND text LIKE '{%'
+       ORDER BY session_id, seq`,
+    ).all() as Array<{ sessionId: string; seq: number; ts: number | null; text: string }>;
+  }
+
+  replaceAllTodoSnapshots(rows: TodoSnapshotRecord[]): void {
+    this.withTransaction(() => {
+      this.db.query('DELETE FROM todo_snapshots').run();
+      const stmt = this.db.query(
+        `INSERT INTO todo_snapshots (id, session_id, seq, ts, items_json) VALUES (?, ?, ?, ?, ?)`,
+      );
+      for (const row of rows) stmt.run(row.id, row.sessionId, row.seq, row.ts, JSON.stringify(row.items));
+    });
+  }
+
+  todoSnapshotsForSession(sessionId: string): TodoSnapshotRecord[] {
+    const rows = this.db.query(
+      `SELECT id, session_id, seq, ts, items_json FROM todo_snapshots
+       WHERE session_id = ? ORDER BY seq`,
+    ).all(sessionId) as Array<{ id: string; session_id: string; seq: number; ts: number | null; items_json: string }>;
+    return rows.map((row) => ({
+      id: row.id,
+      sessionId: row.session_id,
+      seq: row.seq,
+      ts: row.ts,
+      items: JSON.parse(row.items_json) as TodoSnapshotRecord['items'],
+    }));
+  }
+
+  listPlanFiles(): PlanFileRecord[] {
+    const rows = this.db.query(
+      `SELECT id, path, kind, title, goal, current_phase, repo, first_seen_at, last_seen_at,
+              missing_since, last_snapshot_id, last_snapshot_mtime_ms, last_snapshot_hash
+       FROM plan_files`,
+    ).all() as Array<{
+      id: string; path: string; kind: string; title: string | null; goal: string | null;
+      current_phase: string | null; repo: string | null; first_seen_at: number; last_seen_at: number;
+      missing_since: number | null; last_snapshot_id: string | null;
+      last_snapshot_mtime_ms: number | null; last_snapshot_hash: string | null;
+    }>;
+    return rows.map((row) => ({
+      id: row.id,
+      path: row.path,
+      kind: row.kind,
+      title: row.title,
+      goal: row.goal,
+      currentPhase: row.current_phase,
+      repo: row.repo,
+      firstSeenAt: row.first_seen_at,
+      lastSeenAt: row.last_seen_at,
+      missingSince: row.missing_since,
+      lastSnapshotId: row.last_snapshot_id,
+      lastSnapshotMtimeMs: row.last_snapshot_mtime_ms,
+      lastSnapshotHash: row.last_snapshot_hash,
+    }));
+  }
+
+  /** upsert 文件行 + 捕获快照(确定性 id,同内容重捕幂等)。 */
+  upsertPlanFileWithSnapshot(row: {
+    id: string; path: string; kind: string; title: string | null; goal: string | null;
+    currentPhase: string | null; repo: string | null; mtimeMs: number; rawHash: string;
+    sections: PlanSection[]; checkboxChecked: number; checkboxTotal: number;
+    commitSha: string | null; now: number;
+  }): void {
+    const snapshotId = `${row.id}:${row.rawHash.slice(0, 12)}`;
+    this.withTransaction(() => {
+      this.db.query(
+        `INSERT INTO plan_files (id, path, kind, title, goal, current_phase, repo,
+           first_seen_at, last_seen_at, missing_since, last_snapshot_id, last_snapshot_mtime_ms, last_snapshot_hash)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
+         ON CONFLICT(path) DO UPDATE SET
+           kind = excluded.kind,
+           title = COALESCE(excluded.title, plan_files.title),
+           goal = excluded.goal,
+           current_phase = excluded.current_phase,
+           repo = excluded.repo,
+           last_seen_at = excluded.last_seen_at,
+           missing_since = NULL,
+           last_snapshot_id = excluded.last_snapshot_id,
+           last_snapshot_mtime_ms = excluded.last_snapshot_mtime_ms,
+           last_snapshot_hash = excluded.last_snapshot_hash`,
+      ).run(row.id, row.path, row.kind, row.title, row.goal, row.currentPhase, row.repo,
+        row.now, row.now, snapshotId, row.mtimeMs, row.rawHash);
+      this.db.query(
+        `INSERT INTO plan_snapshots (id, plan_file_id, raw_hash, mtime_ms, commit_sha,
+           sections_json, checkbox_checked, checkbox_total, current_phase, captured_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO NOTHING`,
+      ).run(snapshotId, row.id, row.rawHash, row.mtimeMs, row.commitSha,
+        JSON.stringify(row.sections), row.checkboxChecked, row.checkboxTotal, row.currentPhase, row.now);
+    });
+  }
+
+  touchPlanFile(id: string, now: number): void {
+    this.db.query(
+      'UPDATE plan_files SET last_seen_at = ?, missing_since = NULL WHERE id = ?',
+    ).run(now, id);
+  }
+
+  markPlanFileMissing(id: string, since: number): void {
+    this.db.query('UPDATE plan_files SET missing_since = ? WHERE id = ?').run(since, id);
+  }
+
+  planSnapshots(planFileId: string, limit = 60): PlanSnapshotRecord[] {
+    const rows = this.db.query(
+      `SELECT id, plan_file_id, raw_hash, mtime_ms, commit_sha, sections_json,
+              checkbox_checked, checkbox_total, current_phase, captured_at
+       FROM plan_snapshots WHERE plan_file_id = ?
+       ORDER BY captured_at DESC LIMIT ?`,
+    ).all(planFileId, limit) as Array<{
+      id: string; plan_file_id: string; raw_hash: string; mtime_ms: number; commit_sha: string | null;
+      sections_json: string; checkbox_checked: number; checkbox_total: number;
+      current_phase: string | null; captured_at: number;
+    }>;
+    return rows.map((row) => ({
+      id: row.id,
+      planFileId: row.plan_file_id,
+      rawHash: row.raw_hash,
+      mtimeMs: row.mtime_ms,
+      commitSha: row.commit_sha,
+      sections: JSON.parse(row.sections_json) as PlanSection[],
+      checkboxChecked: row.checkbox_checked,
+      checkboxTotal: row.checkbox_total,
+      currentPhase: row.current_phase,
+      capturedAt: row.captured_at,
+    }));
+  }
+
+  planSnapshotCount(planFileId: string): number {
+    return (this.db.query('SELECT COUNT(*) AS n FROM plan_snapshots WHERE plan_file_id = ?').get(planFileId) as { n: number }).n;
+  }
+
+  /** 归因桥:碰过该文件的 session(PlanFile ← file_touches → session)。 */
+  sessionsTouchingPath(path: string): Array<{ id: string; provider: string; title: string | null; updatedAt: number }> {
+    const rows = this.db.query(
+      `SELECT DISTINCT s.id, s.provider, s.title, s.updated_at
+       FROM session_file_touches t JOIN sessions s ON s.id = t.session_id
+       WHERE t.file_path = ?
+       ORDER BY s.updated_at DESC`,
+    ).all(path) as Array<{ id: string; provider: string; title: string | null; updated_at: number }>;
+    return rows.map((row) => ({ id: row.id, provider: row.provider, title: row.title, updatedAt: row.updated_at }));
   }
 
   upsertSessionTouches(rows: SessionFileTouch[]): void {

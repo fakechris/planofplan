@@ -36,6 +36,7 @@ import {
 } from './session-origin.ts';
 import { claudeParentOfPath, materializeSessionLinks } from './session-links.ts';
 import { materializeRequirements } from './requirements.ts';
+import { materializePlanFiles, materializeTodoSnapshots } from './plans.ts';
 import type { SessionCommit, SessionIndexState, SessionList, SessionRecord, SessionRepo } from './types.ts';
 
 /** Subset of usage collect options — kept here to avoid a usage.ts cycle. */
@@ -950,6 +951,18 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
     materializeRequirements(store);
   } catch {
     /* requirement materialization is best-effort */
+  }
+  // 计划态物化(计划研究 §5.3):TodoWrite 消息快照(纯库内)+ plan 文件
+  // 扫盘(mtime 门控,增量快照)
+  try {
+    materializeTodoSnapshots(store);
+  } catch {
+    /* todo snapshot materialization is best-effort */
+  }
+  try {
+    materializePlanFiles(store);
+  } catch {
+    /* plan file materialization is best-effort */
   }
   return scanned;
 }

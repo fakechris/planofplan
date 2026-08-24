@@ -413,6 +413,7 @@ function renderSessions(list) {
     void loadSessionTranscript(open.id);
     void loadSessionAttribution(open);
     void loadSessionLaunch(open);
+    void loadSessionTodos(open.id);
   } else {
     readerEl.innerHTML = `
       <div class="usage-empty">
@@ -587,10 +588,38 @@ function bindAttrFold(el) {
   });
 }
 
+// Todo 轨迹:TodoWrite/todo_write 的消息快照序列(演进态,只观察)。
+async function loadSessionTodos(sessionId) {
+  const el = document.getElementById('sessionTodoTrail');
+  if (!el) return;
+  try {
+    const data = await request(`/api/sessions/${encodeURIComponent(sessionId)}/todos`);
+    const todos = data.todos || [];
+    if (todos.length === 0) {
+      el.innerHTML = '';
+      return;
+    }
+    const latest = todos[todos.length - 1];
+    const itemsHtml = (latest.items || []).map((item) => {
+      const done = item.status === 'completed' || item.status === 'done';
+      const inProgress = item.status === 'in_progress';
+      const icon = done ? '☑' : inProgress ? '◐' : '☐';
+      return `
+      <div class="attr-row${done ? ' attr-dim' : ''}">
+        <span class="attr-path">${icon} ${escapeHtml(item.title)}</span>
+      </div>`;
+    }).join('');
+    el.innerHTML = `
+      <div class="session-attrs"><h3>Todo 轨迹 <span class="muted">最新快照 of ${todos.length} · TodoWrite 自报</span></h3>${itemsHtml}</div>
+    `;
+  } catch {
+    el.innerHTML = '';
+  }
+}
+
 // 「启动」行:非 user origin 时显示 Launch 边(谁发起了它)。
 // spawned-by 链接优先,其次 origin_detail(herdr pane),兜底 origin 标签。
-async function loadSessionLaunch(session) {
-  const el = document.getElementById('sessionLaunchInfo');
+async function loadSessionLaunch(session) {  const el = document.getElementById('sessionLaunchInfo');
   if (!el) return;
   const originLabel = ORIGIN_LABELS[session.origin] || session.origin || '--';
   try {
@@ -989,6 +1018,8 @@ let latestProjects = null;
 let openProjectId = null;
 let latestRequirements = null;
 let openRequirementId = null;
+let latestPlans = null;
+let openPlanId = null;
 
 async function refreshProjects() {
   const listEl = document.getElementById('projectList');
@@ -1295,6 +1326,138 @@ function requirementDetailHtml(detail) {
   document.getElementById(id)?.addEventListener('change', renderRequirements);
 });
 
+// ── 计划页(计划态实体:PlanFile + 快照序列)───────────────────────
+
+const PLAN_KIND_LABELS = {
+  task_plan: 'task_plan',
+  progress: 'progress',
+  findings: 'findings',
+  plan: 'plan',
+  todo: 'todo',
+  backlog: 'backlog',
+  detailed_plan: 'docs/plans',
+  handoff: 'handoff',
+  unknown: 'markdown',
+};
+
+async function refreshPlans() {
+  const listEl = document.getElementById('planList');
+  if (!listEl) return;
+  try {
+    const days = document.getElementById('usageDays')?.value || '30';
+    latestPlans = await request(`/api/planfiles?days=${encodeURIComponent(days)}`);
+  } catch {
+    latestPlans = null;
+  }
+  renderPlans();
+}
+
+function planItemHtml(plan) {
+  const kind = PLAN_KIND_LABELS[plan.kind] || plan.kind;
+  const progress = plan.checkboxTotal > 0 ? ` · ☑ ${plan.checkboxChecked}/${plan.checkboxTotal}` : '';
+  const repo = plan.repo ? plan.repo.replace(/^.*[/:]/, '').replace(/\.git$/, '') : '';
+  return `
+    <button type="button" class="session-item${plan.id === openPlanId ? ' active' : ''}" data-plan-open="${escapeHtml(plan.id)}">
+      <strong>${escapeHtml(plan.title || plan.path.split('/').pop() || plan.path)}</strong>
+      <span><i class="req-origin req-origin-${plan.missingSince ? 'system_inferred' : 'user_explicit'}">${plan.missingSince ? '已消失' : kind}</i>${repo ? ` · ${escapeHtml(repo)}` : ''}${progress} · ${fmtAgo(plan.lastSeenAt, Date.now())}</span>
+    </button>
+  `;
+}
+
+function renderPlans() {
+  const listEl = document.getElementById('planList');
+  const readerEl = document.getElementById('planReader');
+  if (!listEl || !readerEl) return;
+  if (!latestPlans) {
+    listEl.innerHTML = '<div class="usage-empty"><strong>计划数据不可用</strong><span>daemon 连接失败。</span></div>';
+    return;
+  }
+  const plans = latestPlans.plans || [];
+  if (plans.length === 0) {
+    listEl.innerHTML = '<div class="usage-empty"><strong>窗口内没有计划文件</strong><span>agent 用 planning-with-files 写计划后会出现在这里。</span></div>';
+  } else {
+    listEl.innerHTML = plans.slice(0, 200).map(planItemHtml).join('');
+    listEl.querySelectorAll('[data-plan-open]').forEach((row) => {
+      row.addEventListener('click', () => {
+        openPlanId = row.getAttribute('data-plan-open');
+        renderPlans();
+      });
+    });
+  }
+  const open = (latestPlans.plans || []).find((plan) => plan.id === openPlanId);
+  if (open) {
+    readerEl.innerHTML = '<div class="muted">读取计划详情…</div>';
+    void loadPlanDetail(open.id);
+  } else {
+    readerEl.innerHTML = `
+      <div class="usage-empty">
+        <strong>从左边选一个计划文件</strong>
+        <span>看快照时间线、当前阶段和谁在推进。</span>
+      </div>
+    `;
+  }
+}
+
+async function loadPlanDetail(id) {
+  const readerEl = document.getElementById('planReader');
+  if (!readerEl) return;
+  try {
+    const detail = await request(`/api/planfiles/${encodeURIComponent(id)}`);
+    if (openPlanId !== id) return; // 已切走
+    readerEl.innerHTML = planDetailHtml(detail);
+    readerEl.querySelectorAll('[data-plan-session]').forEach((row) => {
+      row.addEventListener('click', () => {
+        openSessionId = row.getAttribute('data-plan-session');
+        showTab('sessions');
+        renderSessions(latestSessions);
+      });
+    });
+  } catch {
+    readerEl.innerHTML = '<div class="usage-empty"><strong>详情加载失败</strong><span>稍后再试。</span></div>';
+  }
+}
+
+function planDetailHtml(detail) {
+  const plan = detail.plan || {};
+  const snapshots = detail.snapshots || [];
+  const latest = snapshots[0] || null;
+  const sections = latest?.sections || [];
+  const sectionsHtml = sections.slice(0, 12).map((section) => {
+    const status = section.status ? ` · ${escapeHtml(section.status)}` : '';
+    const boxes = section.total > 0 ? ` · ☑ ${section.checked}/${section.total}` : '';
+    return `
+    <div class="attr-row" title="${escapeHtml(section.heading)}">
+      <span class="attr-path">${escapeHtml(section.heading.slice(0, 60))}</span>
+      <span class="attr-meta">${boxes}${status}</span>
+    </div>`;
+  }).join('');
+  const timelineHtml = snapshots.slice(0, 20).map((snapshot) => `
+    <div class="attr-row" title="commit ${escapeHtml(snapshot.commitSha || '--')}">
+      <span class="attr-path">${fmtAgo(snapshot.capturedAt, Date.now())}</span>
+      <span class="attr-meta">☑ ${snapshot.checkboxChecked}/${snapshot.checkboxTotal}${snapshot.currentPhase ? ` · ${escapeHtml(snapshot.currentPhase.slice(0, 30))}` : ''}${snapshot.commitSha ? ` · <span class="attr-sha">${escapeHtml(snapshot.commitSha.slice(0, 7))}</span>` : ''}</span>
+    </div>
+  `).join('');
+  const sessionsHtml = (detail.sessions || []).slice(0, 10).map((session) => `
+    <button type="button" class="session-related-req" data-plan-session="${escapeHtml(session.id)}" title="${escapeHtml(session.id)}">
+      ${escapeHtml(session.requirement?.text || session.title || session.id)}
+      <span>${escapeHtml(session.provider)} · ${fmtAgo(session.updatedAt, Date.now())}</span>
+    </button>
+  `).join('');
+  return `
+    <div class="session-detail-grid">
+      <dt>文件</dt><dd title="${escapeHtml(plan.path)}">${escapeHtml(plan.path)}</dd>
+      <dt>类型</dt><dd>${escapeHtml(PLAN_KIND_LABELS[plan.kind] || plan.kind)}${plan.missingSince ? ` · <i class="req-origin req-origin-system_inferred">已消失 ${fmtAgo(plan.missingSince, Date.now())}</i>` : ''}</dd>
+      <dt>Goal</dt><dd>${escapeHtml(plan.goal || '--')}</dd>
+      <dt>当前阶段</dt><dd>${escapeHtml(latest?.currentPhase || plan.currentPhase || '--')}</dd>
+      <dt>进度</dt><dd>☑ ${latest ? latest.checkboxChecked : 0}/${latest ? latest.checkboxTotal : 0} · ${snapshots.length} 个快照</dd>
+      ${plan.repo ? `<dt>repo</dt><dd>${escapeHtml(plan.repo)}</dd>` : ''}
+    </div>
+    <div class="session-attrs"><h3>阶段/小节(最新快照)</h3>${sectionsHtml || '<div class="muted">无小节结构</div>'}</div>
+    <div class="session-attrs"><h3>快照时间线 <span class="muted">演进态,只观察不推断</span></h3>${timelineHtml || '<div class="muted">只有一份快照</div>'}</div>
+    <div class="session-attrs"><h3>谁在推进 <span class="muted">按文件触碰归因</span></h3>${sessionsHtml || '<div class="muted">窗口内没有 session 触碰过该文件</div>'}</div>
+  `;
+}
+
 function sessionDetailHtml(session, pool) {
   const mine = new Set(sessionProjectNames(session));
   const related = (pool || []).filter((row) => (
@@ -1326,6 +1489,7 @@ function sessionDetailHtml(session, pool) {
       <dt>日志</dt><dd>${escapeHtml(session.sourceFile || '--')}</dd>
       <dt>开始</dt><dd>${session.startedAt ? fmtTime(session.startedAt, true) : '--'}</dd>
     </div>
+    <div id="sessionTodoTrail"></div>
     <div class="session-actions">
       ${session.sourceFile ? `<button class="secondary-btn" type="button" data-reveal="${escapeHtml(session.id)}">在 Finder 中显示</button>` : ''}
     </div>
@@ -2029,6 +2193,7 @@ function showTab(name) {
   if (name === 'graph') void refreshGraph();
   if (name === 'projects') void refreshProjects();
   if (name === 'requirements') void refreshRequirements();
+  if (name === 'plans') void refreshPlans();
 }
 
 document.getElementById('graphCandidates')?.addEventListener('change', (event) => {

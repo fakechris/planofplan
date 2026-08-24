@@ -206,6 +206,61 @@ export interface SessionLinkView {
   dangling: boolean;
 }
 
+/** 计划文件的解析结果(plan 快照的 phases_json 内容)。 */
+export interface PlanSection {
+  heading: string;
+  /** `**Status:** xxx` 行;无则 null。 */
+  status: string | null;
+  checked: number;
+  total: number;
+}
+
+/** plan_files 表行(PlanFile 实体,身份 = 文件路径)。 */
+export interface PlanFileRecord {
+  /** 确定性 id:路径 sha1 前 12 位(与 projects 同款纪律)。 */
+  id: string;
+  path: string;
+  kind: string;
+  title: string | null;
+  goal: string | null;
+  currentPhase: string | null;
+  /** 所属 repo(git remote url;无 remote 退 root;非 git 为 null)。 */
+  repo: string | null;
+  firstSeenAt: number;
+  lastSeenAt: number;
+  /** 文件从磁盘消失的时间;保留行供历史快照查询(thin-observer 同款)。 */
+  missingSince: number | null;
+  lastSnapshotId: string | null;
+  /** 最近快照的 mtime(mtime 门控:未变则跳过重读/重哈希)。 */
+  lastSnapshotMtimeMs: number | null;
+  lastSnapshotHash: string | null;
+}
+
+/** plan_snapshots 表行(append-only;演进态 = 快照序列,不做任务级身份)。 */
+export interface PlanSnapshotRecord {
+  /** 确定性 id:<planFileId>:<rawHash 前 12>,同内容重捕幂等。 */
+  id: string;
+  planFileId: string;
+  rawHash: string;
+  mtimeMs: number;
+  /** 捕获时该文件所在 repo 的 HEAD(verified 对账的 git 锚)。 */
+  commitSha: string | null;
+  sections: PlanSection[];
+  checkboxChecked: number;
+  checkboxTotal: number;
+  currentPhase: string | null;
+  capturedAt: number;
+}
+
+/** todo_snapshots 表行(TodoWrite/todo_write 消息快照,演进时间序列)。 */
+export interface TodoSnapshotRecord {
+  id: string;
+  sessionId: string;
+  seq: number;
+  ts: number | null;
+  items: Array<{ title: string; status: string }>;
+}
+
 /** requirements 表行(Requirement 实体,§1.5)。 */
 export interface RequirementRecord {
   /** 确定性 id:req:<session_id>:<seq>(推断退化实体 seq = -1)。 */

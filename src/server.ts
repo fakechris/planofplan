@@ -509,6 +509,57 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     });
   });
 
+  // ── 计划态实体(计划研究 §5:PlanFile + 快照 + TodoWrite)─────────
+  // 注意路由名:/api/plans 已被额度 plan 占用,这里用 /api/planfiles。
+
+  app.get('/api/planfiles', (c) => {
+    const days = Math.min(365, Math.max(1, Number(c.req.query('days') ?? 30) || 30));
+    const now = Date.now();
+    const since = now - days * 86_400_000;
+    const plans = store.listPlanFiles()
+      .filter((plan) => plan.lastSeenAt >= since)
+      .map((plan) => {
+        const snapshots = store.planSnapshots(plan.id, 1);
+        const latest = snapshots[0] ?? null;
+        return {
+          ...plan,
+          goal: plan.goal ? plan.goal.slice(0, 400) : null,
+          checkboxChecked: latest?.checkboxChecked ?? 0,
+          checkboxTotal: latest?.checkboxTotal ?? 0,
+          snapshotCount: store.planSnapshotCount(plan.id),
+        };
+      })
+      .sort((a, b) => b.lastSeenAt - a.lastSeenAt);
+    return c.json({ days, since, until: now, plans });
+  });
+
+  app.get('/api/planfiles/:id', (c) => {
+    const plan = store.listPlanFiles().find((row) => row.id === c.req.param('id'));
+    if (!plan) return c.json({ ok: false, error: 'unknown plan' }, 404);
+    const snapshots = store.planSnapshots(plan.id, 60);
+    // 归因桥(thin-observer 缺的一层):谁在推进(触碰 session)+ 为什么(需求)
+    const firstReqs = store.firstRequirementBySession();
+    const sessions = store.sessionsTouchingPath(plan.path).map((session) => {
+      const req = firstReqs.get(session.id);
+      return {
+        ...session,
+        requirement: req ? { id: req.id, text: req.text, originLevel: req.originLevel } : null,
+      };
+    });
+    return c.json({
+      plan: { ...plan, goal: plan.goal ? plan.goal.slice(0, 2000) : null },
+      snapshots,
+      sessions,
+    });
+  });
+
+  app.get('/api/sessions/:id/todos', (c) => {
+    const id = decodeURIComponent(c.req.param('id'));
+    const session = store.getSession(id);
+    if (!session) return c.json({ ok: false, error: 'unknown session' }, 404);
+    return c.json({ sessionId: id, todos: store.todoSnapshotsForSession(id) });
+  });
+
   app.post('/api/sessions/:id/resume', (c) => {
     const id = decodeURIComponent(c.req.param('id'));
     const session = store.getSession(id);
