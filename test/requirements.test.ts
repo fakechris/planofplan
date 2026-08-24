@@ -62,6 +62,39 @@ describe('classifyMessageIntent(v1 规则)', () => {
     expect(classifyMessageIntent('')).toBe('noise');
   });
 
+  test('运行时信封/注入类(图谱实测泄漏)→ noise', () => {
+    expect(classifyMessageIntent('Warning: The maximum number of unified exec processes you can keep open is 60 and you currently have 60')).toBe('noise');
+    expect(classifyMessageIntent('This session is being continued from a previous conversation that ran out of context')).toBe('noise');
+    expect(classifyMessageIntent('The user sent a message while you were working:\n<user_query>\n不行,换个思路\n</user_query>')).toBe('noise');
+    expect(classifyMessageIntent('- Developer ID Application 证书存在\n- 对应私钥存在\n- 系统识别为有效代码签名 identity')).toBe('noise');
+    expect(classifyMessageIntent('Review this change for security vulnerabilities.\n\nChanged files:')).toBe('noise');
+    expect(classifyMessageIntent('Background task completed.\ntask_id: ead07bd3\ntype: worker')).toBe('noise');
+    expect(classifyMessageIntent('Background task error.\ntask_id: 2ed65241-8e2b-4c93')).toBe('noise');
+    expect(classifyMessageIntent('Request interrupted by user')).toBe('noise');
+    expect(classifyMessageIntent('Request cancelled by user')).toBe('noise');
+    expect(classifyMessageIntent('Request canceled by user for tool use')).toBe('noise');
+    expect(classifyMessageIntent('A session-scoped Stop hook is now active with condition: "增加mac的支持". Briefly acknowledge')).toBe('noise');
+    expect(classifyMessageIntent('The AI model timed out. Please retry or switch models with /model.')).toBe('noise');
+    expect(classifyMessageIntent("Base directory for this skill: /Users/chris/.claude/skills/codex")).toBe('noise');
+    expect(classifyMessageIntent("You've reached your usage limit for this billing cycle")).toBe('noise');
+  });
+
+  test('派工/人格设定 prompt → noise;「你是…吗?」疑问句放行', () => {
+    expect(classifyMessageIntent('你是 dsh web 的 out-of-band 自愈 agent(one-shot)。web(3080)挂了或状态异常,由你诊断根因、修复')).toBe('noise');
+    expect(classifyMessageIntent('你是并发系统与编程语言方向的资深评审者。请对下面的开源项目做一次独立的审计')).toBe('noise');
+    expect(classifyMessageIntent('作为一名资深前端工程师,你需要重构整个设置页面')).toBe('noise');
+    expect(classifyMessageIntent('You are researching the open-source voice dictation project DoNote. Find its architecture')).toBe('noise');
+    expect(classifyMessageIntent('You are a senior code reviewer. Audit the following diff')).toBe('noise');
+    expect(classifyMessageIntent('你是用 safari kimi吗,https://www.kimi.com/membership 这个能用吗?')).toBe('requirement'); // 真实提问
+    expect(classifyMessageIntent('用 capture_thought 工具记录想法:\'下周研究 Linear webhook 机制\'')).toBe('noise'); // dsh 快捷捕获注入
+  });
+
+  test('路径/URL 开头但带真实诉求的 → requirement(不误杀)', () => {
+    expect(classifyMessageIntent('/Applications/Voice\\ Cursor.app 研究一下这个项目,看看他的项目结构,native部分以及前后端构成')).toBe('requirement');
+    expect(classifyMessageIntent('/Users/chris/Downloads/staffg_installer/extracted_bundle \n研究一下这个项目,看看他的项目结构')).toBe('requirement');
+    expect(classifyMessageIntent('https://github.com/fakechris/dsh-track/issues/79\ncheck this,replace 旧实现')).toBe('requirement');
+  });
+
   test('长消息即使以指令词开头也是 requirement(长度护栏)', () => {
     const long = `继续把需求实体做完:要求建 requirements 表、带 origin 分级、按 span 归因项目,${'并且补上完整的测试覆盖与迁移幂等验证,确保真实库迁移一次通过。'.repeat(3)}`;
     expect(classifyMessageIntent(long)).toBe('requirement');
@@ -83,11 +116,19 @@ describe('deriveSessionRequirements', () => {
   });
 
   test('一条都不合格时退 title → system_inferred;无 title → 空', () => {
-    const s = session({ id: 'grok:g1', provider: 'grok', nativeId: 'g1', title: '头部解析的标题' });
+    const s = session({ id: 'grok:g1', provider: 'grok', nativeId: 'g1', title: '头部解析出来的会话标题,长度接近真实需求' });
     const derived = deriveSessionRequirements(s, [{ seq: 1, ts: null, text: '好' }]);
     expect(derived).toHaveLength(1);
-    expect(derived[0]).toMatchObject({ id: 'req:grok:g1:-1', seq: -1, originLevel: 'system_inferred', text: '头部解析的标题' });
+    expect(derived[0]).toMatchObject({ id: 'req:grok:g1:-1', seq: -1, originLevel: 'system_inferred', text: '头部解析出来的会话标题,长度接近真实需求' });
     expect(deriveSessionRequirements(session({ id: 'x:y', provider: 'grok', nativeId: 'y' }), [])).toEqual([]);
+  });
+
+  test('推断退化不复活派工/注入类 title(实测泄漏回归),占位标题跳过', () => {
+    // 会话里全是注入消息,title 取自首条 = 派工 prompt → 不建实体
+    const dispatch = session({ id: 'dsh:d1', provider: 'dsh', nativeId: 'd1', title: '你是 dsh web 的 out-of-band 自愈 agent(one-shot)' });
+    expect(deriveSessionRequirements(dispatch, [{ seq: 1, ts: null, text: 'Review this change for security vulnerabilities.' }])).toEqual([]);
+    const placeholder = session({ id: 'factory:f1', provider: 'factory', nativeId: 'f1', title: 'New Session' });
+    expect(deriveSessionRequirements(placeholder, [])).toEqual([]);
   });
 });
 

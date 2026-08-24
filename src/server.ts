@@ -208,8 +208,9 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
       rows = matched.map((row) => ({ ...row, messageHit: hitBySession.get(row.id) ?? null }));
     }
     // 需求(§1.5 实体化):user session 读 requirements 表(首条,显式
-    // 优先,带 origin 分级);非 user(subagent 派工 prompt 等)保持消息流
-    // 现场抽取——它们不建实体,但列表行还要展示
+    // 优先,带 origin 分级);user 会话没有实体就保持 null——不再现场
+    // pickRequirement 兜底,它没有噪音规则,注入类消息会绕过实体层直接
+    // 进图谱。非 user(subagent 派工 prompt 等)保持现场抽取,列表行展示用
     const firstRequirements = store.firstRequirementBySession();
     const userTexts = store.listSessionUserTexts();
     const requirements = new Map<string, string>();
@@ -221,6 +222,7 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
         requirementLevels.set(row.id, fromStore.originLevel);
         return { ...row, requirement: fromStore.text };
       }
+      if ((row.origin ?? 'user') === 'user') return { ...row, requirement: null };
       const text = pickRequirement(userTexts.get(row.id) ?? []);
       if (text) requirements.set(row.id, text);
       return { ...row, requirement: text ?? null };
