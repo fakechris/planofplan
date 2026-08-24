@@ -59,6 +59,30 @@
   来源文件路径 `<parent-uuid>/subagents/agent-*.jsonl` 里父 id 是
   现成的,补上即可。
 
+### 1.4b Launch(启动)— 新一等关系:谁拉起了这个 session
+
+origin 字段只回答了「启动的性质」,没回答「启动方是谁」。把启动方
+建模为关系边 `session --spawned-by--> 启动方`,启动方三类:
+
+- **另一个 session**(session 级):codex 子代理挂父 codex(已有
+  parent_id);claude 插件拉起的 codex(plugin:claude)回链到发起它
+  的 claude session——**这条边可以做到 declared 级**:claude 的
+  tool_use 入参(Bash 调 `codex exec "Review the diff of commit…"`)
+  在 session_messages 里,codex session 的首条用户消息是同一个
+  prompt,文本对上即确定;对不上退 candidate(时间窗 + cwd)。
+- **环境**(environment 级):herdr pane(pane id + 日志事件,
+  candidate 级)、tmux、CI。有 identity 但不参与归因链主线。
+- **用户直接启动**(user):无边,缺省态。
+
+存储:通用 session↔session 边表 `session_links(from, to, kind,
+evidence_kind)`,kind 首值 `spawned-by`;codex 的 parent_id 保留
+(扫描期现成),查询层把两者统一成同一关系视图。环境型启动方存
+`origin_detail`(如 `herdr:pane:10`),不进边表。
+
+价值:需求页/项目页可以回答「这个 review 调用是谁发起的」并顺着
+边跳回发起会话——agent 行为跟踪的派生树(claude → codexreview →
+codex subagent → …)由此闭合。
+
 ### 1.5 Requirement(需求)— 从字段升级为实体
 
 现在是 /api/sessions 里的一个字符串字段,升级为:
@@ -143,8 +167,10 @@ session 详情 + 需求详情都放「交接」按钮 → handoff 包预览 →
 1. **Project 实体化 + 项目页**:projects 表(url hash id)+ 项目列表/
    详情 API + 项目页 UI。数据全部现成(session_repos),纯聚合。
    —— 直接解决「项目 → 哪些 agent」的核心诉求。
-2. **对话页目录/项目过滤拆分 + subagent 折叠**:前端为主,
-   claude subagent parent 链接补上。
+2. **对话页目录/项目过滤拆分 + subagent 折叠 + Launch 边**:前端为主;
+   claude subagent parent 链接补上;plugin:claude 回链(declared:
+   prompt 文本对碰;candidate:时间窗+cwd)和 herdr pane 标识落
+   session_links / origin_detail。
 3. **Requirement 实体化**:requirements 表(origin 分级 + 意图规则
    分类 + span 级项目归因),需求页 UI。
 4. **Handoff**:导出端点 + UI 按钮 + 逐家 agent 注入适配。
