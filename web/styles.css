@@ -444,6 +444,12 @@ td { font-variant-numeric: tabular-nums; }
 }
 .session-item span { color: var(--muted); font-size: var(--text-xs); }
 .session-item .session-origin { font-style: normal; color: var(--muted); }
+/* 需求 origin 分级徽标(§1.5):用户原话高置信,推断低一档 */
+.req-origin { font-style: normal; font-size: 0.9em; padding: 0 6px; border-radius: 999px; }
+.req-origin-user_explicit {
+  color: var(--accent-2); background: var(--accent-soft);
+}
+.req-origin-system_inferred { color: var(--muted); background: var(--surface-2); }
 .session-more {
   width: 100%; border: 0; border-radius: 0; padding: var(--space-3); color: var(--accent-2);
   background: transparent; font-size: var(--text-sm);
@@ -503,6 +509,9 @@ a.attr-sha:hover { text-decoration: underline; }
 .gnode text { fill: var(--text); font-size: var(--text-xs); pointer-events: none; }
 .gnode.g-requirement rect { fill: var(--surface); }
 .gnode.g-requirement text { fill: var(--text-soft); }
+/* §1.5 origin 分级着色:用户原话描边强调,推断保持弱化 */
+.gnode.g-req-user_explicit rect { stroke: var(--accent-2); }
+.gnode.g-req-user_explicit text { fill: var(--text); }
 .gnode.g-commit rect { fill: var(--surface); }
 .gnode.g-commit text { font-family: var(--font-mono); fill: var(--text-soft); }
 .gnode.g-session rect { stroke: color-mix(in srgb, var(--accent-2) 40%, var(--border)); }

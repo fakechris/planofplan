@@ -847,6 +847,7 @@ function renderGraph(list) {
         pos.set(req.id, {
           x: GRAPH_COL_X.req, y: cy, w: GRAPH_COL_W.req, kind: 'requirement',
           label: clipLabel(req.label, 26), title: req.label,
+          originLevel: req.originLevel || null,
         });
       }
       shown.forEach((c, i) => {
@@ -921,7 +922,7 @@ function renderGraph(list) {
 
   for (const [id, p] of pos) {
     const g = document.createElementNS(SVG_NS, 'g');
-    g.setAttribute('class', `gnode g-${p.kind}`);
+    g.setAttribute('class', `gnode g-${p.kind}${p.kind === 'requirement' && p.originLevel ? ` g-req-${p.originLevel}` : ''}`);
     g.setAttribute('data-id', id);
     const rect = document.createElementNS(SVG_NS, 'rect');
     rect.setAttribute('x', String(p.x));
@@ -986,6 +987,8 @@ function renderGraph(list) {
 
 let latestProjects = null;
 let openProjectId = null;
+let latestRequirements = null;
+let openRequirementId = null;
 
 async function refreshProjects() {
   const listEl = document.getElementById('projectList');
@@ -1076,9 +1079,9 @@ function projectDetailHtml(detail) {
   `).join('');
 
   const requirementsHtml = (detail.requirements || []).map((req) => `
-    <button type="button" class="session-related-req" data-req-session="${escapeHtml(req.sessionId)}">
+    <button type="button" class="session-related-req" data-req-session="${escapeHtml(req.sessionId)}" data-req-id="${escapeHtml(req.id || '')}">
       ${escapeHtml(req.text)}
-      <span>${escapeHtml(req.provider)} · ${fmtAgo(req.updatedAt, Date.now())}</span>
+      <span><i class="req-origin req-origin-${escapeHtml(req.originLevel || 'system_inferred')}">${req.originLevel === 'user_explicit' ? '用户原话' : '推断'}</i> · ${escapeHtml(req.provider)} · ${fmtAgo(req.updatedAt, Date.now())}</span>
     </button>
   `).join('');
 
@@ -1122,6 +1125,175 @@ function projectDetailHtml(detail) {
     <div class="session-attrs"><h3>Session 时间线</h3>${sessionsHtml || '<div class="muted">窗口内无 session</div>'}</div>
   `;
 }
+
+// ── 需求页(IA 第三步,ia-redesign §2.3)──────────────────────────
+
+const REQ_LEVEL_LABELS = {
+  user_explicit: '用户原话',
+  system_inferred: '推断',
+};
+
+function reqLevelBadge(level) {
+  const key = REQ_LEVEL_LABELS[level] ? level : 'system_inferred';
+  return `<i class="req-origin req-origin-${escapeHtml(key)}">${REQ_LEVEL_LABELS[key]}</i>`;
+}
+
+async function refreshRequirements() {
+  const listEl = document.getElementById('reqList');
+  if (!listEl) return;
+  try {
+    const days = document.getElementById('usageDays')?.value || '30';
+    latestRequirements = await request(`/api/requirements?days=${encodeURIComponent(days)}`);
+  } catch {
+    latestRequirements = null;
+  }
+  renderRequirements();
+}
+
+function fillRequirementFilters(all, project, provider, level) {
+  const projectSel = document.getElementById('reqProject');
+  const providerSel = document.getElementById('reqProvider');
+  const levelSel = document.getElementById('reqLevel');
+  if (!projectSel || !providerSel || !levelSel) return;
+  // facet 口径与对话页一致(c8ed083):各维度计数互不吃对方的选择
+  const projectFacets = new Map();
+  const providerFacets = new Map();
+  const levelFacets = new Map();
+  for (const item of all) {
+    if (!provider || item.provider === provider) {
+      if (!level || item.originLevel === level) {
+        for (const name of item.repoNames || []) projectFacets.set(name, (projectFacets.get(name) ?? 0) + 1);
+      }
+    }
+    if ((!project || (item.repoNames || []).includes(project)) && (!level || item.originLevel === level)) {
+      providerFacets.set(item.provider, (providerFacets.get(item.provider) ?? 0) + 1);
+    }
+    if ((!project || (item.repoNames || []).includes(project)) && (!provider || item.provider === provider)) {
+      levelFacets.set(item.originLevel, (levelFacets.get(item.originLevel) ?? 0) + 1);
+    }
+  }
+  const sortDesc = (a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0]));
+  const fill = (sel, entries, allLabel, labelOf) => {
+    const current = sel.value;
+    sel.innerHTML = `<option value="">${allLabel}</option>` + [...entries.entries()]
+      .sort((a, b) => sortDesc([a[0], a[1]], [b[0], b[1]]))
+      .map(([value, count]) => `<option value="${escapeHtml(value)}">${escapeHtml(labelOf(value))} (${count})</option>`)
+      .join('');
+    sel.value = [...sel.options].some((option) => option.value === current) ? current : '';
+  };
+  fill(projectSel, projectFacets, '全部项目', (name) => name);
+  fill(providerSel, providerFacets, '全部来源', (name) => name);
+  fill(levelSel, levelFacets, '全部证据', (name) => REQ_LEVEL_LABELS[name] || name);
+}
+
+function requirementItemHtml(item) {
+  const projects = (item.repoNames || []).slice(0, 2).map(escapeHtml).join(' · ') || '(未落到项目)';
+  return `
+    <button type="button" class="session-item${item.id === openRequirementId ? ' active' : ''}" data-req-open="${escapeHtml(item.id)}">
+      <strong>${escapeHtml(item.text)}</strong>
+      <span>${reqLevelBadge(item.originLevel)} · ${escapeHtml(item.provider)} · ${projects} · ${fmtAgo(item.ts || item.updatedAt, Date.now())}</span>
+    </button>
+  `;
+}
+
+function renderRequirements() {
+  const listEl = document.getElementById('reqList');
+  const readerEl = document.getElementById('reqReader');
+  if (!listEl || !readerEl) return;
+  if (!latestRequirements) {
+    listEl.innerHTML = '<div class="usage-empty"><strong>需求数据不可用</strong><span>daemon 连接失败。</span></div>';
+    return;
+  }
+  const project = document.getElementById('reqProject')?.value || '';
+  const provider = document.getElementById('reqProvider')?.value || '';
+  const level = document.getElementById('reqLevel')?.value || '';
+  const all = latestRequirements.requirements || [];
+  const visible = all.filter((item) => (
+    (!project || (item.repoNames || []).includes(project))
+    && (!provider || item.provider === provider)
+    && (!level || item.originLevel === level)
+  ));
+  fillRequirementFilters(all, project, provider, level);
+  if (visible.length === 0) {
+    listEl.innerHTML = '<div class="usage-empty"><strong>窗口内没有需求</strong><span>调大天数或放松过滤。</span></div>';
+  } else {
+    listEl.innerHTML = visible.slice(0, 200).map(requirementItemHtml).join('')
+      + (visible.length > 200 ? `<div class="session-more" disabled>… 还有 ${visible.length - 200} 条,用过滤收窄</div>` : '');
+    listEl.querySelectorAll('[data-req-open]').forEach((row) => {
+      row.addEventListener('click', () => {
+        openRequirementId = row.getAttribute('data-req-open');
+        renderRequirements();
+      });
+    });
+  }
+  const open = (latestRequirements.requirements || []).find((item) => item.id === openRequirementId);
+  if (open) {
+    readerEl.innerHTML = '<div class="muted">读取需求详情…</div>';
+    void loadRequirementDetail(open.id);
+  } else {
+    readerEl.innerHTML = `
+      <div class="usage-empty">
+        <strong>从左边选一条需求</strong>
+        <span>看原话、span 内触碰的文件和产出的 commit。</span>
+      </div>
+    `;
+  }
+}
+
+async function loadRequirementDetail(id) {
+  const readerEl = document.getElementById('reqReader');
+  if (!readerEl) return;
+  try {
+    const detail = await request(`/api/requirements/${encodeURIComponent(id)}`);
+    if (openRequirementId !== id) return; // 已切走
+    readerEl.innerHTML = requirementDetailHtml(detail);
+    readerEl.querySelector('[data-req-session]')?.addEventListener('click', () => {
+      const sessionId = readerEl.querySelector('[data-req-session]')?.getAttribute('data-req-session');
+      openSessionId = sessionId;
+      showTab('sessions');
+      renderSessions(latestSessions);
+    });
+  } catch {
+    readerEl.innerHTML = '<div class="usage-empty"><strong>详情加载失败</strong><span>稍后再试。</span></div>';
+  }
+}
+
+function requirementDetailHtml(detail) {
+  const req = detail.requirement || {};
+  const session = detail.session || {};
+  const reposHtml = (req.repoNames || []).length
+    ? req.repoNames.map(escapeHtml).join(' · ')
+    : '(span 内没碰到已知 repo)';
+  const filesHtml = (detail.files || []).map((file) => `
+    <div class="attr-row" title="${escapeHtml(file.path)}">
+      <span class="attr-path">${escapeHtml(file.path.split('/').slice(-2).join('/'))}</span>
+      <span class="attr-meta">${escapeHtml((file.ops || []).join('/'))} ×${file.count}</span>
+    </div>
+  `).join('');
+  const commitsHtml = (detail.commits || []).map((commit) => `
+    <div class="attr-row${commit.kind === 'declared' ? '' : ' attr-dim'}">
+      <span class="attr-dot${commit.kind === 'declared' ? ' attr-dot-strong' : ''}">${commit.kind === 'declared' ? '●' : '○'}</span>
+      <span class="attr-sha">${escapeHtml((commit.sha || '').slice(0, 8))}</span>
+      <span class="attr-summary">${escapeHtml(commit.summary || '(no subject)')}</span>
+      <span class="attr-meta">${commit.pushed === false ? '未推送' : ''}</span>
+    </div>
+  `).join('');
+  return `
+    <div class="session-detail-grid">
+      <dt>需求</dt><dd>${escapeHtml(req.text || '')}</dd>
+      <dt>证据</dt><dd>${reqLevelBadge(req.originLevel)}</dd>
+      <dt>项目</dt><dd>${escapeHtml(reposHtml)}</dd>
+      <dt>源对话</dt><dd><button type="button" class="inline-link" data-req-session="${escapeHtml(session.id || '')}">${escapeHtml(session.provider || '')}:${escapeHtml(session.title || session.id || '')}</button></dd>
+      <dt>时间</dt><dd>${req.ts ? fmtAgo(req.ts, Date.now()) : '--'}</dd>
+    </div>
+    <div class="session-attrs"><h3>span 内文件 <span class="muted">${detail.filesTotal || 0} 个,按触碰次数</span></h3>${filesHtml || '<div class="muted">span 内没有文件触碰</div>'}</div>
+    <div class="session-attrs"><h3>span 内 commit <span class="muted">● 声明 · ○ 时间窗</span></h3>${commitsHtml || '<div class="muted">span 内没有归因 commit</div>'}</div>
+  `;
+}
+
+['reqProject', 'reqProvider', 'reqLevel'].forEach((id) => {
+  document.getElementById(id)?.addEventListener('change', renderRequirements);
+});
 
 function sessionDetailHtml(session, pool) {
   const mine = new Set(sessionProjectNames(session));
@@ -1841,11 +2013,11 @@ document.querySelectorAll('[data-session-view]').forEach((btn) => {
 
 function currentTab() {
   const hash = (location.hash || '#plans').replace('#', '');
-  return ['plans', 'sessions', 'projects', 'graph', 'usage'].includes(hash) ? hash : 'plans';
+  return ['plans', 'sessions', 'projects', 'requirements', 'graph', 'usage'].includes(hash) ? hash : 'plans';
 }
 
 function showTab(name) {
-  if (!['plans', 'sessions', 'projects', 'graph', 'usage'].includes(name)) name = 'plans';
+  if (!['plans', 'sessions', 'projects', 'requirements', 'graph', 'usage'].includes(name)) name = 'plans';
   const hash = `#${name}`;
   if (location.hash !== hash) location.hash = hash;
   document.querySelectorAll('[data-tab]').forEach((btn) => {
@@ -1856,6 +2028,7 @@ function showTab(name) {
   });
   if (name === 'graph') void refreshGraph();
   if (name === 'projects') void refreshProjects();
+  if (name === 'requirements') void refreshRequirements();
 }
 
 document.getElementById('graphCandidates')?.addEventListener('change', (event) => {

@@ -27,15 +27,25 @@ const TEXT_MAX = 2000;
 
 // 执行步骤类:本身不是需求,是「怎么做」。短消息才按 directive 处理,
 // 长消息即使以这些词开头也更可能是带上下文的真实需求。
-const DIRECTIVE_RE = /^(?:继续|接着|再来一次|重试|重启|重新启动|部署|上线|发布|装(?:个|一下)?依赖|安装依赖|跑(?:一下)?测试|commit\b|push\b|merge\b|rebase\b|git\s+(?:add|commit|push|checkout|stash|rebase)|npm\s+(?:i|install)|bun\s+i|pip\s+install|run\s+tests?|restart\b|retry\b|开个?pr|发个?pr|提个?pr)/i;
+const DIRECTIVE_RE = /^(?:继续|接着|再来一次|重试|重启|重新启动|部署|上线|发布|装(?:个|一下)?依赖|安装依赖|跑(?:一下)?测试|commit\b|push\b|merge\b|rebase\b|git\s+(?:add|commit|push|checkout|stash|rebase)|npm\s+(?:i|install)|bun\s+i|pip\s+install|run\s+tests?|restart\b|retry\b|开个?pr|发个?pr|提个?pr|(?:请你?)?开始(?:运行|执行))/i;
 // 纠正类:打断当前方向。开头的否定/停止词,且消息不长。
 const INTERRUPTION_RE = /^(?:不对|不是这样|不是这|不是的|错了|你搞错|你理解错|别这样|别改|别动|别急|停下?|等一下|等下|停一下|收回|撤销|算了|undo\b|stop\b|wait\b|hold\s+on|no[,.])/i;
 const DIRECTIVE_MAX_LEN = 120;
+// 粘贴物:markdown 标题开头(AGENTS.md/文档转贴)、裸文件路径或 URL 单行
+// ——真实数据的马拉松会话里是高频噪音。
+const PASTE_HEADING_RE = /^#{1,6}\s/;
+const PASTE_PATH_RE = /^(?:\/|[\w.-]+\/)[\w./~+-]*\.[A-Za-z0-9]{1,8}$/;
+// 工具/传输注入:zcode 等把系统提醒写进 user 消息流(实测 30 天 442 条),
+// 以及连接失败的错误回显。
+const TOOL_REMINDER_RE = /^The Todo(?:Write)? tool hasn't been used/i;
+const ERROR_ECHO_RE = /^(?:Unable to establish|API Error\b|Error:)/i;
 
 /** 单条用户消息的意图(v1 规则)。 */
 export function classifyMessageIntent(text: string): MessageIntent {
   const trimmed = text.trim();
   if (!trimmed || isShortAck(trimmed) || isMetaEnvelope(trimmed)) return 'noise';
+  if (PASTE_HEADING_RE.test(trimmed) || PASTE_PATH_RE.test(trimmed)) return 'noise';
+  if (TOOL_REMINDER_RE.test(trimmed) || ERROR_ECHO_RE.test(trimmed)) return 'noise';
   if (INTERRUPTION_RE.test(trimmed) && trimmed.length <= DIRECTIVE_MAX_LEN * 2) return 'interruption';
   if (DIRECTIVE_RE.test(trimmed) && trimmed.length <= DIRECTIVE_MAX_LEN) return 'directive';
   return 'requirement';

@@ -19,6 +19,7 @@
       <button type="button" role="tab" data-tab="plans" aria-selected="true">额度</button>
       <button type="button" role="tab" data-tab="sessions" aria-selected="false">对话</button>
       <button type="button" role="tab" data-tab="projects" aria-selected="false">项目</button>
+      <button type="button" role="tab" data-tab="requirements" aria-selected="false">需求</button>
       <button type="button" role="tab" data-tab="graph" aria-selected="false">图谱</button>
       <button type="button" role="tab" data-tab="usage" aria-selected="false">Token</button>
     </nav>
@@ -105,6 +106,37 @@
         <div class="usage-empty">
           <strong>从左边选一个项目</strong>
           <span>看 agent × 活动、需求流、产出 commit 和 session 时间线。</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="panel-requirements" class="tab-panel" data-panel="requirements" hidden>
+    <section class="hero">
+      <div>
+        <p class="eyebrow">REQUIREMENTS</p>
+        <h1>需求</h1>
+        <p class="hero-copy">独立于对话的需求浏览:谁在什么时候要了什么,证据落在哪些文件和 commit 上。</p>
+      </div>
+      <div class="session-toolbar">
+        <select id="reqProject" aria-label="按项目过滤">
+          <option value="">全部项目</option>
+        </select>
+        <select id="reqProvider" aria-label="按来源过滤">
+          <option value="">全部来源</option>
+        </select>
+        <select id="reqLevel" aria-label="按证据分级过滤">
+          <option value="">全部证据</option>
+        </select>
+      </div>
+    </section>
+    <p class="session-foot">「用户原话」= 从用户消息直接抽取;「推断」= 会话头部退化推导,置信低一档。项目归属按需求的证据窗口(span)计算,不是整个会话。</p>
+    <div class="session-workbench">
+      <div id="reqList" class="session-list"></div>
+      <div id="reqReader" class="session-reader">
+        <div class="usage-empty">
+          <strong>从左边选一条需求</strong>
+          <span>看原话、span 内触碰的文件和产出的 commit,可跳回源对话。</span>
         </div>
       </div>
     </div>

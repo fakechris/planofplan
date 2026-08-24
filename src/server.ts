@@ -346,15 +346,27 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     const project = store.getProject(c.req.param('id'));
     if (!project) return c.json({ ok: false, error: 'unknown project' }, 404);
     const sessions = store.projectSessions(project.url, since, now);
-    // requirements:窗口内 user session 的推导需求(复用 motivation 抽取)
-    const userTexts = store.listSessionUserTexts();
-    const requirements = sessions
-      .filter((session) => (session.origin ?? 'user') === 'user')
-      .map((session) => {
-        const text = pickRequirement(userTexts.get(session.id) ?? []);
-        return text ? { sessionId: session.id, text, provider: session.provider, updatedAt: session.updatedAt } : null;
+    // requirements:需求实体(§1.5)按 span 归因落到本项目的,带 origin 分级;
+    // 归属依据是需求自己证据窗口里碰的 repo,不再按 session 整体推导
+    const sessionById = new Map(sessions.map((session) => [session.id, session]));
+    const requirements = store.listRequirements()
+      .filter((req) => req.repos.includes(project.url))
+      .map((req) => {
+        const session = sessionById.get(req.sessionId) ?? store.getSession(req.sessionId);
+        if (!session) return null;
+        const ts = req.ts ?? session.updatedAt;
+        if (ts < since || ts >= now) return null;
+        return {
+          id: req.id,
+          text: req.text,
+          originLevel: req.originLevel,
+          sessionId: session.id,
+          provider: session.provider,
+          updatedAt: session.updatedAt,
+        };
       })
-      .filter((item) => item !== null);
+      .filter((item): item is NonNullable<typeof item> => item !== null)
+      .sort((a, b) => b.updatedAt - a.updatedAt);
     const aggregates = projectAggregates(since, now);
     const commitCounts = store.projectCommitCounts(since);
     return c.json({
@@ -488,8 +500,8 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
         cwd: session.cwd,
         updatedAt: session.updatedAt,
       },
-      files,
-      filesTop: fileList,
+      filesTotal: files.size,
+      files: fileList,
       commits,
       nextRequirementId: next?.id ?? null,
     });

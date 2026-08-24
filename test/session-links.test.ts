@@ -210,14 +210,14 @@ describe('v6 迁移幂等', () => {
       s1.upsertSessions([
         session({ id: 'codex:c', provider: 'codex', nativeId: 'c', origin: 'subagent', parentId: 'claude:p' }),
       ]);
-      // openDb 建新库时迁移已到 v6;推回 5 再重开 → 走 v6 块(列已存在,
-      // ALTER 抛错被吞)+ backfillLaunchLinks 重跑
+      // openDb 建新库时迁移已到最新;推回 5 再重开 → 走 v6 块(列已存在,
+      // ALTER 抛错被吞)+ backfillLaunchLinks 重跑,v7 需求物化空库幂等
       s1.setUserVersion(5);
       const s2 = openDb(dbPath);
-      expect(s2.getUserVersion()).toBe(6);
+      expect(s2.getUserVersion()).toBe(7);
       expect(s2.listSessionLinks()).toHaveLength(1);
       const s3 = openDb(dbPath);
-      expect(s3.getUserVersion()).toBe(6);
+      expect(s3.getUserVersion()).toBe(7);
       expect(s3.listSessionLinks()).toHaveLength(1);
       rmSync(dir, { recursive: true, force: true });
     } catch (error) {
