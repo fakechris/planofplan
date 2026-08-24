@@ -243,3 +243,36 @@ describe('session catalog extractors', () => {
     }
   });
 });
+
+describe('claude subagent discovery', () => {
+  test('subagents/agent-*.jsonl 也入目录:标题取第一条用户派发消息,origin=subagent', async () => {
+    const root = tempRoot();
+    const store = openMemoryDb();
+    const parentId = 'dddddddd-dddd-dddd-dddd-dddddddddddd';
+    const dir = join(root, 'claude', '-proj', parentId, 'subagents');
+    try {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'agent-a3192a0f.jsonl'), jsonl([
+        { type: 'user', uuid: 'u1', timestamp: '2026-08-20T10:00:00.000Z', message: { content: [{ type: 'text', text: '请审查以下改动,重点看鉴权边界和事务完整性' }] }, cwd: '/tmp/demo' },
+        { type: 'assistant', uuid: 'u2', message: { content: [{ type: 'text', text: '先看 diff' }] } },
+      ]));
+      await collectSessionCatalog(store, {
+        since: Date.now() - 86_400_000,
+        until: Date.now() + 1000,
+        claudeRoots: [join(root, 'claude')],
+        codexRoot: join(root, 'm1'),
+        grokRoot: join(root, 'm2'),
+        dshRoot: join(root, 'm3'),
+        kimiRoot: join(root, 'm4'),
+        droidRoot: join(root, 'm5'),
+        zcodeRoot: join(root, 'm6'),
+      });
+      const row = store.getSession('claude:agent-a3192a0f');
+      expect(row).not.toBeNull();
+      expect(row?.title).toBe('请审查以下改动,重点看鉴权边界和事务完整性');
+      expect(row?.origin).toBe('subagent');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});

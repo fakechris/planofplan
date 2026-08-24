@@ -251,11 +251,27 @@ function fillSessionFilters(list) {
   if (!providerSel || !projectSel || !list) return;
   const provider = providerSel.value;
   const project = projectSel.value;
-  providerSel.innerHTML = '<option value="">全部来源</option>' + (list.byProvider || []).map((row) => (
-    `<option value="${escapeHtml(row.provider)}">${escapeHtml(row.provider)} (${row.count})</option>`
+  // 计数口径与列表一致:先吃「自动化 + 隐藏无标题」两个开关,再现场聚合。
+  // facet 惯例:provider 计数不吃 project 选择、project 计数不吃 provider
+  // 选择,搜索词不影响计数。服务端 byProvider/byProject 保持全量(图谱用)。
+  const hideUntitled = document.getElementById('sessionHideUntitled')?.checked;
+  const showAutomated = document.getElementById('sessionShowAutomated')?.checked;
+  const byProvider = new Map();
+  const byProject = new Map();
+  for (const session of list.sessions || []) {
+    if (!showAutomated && (session.origin || 'user') !== 'user') continue;
+    if (hideUntitled && !(session.title || '').trim()) continue;
+    byProvider.set(session.provider, (byProvider.get(session.provider) ?? 0) + 1);
+    for (const name of sessionProjectNames(session)) {
+      byProject.set(name, (byProject.get(name) ?? 0) + 1);
+    }
+  }
+  const sortDesc = (a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0]));
+  providerSel.innerHTML = '<option value="">全部来源</option>' + [...byProvider.entries()].sort(sortDesc).map(([name, count]) => (
+    `<option value="${escapeHtml(name)}">${escapeHtml(name)} (${count})</option>`
   )).join('');
-  projectSel.innerHTML = '<option value="">全部项目</option>' + (list.byProject || []).map((row) => (
-    `<option value="${escapeHtml(row.project)}">${escapeHtml(row.project)} (${row.count})</option>`
+  projectSel.innerHTML = '<option value="">全部项目</option>' + [...byProject.entries()].sort(sortDesc).map(([name, count]) => (
+    `<option value="${escapeHtml(name)}">${escapeHtml(name)} (${count})</option>`
   )).join('');
   if ([...providerSel.options].some((option) => option.value === provider)) providerSel.value = provider;
   if ([...projectSel.options].some((option) => option.value === project)) projectSel.value = project;
@@ -266,7 +282,10 @@ function filteredSessions(list) {
   const project = document.getElementById('sessionProject')?.value || '';
   const query = (document.getElementById('sessionSearch')?.value || '').trim().toLowerCase();
   const hideUntitled = document.getElementById('sessionHideUntitled')?.checked;
+  const showAutomated = document.getElementById('sessionShowAutomated')?.checked;
   return (list?.sessions || []).filter((session) => {
+    // 默认只看真实用户会话;自动化(subagent/插件/exec/herdr)勾选才显示
+    if (!showAutomated && (session.origin || 'user') !== 'user') return false;
     const title = session.title || '';
     const untitled = !title.trim();
     if (hideUntitled && untitled) return false;
@@ -1550,6 +1569,7 @@ function resetSessionFilters() {
 document.getElementById('sessionProvider')?.addEventListener('change', resetSessionFilters);
 document.getElementById('sessionProject')?.addEventListener('change', resetSessionFilters);
 document.getElementById('sessionHideUntitled')?.addEventListener('change', resetSessionFilters);
+document.getElementById('sessionShowAutomated')?.addEventListener('change', resetSessionFilters);
 // 搜索框:输入即本地过滤元数据,停顿 300ms 后带 q 问服务端(并集消息正文 FTS)
 let sessionSearchTimer = null;
 let sessionServerQuery = '';

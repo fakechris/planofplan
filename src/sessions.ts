@@ -48,6 +48,16 @@ const SHORT_ACK_MAX = 12;
 const TITLE_MAX = 80;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CODEX_ROLLOUT_RE = /^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-([0-9a-f-]{36})\.jsonl(?:\.zst)?$/i;
+// claude subagent transcript:<proj>/<uuid>/subagents/agent-*.jsonl(文件名不是
+// UUID,所以早期发现和标题提取把它们漏了,只能靠 usage stub 入库、无标题)
+const CLAUDE_SUBAGENT_RE = /^agent-[\w-]+\.jsonl$/i;
+
+/** claude 文件名是否可入目录:主会话 UUID 或 subagents/ 下的 agent-*.jsonl。 */
+function isClaudeSessionFile(name: string, path: string): boolean {
+  if (!name.endsWith('.jsonl')) return false;
+  if (UUID_RE.test(name.replace(/\.jsonl$/i, ''))) return true;
+  return CLAUDE_SUBAGENT_RE.test(name) && path.includes('/subagents/');
+}
 
 const USAGE_PROVIDER_ALIAS: Record<string, string> = {
   'grok-cli': 'grok',
@@ -251,7 +261,9 @@ function claudeCwd(records: Record<string, unknown>[]): string | null {
 
 function extractClaude(path: string, mtimeMs: number): SessionRecord | null {
   const nativeId = basename(path).replace(/\.jsonl$/i, '');
-  if (!UUID_RE.test(nativeId)) return null;
+  // 主会话文件名是 UUID;subagent 是 subagents/ 下的 agent-*(origin 由路径判定)
+  const isSubagent = path.includes('/subagents/') && CLAUDE_SUBAGENT_RE.test(basename(path));
+  if (!UUID_RE.test(nativeId) && !isSubagent) return null;
   const records = parseJsonlHead(path);
   const started = records
     .map((record) => parseTimestamp(record.timestamp, 0))
@@ -546,7 +558,7 @@ export function discoverSessionFiles(options: SessionCollectOptions, since: numb
     },
     ...claudeRoots.map((root) => ({
       provider: 'claude',
-      files: walkFiles(root, since, (name) => name.endsWith('.jsonl') && UUID_RE.test(name.replace(/\.jsonl$/i, ''))),
+      files: walkFiles(root, since, (name, path) => isClaudeSessionFile(name, path)),
     })),
     {
       provider: 'dsh',
