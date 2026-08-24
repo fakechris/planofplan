@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Database } from 'bun:sqlite';
 import { openDb, openMemoryDb, projectEntityId } from '../src/db.ts';
+import { materializeRequirements } from '../src/requirements.ts';
 import { createServer } from '../src/server.ts';
 import { DEFAULT_PLANS } from '../src/config.ts';
 import type { SessionRecord, SessionRepo } from '../src/types.ts';
@@ -55,6 +56,12 @@ function seededStore() {
     toolName: null, text: '给 alpha 项目补上鉴权中间件', timestamp: now - 900, model: null,
     inputTokens: null, outputTokens: null,
   }]);
+  // 需求 span 归因的证据窗口内有 touch,需求才能落到 alpha 项目
+  store.upsertSessionTouches([{
+    id: 'claude:u1:touch1', sessionId: 'claude:u1', provider: 'claude',
+    filePath: '/repo/alpha/src/auth.ts', toolName: 'Edit', op: 'edit', ts: now - 800, ordinal: 3000,
+  }]);
+  materializeRequirements(store);
   store.materializeProjects();
   return store;
 }
@@ -103,8 +110,8 @@ describe('materializeProjects', () => {
       raw.exec('PRAGMA user_version = 4');
       raw.close();
       const store = openDb(dbPath);
-      // 迁移链 v4 → … → v6(v6:session_links + Launch backfill)
-      expect(store.getUserVersion()).toBe(6);
+      // 迁移链 v4 → … → v7(v6:Launch 边;v7:需求实体)
+      expect(store.getUserVersion()).toBe(7);
       const projects = store.listProjects();
       expect(projects).toHaveLength(1);
       expect(projects[0]).toMatchObject({ url: URL_A, name: 'alpha' });
@@ -131,7 +138,7 @@ describe('project endpoints', () => {
     };
     expect(body.projects).toHaveLength(2);
     const alpha = body.projects.find((p) => p.name === 'alpha');
-    expect(alpha).toMatchObject({ sessionCount: 2, userSessionCount: 1, commitCount: 1, requirementCount: null });
+    expect(alpha).toMatchObject({ sessionCount: 2, userSessionCount: 1, commitCount: 1, requirementCount: 1 });
     expect(alpha?.agents.map((a) => `${a.provider}:${a.sessions}/${a.userSessions}`)).toEqual(['claude:1/1', 'codex:1/0']);
     expect(alpha?.agents[0]?.tokens).toBe(100);
     // 空窗口
@@ -160,9 +167,9 @@ describe('project endpoints', () => {
     expect(body.name).toBe('alpha');
     expect(body.agents).toHaveLength(2);
     expect(body.sessions.map((s) => s.id).sort()).toEqual(['claude:u1', 'codex:s1']);
-    // requirements 只取 user origin 的推导需求
+    // requirements 来自需求实体表(span 归因到本项目),带 origin 分级
     expect(body.requirements).toHaveLength(1);
-    expect(body.requirements[0]).toMatchObject({ sessionId: 'claude:u1', text: '给 alpha 项目补上鉴权中间件' });
+    expect(body.requirements[0]).toMatchObject({ sessionId: 'claude:u1', text: '给 alpha 项目补上鉴权中间件', originLevel: 'user_explicit' });
     expect(body.commits).toHaveLength(1);
     expect(body.commits[0]?.fileOverlap).toBe(true);
 
