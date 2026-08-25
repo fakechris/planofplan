@@ -16,6 +16,7 @@ import {
   readSync,
 } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
+import { homedir } from 'node:os';
 import { Database } from 'bun:sqlite';
 import {
   nameOfUrl,
@@ -48,18 +49,41 @@ export function sourcePathFor(session: SessionRecord): string | null {
   return session.sourceFile;
 }
 
-function workRepoOf(session: SessionRecord): SessionRepo | null {
+/** 垃圾 cwd 不立项目(家目录/临时区):会出现在各种闲聊会话里,立了全是噪声。 */
+function isJunkCwd(cwd: string | null | undefined, home: string): boolean {
+  if (!cwd || !cwd.startsWith('/')) return true;
+  if (cwd === home || cwd === '/' || cwd === '/tmp' || cwd === '/private/tmp') return true;
+  if (cwd.startsWith('/var/folders/') || cwd.startsWith('/private/var/folders/')) return true;
+  return false;
+}
+
+export function workRepoOf(session: SessionRecord, home = homedir()): SessionRepo | null {
   const fromCwd = session.cwd ? repoRefOf(session.cwd) : undefined;
   const root = session.gitRoot || fromCwd?.root;
-  if (!root && !session.gitUrl && !fromCwd) return null;
-  const url = session.gitUrl || fromCwd?.url || root || session.cwd || '(unknown)';
-  const name = session.gitName || fromCwd?.name || nameOfUrl(url);
+  if (root || session.gitUrl || fromCwd) {
+    const url = session.gitUrl || fromCwd?.url || root || session.cwd || '(unknown)';
+    const name = session.gitName || fromCwd?.name || nameOfUrl(url);
+    return {
+      sessionId: session.id,
+      role: 'work',
+      url,
+      root: root || url,
+      name,
+      evidenceKind: 'observed',
+    };
+  }
+  // 无 git 的 cwd(纯研究目录等):目录本身即工作身份——url/root 用路径,
+  // 与「无 remote 的 repo 退化为 root path」同一套身份纪律。没有这层,
+  // 非 git 目录的会话/需求在所有项目视图里都找不到(线上实测:research/*
+  // 四个目录整体缺失)。
+  if (isJunkCwd(session.cwd, home)) return null;
+  const cwd = session.cwd!;
   return {
     sessionId: session.id,
     role: 'work',
-    url,
-    root: root || url,
-    name,
+    url: cwd,
+    root: cwd,
+    name: nameOfUrl(cwd),
     evidenceKind: 'observed',
   };
 }
