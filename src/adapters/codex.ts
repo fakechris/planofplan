@@ -103,10 +103,12 @@ function readTail(path: string, bytes = 128 * 1024): string {
 }
 
 function collectRolloutFiles(root: string): string[] {
-  // sessions/YYYY/MM/DD/rollout-*.jsonl;只关心最近改动的少量文件
+  // sessions/YYYY/MM/DD/rollout-*.jsonl;全量收集后按 mtime 排序取头部——
+  // 不能在遍历中截断(readdir 字母序会先走完 04 月才到 08 月,截断=永远
+  // 采不到最新文件)。~1.4k 个文件的 statSync 成本可忽略。
   const out: Array<{ path: string; mtimeMs: number }> = [];
   const walk = (dir: string, depth: number): void => {
-    if (depth > 4 || out.length > 400) return;
+    if (depth > 4) return;
     let entries;
     try {
       entries = readdirSync(dir, { withFileTypes: true });
