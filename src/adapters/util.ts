@@ -16,3 +16,27 @@ export function round2(value: number): number {
   if (!Number.isFinite(value)) return 0;
   return Math.round(value * 100) / 100;
 }
+
+/** 货币格式化:千分位 + 2 位小数 + 币种符号。币种代码大小写不敏感,未知币种
+ * 走 ISO 前缀方案（如 `XYZ 1,861.52`）。无值/null/NaN 走 '--'。 */
+const CURRENCY_SYMBOLS: Record<string, string> = {
+  CNY: '¥',
+  USD: '$',
+  EUR: '€',
+  GBP: '£',
+  JPY: '¥',
+  HKD: 'HK$',
+  TWD: 'NT$',
+  KRW: '₩',
+};
+
+export function formatMoney(value: number | null | undefined, currency: string): string {
+  if (value == null || !Number.isFinite(value)) return '--';
+  const code = (currency || '').toUpperCase();
+  const symbol = CURRENCY_SYMBOLS[code];
+  const formatted = round2(value).toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+  return symbol ? `${symbol}${formatted}` : `${code} ${formatted}`;
+}

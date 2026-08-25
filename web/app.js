@@ -1592,6 +1592,37 @@ function fmtTokens(value) {
   return `${groupedNumber(n / 1_000_000_000, 2)}B`;
 }
 
+/** 货币代码表，与后端 src/adapters/util.ts 的 CURRENCY_SYMBOLS 对齐；
+ * 前端独立维护一份以避免在 web 里跑一份 Bun。未知币种走 "CODE 1,234.56" 后缀。 */
+const CURRENCY_SYMBOLS = {
+  CNY: '¥', USD: '$', EUR: '€', GBP: '£', JPY: '¥',
+  HKD: 'HK$', TWD: 'NT$', KRW: '₩',
+};
+
+/** 单位是否是货币。3 位大写字母且不在 known 枚举里即认作 ISO 4217 货币码。 */
+const NON_CURRENCY_UNITS = new Set(['percent', 'requests', 'credits', 'prompts', 'tokens', 'usd']);
+function isCurrencyUnit(unit) {
+  if (!unit || typeof unit !== 'string') return false;
+  if (NON_CURRENCY_UNITS.has(unit.toLowerCase())) return false;
+  return /^[A-Z]{3}$/.test(unit.toUpperCase());
+}
+
+/** 金额格式化:千分位 + 2 位小数 + 货币符号;非金额走 groupedNumber(0)。 */
+function formatWindowValue(value, unit) {
+  if (value == null) return '--';
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '--';
+  if (isCurrencyUnit(unit)) {
+    const code = unit.toUpperCase();
+    const symbol = CURRENCY_SYMBOLS[code] || '';
+    const formatted = (Math.round(n * 100) / 100).toLocaleString('en-US', {
+      minimumFractionDigits: 2, maximumFractionDigits: 2,
+    });
+    return symbol ? `${symbol}${formatted}` : `${code} ${formatted}`;
+  }
+  return groupedNumber(n, 0);
+}
+
 function fmtUsd(value) {
   if (value == null) return '--';
   const n = Number(value);
@@ -1886,20 +1917,26 @@ function renderPlan(p, now) {
       node.querySelector('.win-label').textContent = w.label;
       const meta = node.querySelector('.win-meta');
       const unlimited = w.note === '不限量' && w.percentage == null;
-      const pct = unlimited ? '∞' : w.percentage == null ? '--' : `${w.percentage}%`;
-      const frac = unlimited ? ''
+      const hasPct = Number.isFinite(w.percentage);
+      const pct = unlimited ? '∞' : hasPct ? `${w.percentage}%` : '--';
+      // 余额型 provider(used==total 且无 percentage)只显示金额一次,不当配额刻度;
+      // 其它场景保留 "used / total" 的习惯(单位由 formatWindowValue 自动识别货币)。
+      const sameBalance = w.used != null && w.total != null && Math.abs(w.used - w.total) < 1e-9 && !hasPct;
+      const frac = unlimited || sameBalance
+        ? (w.used != null ? formatWindowValue(w.used, w.unit) : '')
         : w.used != null && w.total != null
-          ? `${groupedNumber(w.used, 0)}/${groupedNumber(w.total, 0)}`
-          : w.used != null ? groupedNumber(w.used, 0) : '';
-      meta.innerHTML = `${Number.isFinite(w.percentage) || unlimited ? `<b>${pct}</b>` : pct}${frac ? ` · ${frac}` : ''}`;
+          ? `${formatWindowValue(w.used, w.unit)}/${formatWindowValue(w.total, w.unit)}`
+          : w.used != null ? formatWindowValue(w.used, w.unit) : '';
+      meta.innerHTML = `${hasPct || unlimited ? `<b>${pct}</b>` : pct}${frac ? ` · ${frac}` : ''}`;
       const fill = node.querySelector('.fill');
       fill.className = `fill ${levelClass(w.percentage)}`;
-      fill.style.width = `${w.percentage ?? 0}%`;
+      // 余额型 provider 没有百分比刻度,进度条 0 宽、不抢戏。
+      fill.style.width = hasPct ? `${w.percentage}%` : '0';
       // 时间进度参考线：按窗口时长估算当前时间应到的位置。
       const marker = node.querySelector('.pace-marker');
       if (marker) {
         const pace = timePacePercentage(w, now);
-        if (pace != null) {
+        if (pace != null && hasPct) {
           marker.style.left = `${pace}%`;
           marker.hidden = false;
           marker.title = `时间进度 ${pace}%`;

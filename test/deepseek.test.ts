@@ -3,7 +3,7 @@ import { deepseekAdapter, normalizeDeepseekBalance } from '../src/adapters/deeps
 import { AdapterError } from '../src/types.ts';
 
 describe('normalizeDeepseekBalance', () => {
-  test('单币种：正常余额响应', () => {
+  test('单币种 CNY：unit=CNY、percentage=null、note 拆分赠额/充值', () => {
     const raw = {
       is_available: true,
       balance_infos: [{
@@ -18,26 +18,64 @@ describe('normalizeDeepseekBalance', () => {
     expect(result.planName).toBe('CNY');
     expect(result.window.window).toBe('credits_period');
     expect(result.window.label).toBe('Balance');
-    expect(result.window.unit).toBe('usd');
-    expect(result.window.used).toBe(37.5);
-    expect(result.window.total).toBe(100);
-    expect(result.window.percentage).toBe(37.5);
+    expect(result.window.unit).toBe('CNY');
+    expect(result.window.percentage).toBeNull();
+    expect(result.window.used).toBe(62.5);
+    expect(result.window.total).toBe(62.5);
     expect(result.window.resetAt).toBeNull();
-    expect(result.window.note).toContain('CNY');
-    expect(result.window.note).toContain('62.5');
+    expect(result.window.note).toContain('¥50.00');
+    // 中文金额符号 + 千分位 + 两位小数
+    expect(result.window.note).toContain('赠额 ¥50.00');
+    expect(result.window.note).toContain('充值 ¥50.00');
+  });
+
+  test('单币种 USD：unit=USD、note 用 $', () => {
+    const raw = {
+      is_available: true,
+      balance_infos: [{
+        currency: 'USD',
+        total_balance: '25.00',
+        granted_balance: '10.00',
+        topped_up_balance: '15.00',
+      }],
+    };
+    const result = normalizeDeepseekBalance(raw);
+    expect(result.planName).toBe('USD');
+    expect(result.window.unit).toBe('USD');
+    expect(result.window.note).toContain('$10.00');
+    expect(result.window.note).toContain('$15.00');
+    expect(result.window.percentage).toBeNull();
+  });
+
+  test('币种代码大小写：currency=cny → 归一为 CNY', () => {
+    const raw = {
+      balance_infos: [{ currency: 'cny', total_balance: '5', granted_balance: '5', topped_up_balance: '0' }],
+    };
+    const result = normalizeDeepseekBalance(raw);
+    expect(result.window.unit).toBe('CNY');
+    expect(result.planName).toBe('CNY');
+  });
+
+  test('币种字段缺失：默认 CNY', () => {
+    const raw = {
+      balance_infos: [{ total_balance: '3', granted_balance: '3', topped_up_balance: '0' }],
+    };
+    const result = normalizeDeepseekBalance(raw);
+    expect(result.window.unit).toBe('CNY');
+    expect(result.planName).toBe('CNY');
   });
 
   test('多币种：选第一笔 + note 标注币种数量', () => {
     const raw = {
       balance_infos: [
-        { currency: 'CNY', total_balance: '10', available_balance: '4' },
-        { currency: 'USD', total_balance: '5', available_balance: '5' },
+        { currency: 'CNY', total_balance: '10', granted_balance: '4', topped_up_balance: '6' },
+        { currency: 'USD', total_balance: '5', granted_balance: '5', topped_up_balance: '0' },
       ],
     };
     const result = normalizeDeepseekBalance(raw);
+    expect(result.window.used).toBe(10);
     expect(result.window.total).toBe(10);
-    expect(result.window.used).toBe(6);
-    expect(result.window.percentage).toBe(60);
+    expect(result.window.unit).toBe('CNY');
     expect(result.window.note).toContain('共 2 个币种账户');
   });
 
@@ -46,17 +84,19 @@ describe('normalizeDeepseekBalance', () => {
       balance_infos: [{ currency: 'CNY', total_balance: 8, available_balance: 2 }],
     };
     const result = normalizeDeepseekBalance(raw);
-    expect(result.window.used).toBe(6);
-    expect(result.window.total).toBe(8);
+    expect(result.window.used).toBe(2);
+    expect(result.window.total).toBe(2);
+    expect(result.window.percentage).toBeNull();
   });
 
-  test('余额 100% 已用 → percentage=100', () => {
+  test('balance 为 0：仍然能解析，金额显示 0.00', () => {
     const raw = {
-      balance_infos: [{ currency: 'CNY', total_balance: '10', available_balance: '0' }],
+      balance_infos: [{ currency: 'CNY', total_balance: '10', granted_balance: '0', topped_up_balance: '0' }],
     };
     const result = normalizeDeepseekBalance(raw);
-    expect(result.window.percentage).toBe(100);
-    expect(result.window.used).toBe(10);
+    expect(result.window.used).toBe(0);
+    expect(result.window.total).toBe(0);
+    expect(result.window.note).toContain('赠额 ¥0.00');
   });
 
   test('响应不是对象 → parse 错误', () => {
@@ -82,8 +122,6 @@ describe('normalizeDeepseekBalance', () => {
   });
 
   test('available_balance 缺失：用 granted + topped_up 兜底', () => {
-    // DeepSeek 部分账号类型不返回 available_balance；实际响应：
-    // total_balance ≈ granted_balance + topped_up_balance
     const raw = {
       is_available: true,
       balance_infos: [{
@@ -94,20 +132,24 @@ describe('normalizeDeepseekBalance', () => {
       }],
     };
     const result = normalizeDeepseekBalance(raw);
-    // available = 1854.06 + 7.63 ≈ 1861.69，used ≈ 0.01（rounding）
-    expect(result.window.total).toBe(1861.7);
-    expect(result.window.used).toBeLessThan(0.05);
-    expect(result.window.percentage).toBeLessThan(1);
+    expect(result.window.used).toBe(1861.69);
+    expect(result.window.total).toBe(1861.69);
+    expect(result.window.percentage).toBeNull();
+    // 千分位 + 2 位小数
+    expect(result.window.note).toContain('赠额 ¥1,854.06');
+    expect(result.window.note).toContain('充值 ¥7.63');
   });
 
-  test('available_balance + granted/topped_up 都缺：用 total 兜底，used=0', () => {
+  test('available_balance + granted/topped_up 都缺：用 total 兜底，note 为空', () => {
     const raw = {
       balance_infos: [{ currency: 'CNY', total_balance: '100' }],
     };
     const result = normalizeDeepseekBalance(raw);
+    expect(result.window.used).toBe(100);
     expect(result.window.total).toBe(100);
-    expect(result.window.used).toBe(0);
-    expect(result.window.percentage).toBe(0);
+    expect(result.window.percentage).toBeNull();
+    // 没有 granted/topped_up 时 note 退回到 null
+    expect(result.window.note).toBeNull();
   });
 });
 

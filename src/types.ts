@@ -8,8 +8,10 @@ export interface QuotaWindow {
   used: number | null;
   /** 总量；纯余额时可 null */
   total: number | null;
-  /** 计量单位 */
-  unit: 'percent' | 'requests' | 'credits' | 'prompts' | 'tokens' | 'usd';
+  /** 计量单位。已知语义：percent/requests/credits/prompts/tokens/usd。
+   * 也可承载原始币种代码（CNY/USD/EUR/GBP/JPY…）——DeepSeek 等余额型 provider
+   * 用 API 响应里的实际币种填，前端按 3 位大写字母识别成货币渲染。 */
+  unit: string;
   /** 已用百分比 0-100；未知为 null */
   percentage: number | null;
   /** 重置时间 epoch ms；未知为 null */
