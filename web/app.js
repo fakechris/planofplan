@@ -1918,7 +1918,7 @@ function renderPlan(p, now) {
       const meta = node.querySelector('.win-meta');
       const unlimited = w.note === '不限量' && w.percentage == null;
       const hasPct = Number.isFinite(w.percentage);
-      const pct = unlimited ? '∞' : hasPct ? `${w.percentage}%` : '--';
+      const pct = unlimited ? '∞' : hasPct ? `${w.percentage}%` : '';
       // 余额型 provider(used==total 且无 percentage)只显示金额一次,不当配额刻度;
       // 其它场景保留 "used / total" 的习惯(单位由 formatWindowValue 自动识别货币)。
       const sameBalance = w.used != null && w.total != null && Math.abs(w.used - w.total) < 1e-9 && !hasPct;
@@ -1927,7 +1927,15 @@ function renderPlan(p, now) {
         : w.used != null && w.total != null
           ? `${formatWindowValue(w.used, w.unit)}/${formatWindowValue(w.total, w.unit)}`
           : w.used != null ? formatWindowValue(w.used, w.unit) : '';
-      meta.innerHTML = `${hasPct || unlimited ? `<b>${pct}</b>` : pct}${frac ? ` · ${frac}` : ''}`;
+      // 渲染策略——balance-only 主数字走 <b>(白 + 大号,跟 usage-metric 同档);
+      // pct-provider 主数字是百分比,used/total 是次要灰字;无 pct 又无值时退回 '--'。
+      if (sameBalance) {
+        meta.innerHTML = frac ? `<b>${escapeHtml(frac)}</b>` : '<b>--</b>';
+      } else if (hasPct || unlimited) {
+        meta.innerHTML = `<b>${escapeHtml(pct)}</b>${frac ? `<span class="sep">·</span>${escapeHtml(frac)}` : ''}`;
+      } else {
+        meta.innerHTML = frac ? `<b>--</b><span class="sep">·</span>${escapeHtml(frac)}` : '<b>--</b>';
+      }
       const fill = node.querySelector('.fill');
       fill.className = `fill ${levelClass(w.percentage)}`;
       // 余额型 provider 没有百分比刻度,进度条 0 宽、不抢戏。
@@ -1945,13 +1953,25 @@ function renderPlan(p, now) {
         }
       }
       const reset = node.querySelector('.win-reset');
-      reset.textContent = w.resetAt == null ? '恢复时间未知' : `恢复 ${fmtTime(w.resetAt)}`;
       const countdown = node.querySelector('.win-countdown');
-      if (w.resetAt != null) {
+      // 余额型 provider(无 percentage 概念)不存在"恢复"概念,把整行隐藏,只剩底部 note;
+      // 其它 provider 即使 resetAt==null 也保留"恢复时间未知"作为有用提示。
+      if (sameBalance) {
+        reset.style.display = 'none';
+        countdown.style.display = 'none';
+        reset.textContent = '';
+        countdown.removeAttribute('data-reset-at');
+      } else if (w.resetAt == null) {
+        reset.style.display = '';
+        countdown.style.display = 'none';
+        reset.textContent = '恢复时间未知';
+        countdown.removeAttribute('data-reset-at');
+      } else {
+        reset.style.display = '';
+        countdown.style.display = '';
+        reset.textContent = `恢复 ${fmtTime(w.resetAt)}`;
         countdown.dataset.resetAt = w.resetAt;
         countdown.textContent = fmtCountdown(w.resetAt, now);
-      } else {
-        countdown.removeAttribute('data-reset-at');
       }
       node.querySelector('.win-note').textContent = w.note || '';
       wins.appendChild(node);

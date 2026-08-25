@@ -609,7 +609,10 @@ a.attr-sha:hover { text-decoration: underline; }
 .win-head { justify-content: space-between; gap: 10px; margin-bottom: 7px; font-size: var(--text-sm); }
 .win-label { color: var(--text); font-weight: var(--weight-semibold); }
 .win-meta { color: var(--muted); font-variant-numeric: tabular-nums; }
-.win-meta b { color: var(--text); font-size: var(--text-lg); font-weight: var(--weight-bold); letter-spacing: -0.01em; }
+/* 余额/进度的主数字:白 + 大号,跟 usage-metric 一档;balance-only provider 在此渲
+   染余额值,pct-providers 在此渲染百分比。 */
+.win-meta b { color: var(--text); font-size: var(--text-xl); font-weight: var(--weight-bold); letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.win-meta .sep { color: var(--muted); font-size: var(--text-sm); margin: 0 2px; }
 .track { position: relative; height: 7px; border-radius: var(--radius-pill); background: var(--surface-2); }
 .fill { height: 100%; border-radius: inherit; transition: width 0.55s var(--ease); }
 .fill.ok { background: var(--accent); }
