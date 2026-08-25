@@ -242,14 +242,19 @@ header {
 .brand { color: var(--text); font-size: var(--text-base); font-weight: var(--weight-semibold); letter-spacing: 0.01em; }
 .brand-caption { color: var(--muted); font-size: var(--text-xs); letter-spacing: 0.18em; text-transform: uppercase; }
 
-.tabs { display: flex; gap: var(--space-1); padding: var(--space-1); border: var(--border-width) solid var(--border); border-radius: var(--radius-input); background: var(--surface); }
+.tabs { display: flex; align-items: center; gap: 2px; padding: 3px; border: var(--border-width) solid var(--border); border-radius: var(--radius-input); background: var(--surface); flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+.tabs::-webkit-scrollbar { display: none; }
 .tabs button {
-  border: 0; border-radius: calc(var(--radius-input) - 3px); padding: 6px 14px; color: var(--muted);
-  background: transparent; font-size: var(--text-sm); font-weight: var(--weight-medium);
+  border: 0; border-radius: calc(var(--radius-input) - 3px); padding: 5px 10px; color: var(--muted);
+  background: transparent; font-size: 12.5px; font-weight: var(--weight-medium); white-space: nowrap;
   transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
 }
 .tabs button:hover { color: var(--text); background: var(--surface-hover); }
 .tabs button[aria-selected="true"] { color: var(--on-accent); background: var(--accent-2); }
+/* 设置入口:与文字 tab 分隔的齿轮按钮 */
+.tabs-sep { width: 1px; height: 16px; background: var(--border); margin: 0 4px; flex: none; }
+.tab-gear { font-size: 13px !important; padding: 5px 9px !important; }
+@media (max-width: 1100px) { .brand-caption { display: none; } }
 .tab-panel { min-height: 60vh; }
 
 .header-meta { gap: var(--space-4); }
@@ -465,6 +470,17 @@ td { font-variant-numeric: tabular-nums; }
   color: var(--text-soft); font-size: var(--text-sm); line-height: 1.55;
   white-space: pre-wrap; word-break: break-word; max-height: 160px; overflow: hidden;
 }
+/* 设置页 plan 行:徽标 + 动作 */
+.settings-plan-row { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: 10px 0; border-bottom: var(--border-width) solid var(--border); }
+.settings-plan-badges { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.settings-adapter, .settings-cred {
+  font-style: normal; font-size: 10.5px; padding: 1px 8px; border-radius: 999px; letter-spacing: 0.02em;
+}
+.settings-adapter { color: var(--muted); background: var(--surface-2); }
+.settings-cred { color: var(--muted); border: 1px solid var(--border); }
+.settings-cred-set { color: var(--on-accent); background: var(--accent-2); border-color: transparent; }
+.settings-cred-off { color: var(--text); background: var(--surface-hover); }
+.settings-plan-actions { display: flex; gap: 6px; }
 /* 设置页 + 配置警告横幅 */
 .config-warnings {
   margin: 0 0 12px; padding: 8px 12px; border-radius: var(--radius-card);

@@ -126,12 +126,9 @@ final class PanelView: NSView {
     static func height(plans: [Plan]) -> CGFloat {
         let maxWindows = CGFloat(max(1, plans.map { $0.windows.count }.max() ?? 1))
         let providerHeight = 278 + maxWindows * 64
-        // 总览页动态高度:头部 + 前 3 个富行 + 其余每 plan 一行紧凑摘要
-        // (全量展示;上限 720 防 plan 极多时面板失控)
-        let richRows = min(3, plans.count)
-        let compactRows = max(0, plans.count - 3)
-        let indexHeight = 96 + CGFloat(richRows) * 82 + CGFloat(compactRows) * 22 + 52
-        let cappedIndex = min(indexHeight, 720)
+        // 总览页:头部 + 每 plan 一行统一紧凑摘要(全量,上限 760 防失控)
+        let indexHeight = 66 + CGFloat(plans.count) * 25 + 46
+        let cappedIndex = min(indexHeight, 760)
         return 12 + max(providerHeight, cappedIndex)
     }
 
@@ -253,94 +250,71 @@ final class PanelView: NSView {
     }
 
     /// 总览页：按规范只展示最紧张的 3 个 plan 的完整窗口信息，其余折叠为摘要行。
+    /// 总览页:全部 plan 统一紧凑行(状态点 + 名称 + 窗口标签 + 摘要值 +
+    /// 倒计时),按最紧窗口排序。不再区分「featured 3 富行 + 其余」,两套
+    /// 风格的割裂感比信息密度更伤;富信息在 provider 详情页。
     private func drawIndexPage(rows: [Int], top: CGFloat, contentLeft: CGFloat, contentWidth: CGFloat) {
-        var y = top - 18
+        var y = top - 14
 
-        // 按最紧张窗口百分比排序，取前 3 个详细展示
         let sorted = rows.sorted { a, b in
             let pa = plans[a].windows.compactMap { $0.percentage }.max() ?? 0
             let pb = plans[b].windows.compactMap { $0.percentage }.max() ?? 0
             return pa > pb
         }
-        let featured = Array(sorted.prefix(3))
 
-        for planIndex in featured {
+        for planIndex in sorted {
+            guard y > cardRect.minY + 56 else { break }
             let plan = plans[planIndex]
+            let rowTop = y
+
+            indexRowRects.append((rect: NSRect(x: contentLeft, y: rowTop - 24, width: contentWidth, height: 25), planIndex: planIndex))
+
+            // 状态点 + 名称(+禁用弱化)
+            color(forStatus: plan.status).setFill()
+            NSBezierPath(ovalIn: NSRect(x: contentLeft, y: rowTop - 10, width: 5, height: 5)).fill()
+            drawText(plan.name, at: NSPoint(x: contentLeft + 12, y: rowTop - 13),
+                     font: .systemFont(ofSize: 11.5, weight: .medium), color: textPrimary)
+
+            // 右侧:摘要值(最右)+ 倒计时(值左侧,灰);余额型无倒计时
             let tight = plan.windows.filter { $0.percentage != nil }
                 .max { ($0.percentage ?? 0) < ($1.percentage ?? 0) }
+            let balance = plan.windows.first(where: PanelView.isBalanceWindow)
+            let unlimited = plan.windows.contains { $0.note == "不限量" && $0.percentage == nil }
 
-            let rowRect = NSRect(x: contentLeft, y: y - 52, width: contentWidth, height: 52)
-            indexRowRects.append((rect: rowRect, planIndex: planIndex))
-
-            // 第一行：pip + 名称 + 状态 badge
-            let statusColor = color(forStatus: plan.status)
-            statusColor.setFill()
-            NSBezierPath(ovalIn: NSRect(x: contentLeft, y: y - 1, width: 6, height: 6)).fill()
-            drawText(plan.name, at: NSPoint(x: contentLeft + 14, y: y - 3),
-                     font: .systemFont(ofSize: 11.5, weight: .semibold), color: textPrimary)
-            if PanelView.fableIdleLabel(for: plan, nowMs: Date().timeIntervalSince1970 * 1000) != nil {
-                drawText("⚠", at: NSPoint(x: cardRect.maxX - 20, y: y - 3),
-                         font: .systemFont(ofSize: 11, weight: .semibold), color: warnColor)
-            }
-            y -= 17
-
-            // 第二行：窗口标签 + 百分比 + 倒计时
+            var right = cardRect.maxX - 16
+            var value = "--"
+            var valueColor = textTertiary
             if let tight {
-                let pct = Int(tight.percentage!.rounded())
-                let levelColor = color(forRemaining: 100 - tight.percentage!)
-                drawText(tight.label, at: NSPoint(x: contentLeft + 14, y: y),
-                         font: .systemFont(ofSize: 10, weight: .medium), color: textTertiary)
-                drawRightAligned("\(pct)%", y: y - 2, right: cardRect.maxX - 16,
-                                 font: .monospacedDigitSystemFont(ofSize: 15, weight: .bold), color: levelColor)
-                if let countdown = tight.resetAt.map({ PanelView.countdownText(until: $0) }) {
-                    drawRightAligned(countdown, y: y, right: cardRect.maxX - 64,
-                                     font: .systemFont(ofSize: 9.5), color: textTertiary)
-                }
-                y -= 15
-
-                // 第三行：用量/总量 + 重置时间
-                var detail = ""
-                if let used = tight.used, let total = tight.total {
-                    detail = PanelView.shortNumber(used) + " / " + PanelView.shortNumber(total)
-                } else if let used = tight.used {
-                    detail = PanelView.shortNumber(used)
-                }
+                value = "\(Int(tight.percentage!.rounded()))%"
+                valueColor = color(forRemaining: 100 - tight.percentage!)
                 if let resetAt = tight.resetAt {
-                    if !detail.isEmpty { detail += " · " }
-                    detail += "恢复 " + PanelView.shortDateTime(resetAt)
+                    let cd = PanelView.countdownText(until: resetAt)
+                    let cdFont = NSFont.systemFont(ofSize: 9.5)
+                    let cdWidth = (cd as NSString).size(withAttributes: [.font: cdFont]).width
+                    drawText(cd, at: NSPoint(x: right - cdWidth - 46, y: rowTop - 12), font: cdFont, color: textTertiary)
                 }
-                if !detail.isEmpty {
-                    drawText(detail, at: NSPoint(x: contentLeft + 14, y: y),
-                             font: .systemFont(ofSize: 9.5), color: textTertiary)
-                }
-                y -= 20
-            } else {
-                y -= 35
+            } else if let balance {
+                value = PanelView.windowValueText(balance)
+                valueColor = textPrimary
+            } else if unlimited {
+                value = "∞"
+                valueColor = okColor
+            }
+            drawRightAligned(value, y: y - 13, right: right,
+                             font: .monospacedDigitSystemFont(ofSize: 12.5, weight: .semibold), color: valueColor)
+
+            // 窗口小标签(值左侧;余额型是 "Balance")
+            let label = tight?.label ?? (balance != nil ? "余额" : nil)
+            if let label {
+                let labelFont = NSFont.systemFont(ofSize: 9.5)
+                let w = (label as NSString).size(withAttributes: [.font: labelFont]).width
+                drawText(label, at: NSPoint(x: right - w - 76, y: rowTop - 12), font: labelFont, color: textTertiary)
             }
 
+            // 行分隔线(最后一行也画,收口整齐)
             NSColor(white: 1, alpha: 0.05).setFill()
-            NSRect(x: contentLeft, y: y, width: contentWidth, height: 1).fill()
-            y -= 8
-        }
-
-        // 其余 plan:每行紧凑摘要(状态点 + 名称 + 摘要值),不再是「其余 N 个正常」
-        // 一句话——健康与否都要有数据可看(用户实测反馈)
-        for planIndex in sorted.dropFirst(3) {
-            let plan = plans[planIndex]
-            if y < cardRect.minY + 56 { break }
-            let rowRect = NSRect(x: contentLeft, y: y - 18, width: contentWidth, height: 20)
-            indexRowRects.append((rect: rowRect, planIndex: planIndex))
-            let statusColor = color(forStatus: plan.status)
-            statusColor.setFill()
-            NSBezierPath(ovalIn: NSRect(x: contentLeft, y: y - 8, width: 5, height: 5)).fill()
-            drawText(plan.name, at: NSPoint(x: contentLeft + 12, y: y - 11),
-                     font: .systemFont(ofSize: 10.5, weight: .medium), color: textSecondary)
-            let value = PanelView.indexSummaryValue(for: plan)
-            let isBalance = plan.windows.contains(where: PanelView.isBalanceWindow)
-            drawRightAligned(value, y: y - 11, right: cardRect.maxX - 16,
-                             font: .monospacedDigitSystemFont(ofSize: 11, weight: isBalance ? .semibold : .bold),
-                             color: isBalance ? textPrimary : textSecondary)
-            y -= 22
+            NSRect(x: contentLeft, y: rowTop - 24, width: contentWidth, height: 1).fill()
+            y -= 25
         }
     }
 
