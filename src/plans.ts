@@ -17,10 +17,19 @@ import type { PlanSection } from './types.ts';
 
 const DIRECT_NAMES = new Set([
   'task_plan.md', 'progress.md', 'findings.md', 'plan.md', 'PLAN.md',
-  'todo.md', 'TODO.md', 'backlog.md', 'BACKLOG.md',
+  'plan.zh.md', 'todo.md', 'TODO.md', 'backlog.md', 'BACKLOG.md',
 ]);
-const PLAN_DIR = 'docs/plans';
+// 计划类命名的泛匹配:IMPLEMENTATION_PLAN.md / *-plan.md / roadmap /
+// milestone / todo / handoff——真实项目约定远不止 task_plan 一种
+// (实测:planofplan 和 lumen 全家族用 IMPLEMENTATION_PLAN.md,140 个
+// 文件被旧规则漏掉)
+const PLAN_NAME_RE = /(?:plan|roadmap|milestone|backlog|todo|handoff)/i;
+// 明确不是计划的 md(README/变更日志/技能与指令文件/._ 垃圾)
+const NOT_PLAN_RE = /^(?:\._|README|CHANGELOG|CONTRIBUTING|SECURITY|CODE_OF_CONDUCT|LICENSE|NOTICE|SKILL|AGENTS|CLAUDE|PROMPT|DESCRIPTION)/i;
+/** 计划文档目录(plans/specs 下的 md 全收,无论文件名)。 */
+const PLAN_DIR_RE = /(?:^|\/)(?:plans|specs)(?:$|\/)/;
 const HANDOFF_RE = /^HANDOFF(?:[-_].*)?\.md$/i; // HANDOFF.md(无分隔符)也要认
+const SKIP_DIRS = new Set(['node_modules', 'target', 'dist', 'build', 'vendor', 'venv']);
 const TEXT_CAP = 2000;
 
 /** 发现根:session cwd ∪ project root(有界:百级)。 */
@@ -33,48 +42,60 @@ export function planRootsOf(cwds: Array<string | null>, projectRoots: Array<stri
 
 export function planKindOf(path: string): string {
   const name = basename(path);
-  if (dirname(path).endsWith(PLAN_DIR)) return 'detailed_plan';
-  if (HANDOFF_RE.test(name)) return 'handoff';
+  if (PLAN_DIR_RE.test(dirname(path))) return 'detailed_plan';
+  if (HANDOFF_RE.test(name) || /handoff/i.test(name)) return 'handoff';
   switch (name) {
     case 'task_plan.md': return 'task_plan';
     case 'progress.md': return 'progress';
     case 'findings.md': return 'findings';
     case 'plan.md':
-    case 'PLAN.md': return 'plan';
+    case 'PLAN.md':
+    case 'plan.zh.md': return 'plan';
     case 'todo.md':
     case 'TODO.md': return 'todo';
     case 'backlog.md':
     case 'BACKLOG.md': return 'backlog';
-    default: return 'unknown';
   }
+  if (/roadmap/i.test(name)) return 'roadmap';
+  if (/milestone/i.test(name)) return 'milestone';
+  return 'plan'; // 泛匹配的 *-plan.md / IMPLEMENTATION_PLAN.md 等
 }
 
 export function planFileId(path: string): string {
   return createHash('sha1').update(path).digest('hex').slice(0, 12);
 }
 
-/** 一个目录下的候选 plan 文件(直接名 + docs/plans/*.md + HANDOFF-*)。 */
+/**
+ * 一个根目录下的候选 plan 文件(深度 ≤2):固定名 + 计划类命名泛匹配 +
+ * plans/specs 目录全收 + HANDOFF。跳过隐藏目录/依赖产物/明确非计划文件。
+ */
 export function discoverPlanFiles(root: string): string[] {
   if (!existsSync(root)) return [];
   const found: string[] = [];
-  try {
-    for (const name of readdirSync(root)) {
-      if (DIRECT_NAMES.has(name)) found.push(join(root, name));
-      else if (HANDOFF_RE.test(name) && name.endsWith('.md')) found.push(join(root, name));
-    }
-  } catch {
-    /* 不可读目录跳过 */
-  }
-  const plansDir = join(root, PLAN_DIR);
-  if (existsSync(plansDir)) {
+  const walk = (dir: string, depth: number): void => {
+    if (depth > 2) return;
+    let entries;
     try {
-      for (const name of readdirSync(plansDir)) {
-        if (name.endsWith('.md')) found.push(join(plansDir, name));
-      }
+      entries = readdirSync(dir, { withFileTypes: true });
     } catch {
-      /* 同上 */
+      return; // 不可读目录跳过
     }
-  }
+    for (const entry of entries) {
+      if (entry.name.startsWith('._')) continue;
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name.startsWith('.') || SKIP_DIRS.has(entry.name)) continue;
+        walk(full, depth + 1);
+        continue;
+      }
+      if (!entry.name.endsWith('.md') || NOT_PLAN_RE.test(entry.name)) continue;
+      if (DIRECT_NAMES.has(entry.name) || HANDOFF_RE.test(entry.name) || PLAN_NAME_RE.test(entry.name)
+        || PLAN_DIR_RE.test(dir)) {
+        found.push(full);
+      }
+    }
+  };
+  walk(root, 0);
   return found;
 }
 

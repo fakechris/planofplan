@@ -295,18 +295,27 @@ describe('materializePlanFiles', () => {
     }
   });
 
-  test('发现:直接名 + docs/plans + HANDOFF 模式', () => {
+  test('发现:直接名 + docs/plans + HANDOFF + 泛计划命名(IMPLEMENTATION_PLAN/roadmap/plans 目录),排除 README 类', () => {
     const root = mkdtempSync(join(tmpdir(), 'planofplan-discover-'));
     try {
       writeFileSync(join(root, 'progress.md'), '# P\n');
       writeFileSync(join(root, 'notes.md'), '# N\n'); // 非候选
+      writeFileSync(join(root, 'README.md'), '# r\n'); // 明确排除
+      writeFileSync(join(root, 'IMPLEMENTATION_PLAN.md'), '# impl\n'); // planofplan/lumen 家族约定
+      writeFileSync(join(root, '._task_plan.md'), 'junk\n'); // AppleDouble 垃圾
       mkdirSync(join(root, 'docs', 'plans'), { recursive: true });
       writeFileSync(join(root, 'docs', 'plans', 'a.md'), '# a\n');
+      mkdirSync(join(root, 'docs', 'specs'), { recursive: true });
+      writeFileSync(join(root, 'docs', 'specs', 'b-spec.md'), '# b\n'); // specs 目录全收
+      mkdirSync(join(root, 'sub'), { recursive: true });
+      writeFileSync(join(root, 'sub', 'roadmap.md'), '# rm\n'); // 深度 1 泛匹配
       const found = discoverPlanFiles(root).map((path) => path.split('/').pop()).sort();
-      expect(found).toEqual(['a.md', 'progress.md']);
+      expect(found).toEqual(['IMPLEMENTATION_PLAN.md', 'a.md', 'b-spec.md', 'progress.md', 'roadmap.md']);
       expect(planKindOf('/x/docs/plans/a.md')).toBe('detailed_plan');
+      expect(planKindOf('/x/docs/specs/b.md')).toBe('detailed_plan');
       expect(planKindOf('/x/HANDOFF_x.md')).toBe('handoff');
-      expect(planKindOf('/x/随便.md')).toBe('unknown');
+      expect(planKindOf('/x/IMPLEMENTATION_PLAN.md')).toBe('plan');
+      expect(planKindOf('/x/roadmap.md')).toBe('roadmap');
       rmSync(root, { recursive: true, force: true });
     } catch (error) {
       rmSync(root, { recursive: true, force: true });
