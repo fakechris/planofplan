@@ -465,6 +465,14 @@ td { font-variant-numeric: tabular-nums; }
   color: var(--text-soft); font-size: var(--text-sm); line-height: 1.55;
   white-space: pre-wrap; word-break: break-word; max-height: 160px; overflow: hidden;
 }
+/* Handoff 交接面板 */
+.handoff-btn { margin: var(--space-3) 0; }
+.handoff-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; margin-bottom: var(--space-2); }
+.handoff-actions input { font-size: var(--text-xs); padding: 4px 8px; border: var(--border-width) solid var(--border); border-radius: var(--radius-card); background: var(--surface); color: var(--text); }
+.handoff-preview pre {
+  max-height: 320px; overflow: auto; white-space: pre-wrap; word-break: break-word;
+  font-size: var(--text-xs); background: var(--surface-2); padding: var(--space-3); border-radius: var(--radius-card);
+}
 .session-more {
   width: 100%; border: 0; border-radius: 0; padding: var(--space-3); color: var(--accent-2);
   background: transparent; font-size: var(--text-sm);

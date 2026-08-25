@@ -147,6 +147,8 @@ async function serve(): Promise<void> {
   const f = flags();
   const cfg = loadConfig();
   const port = f.port ?? cfg.port;
+  // deep link(handoff 等)用 cfg.port 拼 URL,必须与实际绑定端口一致
+  cfg.port = port;
   const store = f.demo ? openMemoryDb() : openDb(join(ensureHome(), 'planofplan.db'));
 
   syncStore(store, cfg);

@@ -415,6 +415,7 @@ function renderSessions(list) {
     void loadSessionLaunch(open);
     void loadSessionTodos(open.id);
     void loadSessionPlans(open.id);
+    bindHandoffButton(readerEl);
   } else {
     readerEl.innerHTML = `
       <div class="usage-empty">
@@ -1353,6 +1354,7 @@ async function loadRequirementDetail(id) {
         navigate(tab, navId || undefined);
       });
     });
+    bindHandoffButton(readerEl);
   } catch {
     readerEl.innerHTML = '<div class="usage-empty"><strong>详情加载失败</strong><span>稍后再试。</span></div>';
   }
@@ -1395,12 +1397,97 @@ function requirementDetailHtml(detail) {
     <div class="session-attrs"><h3>相关计划 <span class="muted">span 内触碰的 plan 文件</span></h3>${plansHtml || '<div class="muted">span 内没有触碰计划文件</div>'}</div>
     <div class="session-attrs"><h3>span 内文件 <span class="muted">${detail.filesTotal || 0} 个,按触碰次数</span></h3>${filesHtml || '<div class="muted">span 内没有文件触碰</div>'}</div>
     <div class="session-attrs"><h3>span 内 commit <span class="muted">● 声明 · ○ 时间窗</span></h3>${commitsHtml || '<div class="muted">span 内没有归因 commit</div>'}</div>
+    <button type="button" class="secondary-btn handoff-btn" data-handoff="requirement" data-handoff-id="${escapeHtml(req.id || '')}">交接…</button>
+    <div id="handoffPanel"></div>
   `;
 }
 
 ['reqProject', 'reqProvider', 'reqLevel'].forEach((id) => {
   document.getElementById(id)?.addEventListener('change', renderRequirements);
 });
+
+// ── Handoff(§2.5:指针 + 摘要,三通道交付)────────────────────────
+
+async function loadHandoffPanel(type, sourceId) {
+  const wrap = document.getElementById('handoffPanel');
+  if (!wrap) return;
+  try {
+    const data = await request(`/api/handoff/${encodeURIComponent(type)}/${encodeURIComponent(sourceId)}`);
+    wrap.innerHTML = `
+      <div class="session-attrs">
+        <h3>交接 <span class="muted">指针 + 摘要,不搬运 transcript</span></h3>
+        <div class="handoff-actions">
+          <button type="button" class="secondary-btn" data-handoff-copy>复制包</button>
+          <button type="button" class="secondary-btn" data-handoff-file>导出 .md</button>
+          <select id="handoffProvider" aria-label="注入的 agent">
+            ${(data.providers || ['claude']).map((p) => `<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`).join('')}
+          </select>
+          <input id="handoffDir" type="text" placeholder="目标目录" value="${escapeHtml(data.defaultDir || '~/Downloads')}" size="24" />
+          <button type="button" class="secondary-btn" data-handoff-agent>起新会话</button>
+        </div>
+        <div id="handoffResult" class="muted"></div>
+        <details class="handoff-preview">
+          <summary>预览包内容</summary>
+          <pre>${escapeHtml(data.markdown)}</pre>
+        </details>
+        ${data.history?.length ? `<div class="muted">交接记录 ${data.history.length} 次(最近 ${fmtAgo(data.history[0].createdAt, Date.now())} · ${escapeHtml(data.history[0].mode)})</div>` : ''}
+      </div>
+    `;
+    const result = () => document.getElementById('handoffResult');
+    wrap.querySelector('[data-handoff-copy]')?.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(data.markdown);
+        result().textContent = '已复制到剪贴板。';
+      } catch {
+        result().textContent = '复制失败(浏览器权限),用导出。';
+      }
+    });
+    wrap.querySelector('[data-handoff-file]')?.addEventListener('click', async () => {
+      const dir = document.getElementById('handoffDir')?.value?.trim();
+      const res = await request(`/api/handoff/${encodeURIComponent(type)}/${encodeURIComponent(sourceId)}/deliver`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ mode: 'file', targetDir: dir || undefined }),
+      });
+      result().textContent = res.ok ? `已导出:${res.path}` : `导出失败:${res.error}`;
+    });
+    wrap.querySelector('[data-handoff-agent]')?.addEventListener('click', async () => {
+      const dir = document.getElementById('handoffDir')?.value?.trim();
+      const provider = document.getElementById('handoffProvider')?.value;
+      try {
+        const res = await request(`/api/handoff/${encodeURIComponent(type)}/${encodeURIComponent(sourceId)}/deliver`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ mode: 'agent', provider, targetDir: dir || undefined }),
+        });
+        result().textContent = res.ok
+          ? `已在 Terminal 启动 ${provider}(包作为首条消息注入)。`
+          : `启动失败:${res.error}`;
+      } catch (errorRes) {
+        result().textContent = `启动失败:${errorRes?.error || '未知错误'}(包文件已生成,可手动注入)`;
+      }
+    });
+  } catch {
+    wrap.innerHTML = '<div class="session-attrs"><h3>交接</h3><div class="muted">包生成失败</div></div>';
+  }
+}
+
+function bindHandoffButton(readerEl) {
+  const btn = readerEl.querySelector('[data-handoff]');
+  if (!btn) return;
+  btn.addEventListener('click', () => {
+    const panel = document.getElementById('handoffPanel');
+    if (!panel) return;
+    if (panel.dataset.open === '1') {
+      panel.dataset.open = '0';
+      panel.innerHTML = '';
+      return;
+    }
+    panel.dataset.open = '1';
+    panel.innerHTML = '<div class="muted">生成交接包…</div>';
+    void loadHandoffPanel(btn.getAttribute('data-handoff'), btn.getAttribute('data-handoff-id'));
+  });
+}
 
 // ── 计划页(计划态实体:PlanFile + 快照序列)───────────────────────
 
@@ -1544,6 +1631,7 @@ async function loadPlanDetail(id) {
         navigate(tab, navId || undefined);
       });
     });
+    bindHandoffButton(readerEl);
   } catch {
     readerEl.innerHTML = '<div class="usage-empty"><strong>详情加载失败</strong><span>稍后再试。</span></div>';
   }
@@ -1606,6 +1694,8 @@ function planDetailHtml(detail) {
     <div class="session-attrs"><h3>关联需求 <span class="muted">触碰 session 的需求实体</span></h3>${requirementsHtml || '<div class="muted">没有关联需求</div>'}</div>
     <div class="session-attrs"><h3>关联 commit <span class="muted">触碰 session 的归因产出</span></h3>${planCommitsHtml || '<div class="muted">没有归因 commit</div>'}</div>
     <div class="session-attrs"><h3>谁在推进 <span class="muted">按文件触碰归因</span></h3>${sessionsHtml || '<div class="muted">窗口内没有 session 触碰过该文件</div>'}</div>
+    <button type="button" class="secondary-btn handoff-btn" data-handoff="planfile" data-handoff-id="${escapeHtml(plan.id)}">交接…</button>
+    <div id="handoffPanel"></div>
   `;
 }
 
@@ -1642,6 +1732,8 @@ function sessionDetailHtml(session, pool) {
     </div>
     <div id="sessionTodoTrail"></div>
     <div id="sessionPlansTrail"></div>
+    <button type="button" class="secondary-btn handoff-btn" data-handoff="session" data-handoff-id="${escapeHtml(session.id)}">交接…</button>
+    <div id="handoffPanel"></div>
     <div class="session-actions">
       ${session.sourceFile ? `<button class="secondary-btn" type="button" data-reveal="${escapeHtml(session.id)}">在 Finder 中显示</button>` : ''}
     </div>
