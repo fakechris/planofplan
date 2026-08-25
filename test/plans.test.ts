@@ -198,7 +198,7 @@ describe('materializePlanFiles', () => {
         kind: 'task_plan',
         title: '把入口页重构为列表式布局',
         currentPhase: 'Phase 2 — in_progress',
-        repo: null, // 非 git 目录
+        repo: root, // 非 git 目录:以发现根为身份(目录即项目)
       });
       expect(files.find((file) => file.path.includes('docs/plans'))?.kind).toBe('detailed_plan');
       expect(files.filter((file) => file.path.includes('HANDOFF')).every((file) => file.kind === 'handoff')).toBe(true);
