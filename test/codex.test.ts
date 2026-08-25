@@ -60,6 +60,36 @@ describe('normalizeCodex', () => {
     expect(extras.map((w) => w.label)).toEqual(['Extra1', 'Extra2']);
   });
 
+  test('2026-08 新嵌套形态:prolite 顶层=周,5h 在 additional 的 rate_limit 里', () => {
+    // 真实响应缩影:chatgpt.com/backend-api/wham/usage,plan_type=prolite
+    const windows = normalizeCodex({
+      plan_type: 'prolite',
+      rate_limit: {
+        primary_window: { used_percent: 0, limit_window_seconds: 604800, reset_at: 1788275961 },
+        secondary_window: null,
+        additional_rate_limits: [
+          {
+            limit_name: 'GPT-5.3-Codex-Spark',
+            metered_feature: 'codex_bengalfox',
+            rate_limit: {
+              primary_window: { used_percent: 42, limit_window_seconds: 18000, reset_at: 1787689161 },
+              secondary_window: { used_percent: 7, limit_window_seconds: 604800, reset_at: 1788275961 },
+            },
+          },
+        ],
+      },
+      credits: { has_credits: false },
+    });
+    // 顶层周限额 + Spark 5h + Spark 周
+    expect(windows.map((w) => `${w.label}:${w.percentage}`)).toEqual([
+      '周限额:0',
+      'Spark·5h限额:42',
+      'Spark·周限额:7',
+    ]);
+    const spark5h = windows[1]!;
+    expect(spark5h.resetAt).toBe(1787689161 * 1000);
+  });
+
   test('uses the API window duration when primary is the weekly limit', () => {
     const windows = normalizeCodex({
       rate_limit: {
