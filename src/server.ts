@@ -16,6 +16,8 @@ import { buildSessionList, searchSessions } from './sessions.ts';
 import { pickRequirement } from './motivation.ts';
 import { nameOfUrl, sessionProjectNames } from './repos.ts';
 import { buildHandoffPackage, deliverHandoff, handoffProviders } from './handoff.ts';
+import { LLM_PROVIDERS, llmKeyFor, llmProviderStatus, synthesizeHandoffSummary, withSummary } from './llm.ts';
+import { loadConfig, saveLlmConfig } from './config.ts';
 import type { ProjectAgentStat, ProjectListItem, RequirementRecord } from './types.ts';
 import { readTranscript } from './transcript.ts';
 import { launchResume } from './resume.ts';
@@ -593,34 +595,78 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
   const handoffLink = (type: string, id: string): string =>
     `http://localhost:${cfg.port}/#${type === 'planfile' ? 'planfiles' : type === 'session' ? 'sessions' : 'requirements'}/${encodeURIComponent(id)}`;
 
-  app.get('/api/handoff/:type/:id', (c) => {
+  /** 已配置 LLM 时合成交接摘要头;失败退化纯证据包,错误带回给前端提示。 */
+  const withLlmSummary = async (pkg: ReturnType<typeof buildHandoffPackage>): Promise<{
+    pkg: NonNullable<ReturnType<typeof buildHandoffPackage>>;
+    summaryError: string | null;
+  }> => {
+    if (!pkg || !cfg.llm?.provider) return { pkg: pkg!, summaryError: null };
+    const summary = await synthesizeHandoffSummary(pkg, cfg.llm);
+    if (!summary) return { pkg, summaryError: 'AI 摘要生成失败,已退化为纯证据包' };
+    return { pkg: withSummary(pkg, summary), summaryError: null };
+  };
+
+  app.get('/api/handoff/:type/:id', async (c) => {
     const type = c.req.param('type') as 'session' | 'requirement' | 'planfile';
     const id = decodeURIComponent(c.req.param('id'));
-    const pkg = buildHandoffPackage(store, type, id, handoffLink(type, id));
-    if (!pkg) return c.json({ ok: false, error: 'unknown source' }, 404);
+    const raw = buildHandoffPackage(store, type, id, handoffLink(type, id));
+    if (!raw) return c.json({ ok: false, error: 'unknown source' }, 404);
+    const { pkg, summaryError } = await withLlmSummary(raw);
     return c.json({
       ...pkg,
       deepLink: handoffLink(type, id),
       providers: handoffProviders(),
       history: store.handoffsFor(type, id),
+      llmUsed: !!cfg.llm?.provider,
+      summaryError,
     });
   });
 
   app.post('/api/handoff/:type/:id/deliver', async (c) => {
     const type = c.req.param('type') as 'session' | 'requirement' | 'planfile';
     const id = decodeURIComponent(c.req.param('id'));
-    const pkg = buildHandoffPackage(store, type, id, handoffLink(type, id));
-    if (!pkg) return c.json({ ok: false, error: 'unknown source' }, 404);
+    const raw = buildHandoffPackage(store, type, id, handoffLink(type, id));
+    if (!raw) return c.json({ ok: false, error: 'unknown source' }, 404);
     const body = await c.req.json().catch(() => ({})) as {
       mode?: 'file' | 'agent'; provider?: string; targetDir?: string;
     };
+    const { pkg, summaryError } = await withLlmSummary(raw);
     const mode = body.mode === 'agent' ? 'agent' : 'file';
     const result = deliverHandoff(store, pkg, {
       mode,
       provider: body.provider,
       targetDir: body.targetDir,
     });
-    return c.json(result, result.ok ? 200 : 400);
+    return c.json({ ...result, summaryError }, result.ok ? 200 : 400);
+  });
+
+  // ── LLM 配置(provider = 已配置 key 的;model 自由填)─────────────
+
+  app.get('/api/llm/config', (c) => {
+    return c.json({
+      llm: cfg.llm ?? null,
+      providers: llmProviderStatus(),
+    });
+  });
+
+  app.post('/api/llm/config', async (c) => {
+    const body = await c.req.json().catch(() => ({})) as {
+      provider?: string; model?: string; baseUrl?: string;
+    };
+    if (body.provider !== undefined && body.provider !== '') {
+      const known = LLM_PROVIDERS.some((spec) => spec.id === body.provider);
+      if (!known) return c.json({ ok: false, error: `未知 provider:${body.provider}` }, 400);
+      if (!llmKeyFor(body.provider)) {
+        return c.json({ ok: false, error: `${body.provider} 还没有配置 key(auth set 或环境变量)` }, 400);
+      }
+    }
+    saveLlmConfig({
+      provider: body.provider,
+      model: body.model,
+      baseUrl: body.baseUrl,
+    });
+    cfg.llm = loadConfig().llm;
+    return c.json({ ok: true, llm: cfg.llm ?? null });
   });
 
   app.post('/api/sessions/:id/resume', (c) => {

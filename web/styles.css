@@ -468,6 +468,8 @@ td { font-variant-numeric: tabular-nums; }
 /* Handoff 交接面板 */
 .handoff-btn { margin: var(--space-3) 0; }
 .handoff-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; margin-bottom: var(--space-2); }
+.handoff-llm { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; margin-bottom: var(--space-2); padding: var(--space-2); background: var(--surface-2); border-radius: var(--radius-card); }
+.handoff-llm input { font-size: var(--text-xs); padding: 4px 8px; border: var(--border-width) solid var(--border); border-radius: var(--radius-card); background: var(--surface); color: var(--text); }
 .handoff-actions input { font-size: var(--text-xs); padding: 4px 8px; border: var(--border-width) solid var(--border); border-radius: var(--radius-card); background: var(--surface); color: var(--text); }
 .handoff-preview pre {
   max-height: 320px; overflow: auto; white-space: pre-wrap; word-break: break-word;

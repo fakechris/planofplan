@@ -158,7 +158,9 @@ async function serve(): Promise<void> {
   scheduler.start();
 
   const server = createServer(store, scheduler, cfg);
-  Bun.serve({ port, fetch: server.fetch });
+  // idleTimeout 提到 2 分钟:handoff 的 LLM 摘要合成可能超过默认 10s,
+  // Bun.serve 会在 handler 无输出时掐掉请求(线上实测踩过)
+  Bun.serve({ port, fetch: server.fetch, idleTimeout: 120 });
   console.log(`planofplan 已启动: http://localhost:${port}${f.demo ? '  (demo 数据，内存库，不落盘)' : ''}`);
   if (f.demo) console.log('提示：demo 模式用内置示例数据预览界面；真实数据请配置 MINIMAX_CODING_API_KEY 后去掉 --demo 启动。');
   if (!f.demo) {
