@@ -5,7 +5,9 @@ import { join } from 'node:path';
 import { openMemoryDb } from '../src/db.ts';
 import {
   discoverPlanFiles,
+  isSummaryMessage,
   materializePlanFiles,
+  materializeProgressNotes,
   materializeTodoSnapshots,
   parsePlanMarkdown,
   parseTodoToolText,
@@ -127,6 +129,46 @@ describe('materializeTodoSnapshots', () => {
     expect(store.todoSnapshotsForSession('claude:t1')).toHaveLength(2);
     store.deleteSession('claude:t1');
     expect(store.todoSnapshotsForSession('claude:t1')).toHaveLength(0);
+  });
+});
+
+describe('④ 尾总结抽取', () => {
+  test('isSummaryMessage:强前缀 + ≥40 字;短句/普通回复不算', () => {
+    expect(isSummaryMessage('已完成源 PDF 六份的视觉渲染与财务报表页初步查看;当前未遇到渲染阻塞。现在重新用浏览器打开。')).toBe(true);
+    expect(isSummaryMessage('本轮已提交:`57a72d4 补充架构包审计与离线入口`。当前工作树干净,无遗留修改。')).toBe(true);
+    expect(isSummaryMessage('总结:这一轮做了三件事,剩下验证和文档两步。')).toBe(false); // 长度不足 40
+    expect(isSummaryMessage('好的,我来处理')).toBe(false);
+    expect(isSummaryMessage('这一步我们需要先理解需求的本质,然后再决定怎么拆分与交付,先把范围收敛下来再动手。')).toBe(true);
+  });
+
+  test('物化 + 端点(带 commitCount 对账素材)+ 级联', async () => {
+    const store = openMemoryDb();
+    store.upsertSessions([session({ id: 'claude:n1', provider: 'claude', nativeId: 'n1' })]);
+    store.upsertSessionMessages([
+      {
+        id: 's1', sessionId: 'claude:n1', seq: 2, role: 'assistant', kind: 'text', toolName: null,
+        text: '已完成入口页重构:分组组件、三项配置迁移和旧样式删除,提交为 `abc1234`。剩余验收截图未做。',
+        timestamp: Date.now() - 1000, model: null, inputTokens: null, outputTokens: null,
+      },
+      {
+        id: 's2', sessionId: 'claude:n1', seq: 3, role: 'assistant', kind: 'text', toolName: null,
+        text: '好的,继续', timestamp: Date.now(), model: null, inputTokens: null, outputTokens: null,
+      },
+    ]);
+    expect(materializeProgressNotes(store)).toBe(1);
+    materializeProgressNotes(store); // 幂等
+    expect(store.progressNotesForSession('claude:n1')).toHaveLength(1);
+    expect(store.progressNotesForSession('claude:n1')[0]?.text).toContain('abc1234');
+
+    const server = createServer(store, scheduler as never, { port: 9291, plans: DEFAULT_PLANS });
+    const res = await server.request('http://localhost/api/sessions/claude:n1/notes');
+    expect(res.status).toBe(200);
+    const body = await res.json() as { notes: Array<{ text: string }>; commitCount: number };
+    expect(body.notes).toHaveLength(1);
+    expect(body.commitCount).toBe(0); // 无归因 commit → 前端对账黄标素材
+
+    store.deleteSession('claude:n1');
+    expect(store.progressNotesForSession('claude:n1')).toHaveLength(0);
   });
 });
 

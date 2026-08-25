@@ -588,30 +588,57 @@ function bindAttrFold(el) {
   });
 }
 
-// Todo 轨迹:TodoWrite/todo_write 的消息快照序列(演进态,只观察)。
+// 进展块:Todo 轨迹(TodoWrite 自报)+ 尾总结(assistant 自报)+ 对账提示
+// (自报完成 vs 归因 commit,§3:自报不可全信,无佐证标黄)。
 async function loadSessionTodos(sessionId) {
   const el = document.getElementById('sessionTodoTrail');
   if (!el) return;
   try {
-    const data = await request(`/api/sessions/${encodeURIComponent(sessionId)}/todos`);
-    const todos = data.todos || [];
-    if (todos.length === 0) {
+    const [todoData, noteData] = await Promise.all([
+      request(`/api/sessions/${encodeURIComponent(sessionId)}/todos`),
+      request(`/api/sessions/${encodeURIComponent(sessionId)}/notes`),
+    ]);
+    const todos = todoData.todos || [];
+    const notes = noteData.notes || [];
+    const commitCount = noteData.commitCount || 0;
+    if (todos.length === 0 && notes.length === 0) {
       el.innerHTML = '';
       return;
     }
     const latest = todos[todos.length - 1];
-    const itemsHtml = (latest.items || []).map((item) => {
-      const done = item.status === 'completed' || item.status === 'done';
-      const inProgress = item.status === 'in_progress';
-      const icon = done ? '☑' : inProgress ? '◐' : '☐';
-      return `
-      <div class="attr-row${done ? ' attr-dim' : ''}">
-        <span class="attr-path">${icon} ${escapeHtml(item.title)}</span>
-      </div>`;
-    }).join('');
-    el.innerHTML = `
-      <div class="session-attrs"><h3>Todo 轨迹 <span class="muted">最新快照 of ${todos.length} · TodoWrite 自报</span></h3>${itemsHtml}</div>
-    `;
+    let todoHtml = '';
+    if (latest) {
+      const items = latest.items || [];
+      const doneCount = items.filter((item) => item.status === 'completed' || item.status === 'done').length;
+      // 对账 v0:有自报完成但零归因 commit → 黄标(METR/Agent-Diff:自报不可全信)
+      const unverified = doneCount > 0 && commitCount === 0;
+      const auditHtml = doneCount > 0
+        ? `<div class="attr-row${unverified ? ' plan-audit-warn' : ''}">
+             <span class="attr-path">对账</span>
+             <span class="attr-meta">${unverified ? '⚠ 自报完成 ' + doneCount + ' 项 · 无 commit 佐证' : '自报完成 ' + doneCount + ' 项 · 归因 commit ' + commitCount}</span>
+           </div>`
+        : '';
+      const itemsHtml = items.map((item) => {
+        const done = item.status === 'completed' || item.status === 'done';
+        const inProgress = item.status === 'in_progress';
+        const icon = done ? '☑' : inProgress ? '◐' : '☐';
+        return `
+        <div class="attr-row${done ? ' attr-dim' : ''}">
+          <span class="attr-path">${icon} ${escapeHtml(item.title)}</span>
+        </div>`;
+      }).join('');
+      todoHtml = `
+      <div class="session-attrs"><h3>Todo 轨迹 <span class="muted">最新快照 of ${todos.length} · TodoWrite 自报</span></h3>${auditHtml}${itemsHtml}</div>
+      `;
+    }
+    const latestNote = notes[notes.length - 1];
+    const noteHtml = latestNote
+      ? `
+      <div class="session-attrs"><h3>进展自报 <span class="muted">最新 of ${notes.length} · assistant 总结(inferred)</span></h3>
+        <div class="plan-note-text">${escapeHtml(latestNote.text.slice(0, 600))}</div>
+      </div>`
+      : '';
+    el.innerHTML = todoHtml + noteHtml;
   } catch {
     el.innerHTML = '';
   }
@@ -1352,16 +1379,45 @@ async function refreshPlans() {
   renderPlans();
 }
 
+function planRepoName(plan) {
+  if (!plan.repo) return '(非 git 目录)';
+  return plan.repo.replace(/^.*[/:]/, '').replace(/\.git$/, '') || plan.repo;
+}
+
 function planItemHtml(plan) {
   const kind = PLAN_KIND_LABELS[plan.kind] || plan.kind;
   const progress = plan.checkboxTotal > 0 ? ` · ☑ ${plan.checkboxChecked}/${plan.checkboxTotal}` : '';
-  const repo = plan.repo ? plan.repo.replace(/^.*[/:]/, '').replace(/\.git$/, '') : '';
+  const dir = plan.path.slice(0, plan.path.lastIndexOf('/'));
   return `
-    <button type="button" class="session-item${plan.id === openPlanId ? ' active' : ''}" data-plan-open="${escapeHtml(plan.id)}">
+    <button type="button" class="session-item${plan.id === openPlanId ? ' active' : ''}" data-plan-open="${escapeHtml(plan.id)}" title="${escapeHtml(plan.path)}">
       <strong>${escapeHtml(plan.title || plan.path.split('/').pop() || plan.path)}</strong>
-      <span><i class="req-origin req-origin-${plan.missingSince ? 'system_inferred' : 'user_explicit'}">${plan.missingSince ? '已消失' : kind}</i>${repo ? ` · ${escapeHtml(repo)}` : ''}${progress} · ${fmtAgo(plan.lastSeenAt, Date.now())}</span>
+      <span><i class="req-origin req-origin-${plan.missingSince ? 'system_inferred' : 'user_explicit'}">${plan.missingSince ? '已消失' : kind}</i>${progress} · ${escapeHtml(dir.split('/').slice(-2).join('/'))} · ${fmtAgo(plan.lastSeenAt, Date.now())}</span>
     </button>
   `;
+}
+
+function fillPlanFilters(plans, repo, kind) {
+  const repoSel = document.getElementById('planRepo');
+  const kindSel = document.getElementById('planKind');
+  if (!repoSel || !kindSel) return;
+  // facet 口径(c8ed083):各维度计数互不吃对方的选择
+  const repoFacets = new Map();
+  const kindFacets = new Map();
+  for (const plan of plans) {
+    const repoName = planRepoName(plan);
+    if (!kind || plan.kind === kind) repoFacets.set(repoName, (repoFacets.get(repoName) ?? 0) + 1);
+    if (!repo || repoName === repo) kindFacets.set(plan.kind, (kindFacets.get(plan.kind) ?? 0) + 1);
+  }
+  const sortDesc = (a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0]));
+  const fill = (sel, entries, allLabel, labelOf) => {
+    const current = sel.value;
+    sel.innerHTML = `<option value="">${allLabel}</option>` + [...entries.entries()].sort(sortDesc)
+      .map(([value, count]) => `<option value="${escapeHtml(value)}">${escapeHtml(labelOf(value))} (${count})</option>`)
+      .join('');
+    sel.value = [...sel.options].some((option) => option.value === current) ? current : '';
+  };
+  fill(repoSel, repoFacets, '全部项目', (name) => name);
+  fill(kindSel, kindFacets, '全部类型', (value) => PLAN_KIND_LABELS[value] || value);
 }
 
 function renderPlans() {
@@ -1372,18 +1428,41 @@ function renderPlans() {
     listEl.innerHTML = '<div class="usage-empty"><strong>计划数据不可用</strong><span>daemon 连接失败。</span></div>';
     return;
   }
-  const plans = latestPlans.plans || [];
-  if (plans.length === 0) {
+  const all = latestPlans.plans || [];
+  const repo = document.getElementById('planRepo')?.value || '';
+  const kind = document.getElementById('planKind')?.value || '';
+  fillPlanFilters(all, repo, kind);
+  const visible = all.filter((plan) => (
+    (!repo || planRepoName(plan) === repo) && (!kind || plan.kind === kind)
+  )).sort((a, b) => b.lastSeenAt - a.lastSeenAt);
+  if (visible.length === 0) {
     listEl.innerHTML = '<div class="usage-empty"><strong>窗口内没有计划文件</strong><span>agent 用 planning-with-files 写计划后会出现在这里。</span></div>';
+  } else if (repo) {
+    // 已选项目:平铺,最近活跃在前
+    listEl.innerHTML = visible.slice(0, 300).map(planItemHtml).join('');
   } else {
-    listEl.innerHTML = plans.slice(0, 200).map(planItemHtml).join('');
-    listEl.querySelectorAll('[data-plan-open]').forEach((row) => {
-      row.addEventListener('click', () => {
-        openPlanId = row.getAttribute('data-plan-open');
-        renderPlans();
-      });
-    });
+    // 默认按项目分组;大组截断,用类型/项目过滤收窄
+    const byRepo = new Map();
+    for (const plan of visible) {
+      const name = planRepoName(plan);
+      const list = byRepo.get(name) ?? [];
+      list.push(plan);
+      byRepo.set(name, list);
+    }
+    const groups = [...byRepo.entries()].sort((a, b) => Math.max(...b[1].map((p) => p.lastSeenAt)) - Math.max(...a[1].map((p) => p.lastSeenAt)));
+    const GROUP_CAP = 50;
+    listEl.innerHTML = groups.map(([name, items]) => `
+      <div class="plan-group-head" title="${items[0]?.repo || ''}">${escapeHtml(name)}<span>${items.length} 个文件</span></div>
+      ${items.slice(0, GROUP_CAP).map(planItemHtml).join('')}
+      ${items.length > GROUP_CAP ? `<div class="session-more" disabled>… 该项目还有 ${items.length - GROUP_CAP} 个,选项目或类型收窄</div>` : ''}
+    `).join('');
   }
+  listEl.querySelectorAll('[data-plan-open]').forEach((row) => {
+    row.addEventListener('click', () => {
+      openPlanId = row.getAttribute('data-plan-open');
+      renderPlans();
+    });
+  });
   const open = (latestPlans.plans || []).find((plan) => plan.id === openPlanId);
   if (open) {
     readerEl.innerHTML = '<div class="muted">读取计划详情…</div>';
@@ -1397,6 +1476,10 @@ function renderPlans() {
     `;
   }
 }
+
+['planRepo', 'planKind'].forEach((id) => {
+  document.getElementById(id)?.addEventListener('change', renderPlans);
+});
 
 async function loadPlanDetail(id) {
   const readerEl = document.getElementById('planReader');
@@ -2177,11 +2260,11 @@ document.querySelectorAll('[data-session-view]').forEach((btn) => {
 
 function currentTab() {
   const hash = (location.hash || '#plans').replace('#', '');
-  return ['plans', 'sessions', 'projects', 'requirements', 'graph', 'usage'].includes(hash) ? hash : 'plans';
+  return ['plans', 'sessions', 'projects', 'requirements', 'planfiles', 'graph', 'usage'].includes(hash) ? hash : 'plans';
 }
 
 function showTab(name) {
-  if (!['plans', 'sessions', 'projects', 'requirements', 'graph', 'usage'].includes(name)) name = 'plans';
+  if (!['plans', 'sessions', 'projects', 'requirements', 'planfiles', 'graph', 'usage'].includes(name)) name = 'plans';
   const hash = `#${name}`;
   if (location.hash !== hash) location.hash = hash;
   document.querySelectorAll('[data-tab]').forEach((btn) => {
@@ -2193,7 +2276,7 @@ function showTab(name) {
   if (name === 'graph') void refreshGraph();
   if (name === 'projects') void refreshProjects();
   if (name === 'requirements') void refreshRequirements();
-  if (name === 'plans') void refreshPlans();
+  if (name === 'planfiles') void refreshPlans();
 }
 
 document.getElementById('graphCandidates')?.addEventListener('change', (event) => {

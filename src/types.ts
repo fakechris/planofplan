@@ -261,6 +261,16 @@ export interface TodoSnapshotRecord {
   items: Array<{ title: string; status: string }>;
 }
 
+/** progress_notes 表行(§5.3 ④:assistant 尾总结,message_inferred 档)。 */
+export interface ProgressNoteRecord {
+  /** 确定性 id:<session_id>:<seq>。 */
+  id: string;
+  sessionId: string;
+  seq: number;
+  ts: number | null;
+  text: string;
+}
+
 /** requirements 表行(Requirement 实体,§1.5)。 */
 export interface RequirementRecord {
   /** 确定性 id:req:<session_id>:<seq>(推断退化实体 seq = -1)。 */

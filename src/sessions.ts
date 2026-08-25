@@ -36,7 +36,7 @@ import {
 } from './session-origin.ts';
 import { claudeParentOfPath, materializeSessionLinks } from './session-links.ts';
 import { materializeRequirements } from './requirements.ts';
-import { materializePlanFiles, materializeTodoSnapshots } from './plans.ts';
+import { materializePlanFiles, materializeProgressNotes, materializeTodoSnapshots } from './plans.ts';
 import type { SessionCommit, SessionIndexState, SessionList, SessionRecord, SessionRepo } from './types.ts';
 
 /** Subset of usage collect options — kept here to avoid a usage.ts cycle. */
@@ -956,6 +956,7 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
   // 扫盘(mtime 门控,增量快照)
   try {
     materializeTodoSnapshots(store);
+    materializeProgressNotes(store);
   } catch {
     /* todo snapshot materialization is best-effort */
   }

@@ -450,6 +450,21 @@ td { font-variant-numeric: tabular-nums; }
   color: var(--accent-2); background: var(--accent-soft);
 }
 .req-origin-system_inferred { color: var(--muted); background: var(--surface-2); }
+/* 计划页:项目分组头 */
+.plan-group-head {
+  display: flex; justify-content: space-between; align-items: baseline;
+  padding: var(--space-3) var(--space-4) var(--space-1);
+  border-bottom: var(--border-width) solid var(--border);
+  color: var(--text); font-size: var(--text-sm); font-weight: var(--weight-semibold);
+  position: sticky; top: 0; background: var(--surface); z-index: 1;
+}
+.plan-group-head span { color: var(--muted); font-size: var(--text-xs); font-weight: normal; }
+/* 对账黄标 + 尾总结正文 */
+.plan-audit-warn .attr-meta { color: var(--accent-2); font-weight: var(--weight-semibold); }
+.plan-note-text {
+  color: var(--text-soft); font-size: var(--text-sm); line-height: 1.55;
+  white-space: pre-wrap; word-break: break-word; max-height: 160px; overflow: hidden;
+}
 .session-more {
   width: 100%; border: 0; border-radius: 0; padding: var(--space-3); color: var(--accent-2);
   background: transparent; font-size: var(--text-sm);
