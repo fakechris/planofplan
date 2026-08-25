@@ -16,7 +16,7 @@
  */
 import type { AdapterContext, Credential, PlanAdapter, QuotaWindow } from '../types.ts';
 import { AdapterError } from '../types.ts';
-import { clampPct } from './util.ts';
+import { formatMoney, round2 } from './util.ts';
 
 const BALANCE_URL = 'https://api.deepseek.com/user/balance';
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -44,14 +44,16 @@ function num(v: unknown): number | null {
   return null;
 }
 
-function round(n: number, digits = 4): number {
-  const f = 10 ** digits;
-  return Math.round(n * f) / f;
-}
-
 /**
  * 把 DeepSeek 余额响应归一为单个 credits_period 窗口。
- * DeepSeek 没有 5h/周/月多窗口，余额是单一额度；used = total - available。
+ *
+ * /user/balance 只返回 5 个字段：is_available / currency / total_balance /
+ * granted_balance / topped_up_balance（api-docs.deepseek.com/api/get-user-balance）；
+ * 历史 cost/API requests/tokens 只在 web 仪表盘展示，公开 API 不暴露。
+ * DeepSeek 是预付费余额账户，没有 used/total 比例概念，故不计算 percentage。
+ *
+ * available = available_balance（部分账号类型返回）→ 兜底 granted + topped_up
+ *             → 兜底 total_balance。多个币种账户时只展示第一个，其余附在 note。
  */
 export function normalizeDeepseekBalance(
   raw: unknown,
@@ -64,13 +66,12 @@ export function normalizeDeepseekBalance(
   if (infos.length === 0) {
     throw new AdapterError('parse', 'DeepSeek 余额响应 balance_infos 为空');
   }
-  // 多币种账户：选第一笔；其余附在 note 字段，便于调试。
   const first = infos[0]!;
   const total = num(first.total_balance);
   const granted = num(first.granted_balance);
   const toppedUp = num(first.topped_up_balance);
-  // available_balance 在部分账号类型下不返回；fallback 到 granted + topped_up，
-  // 再不行就用 total（账户里全是可用余额，没有"已用"概念）。
+  // available_balance 部分账号类型不返回；fallback 到 granted + topped_up，
+  // 再不行就用 total（账户里全是可用余额）。
   const available =
     num(first.available_balance) ??
     (granted != null && toppedUp != null ? granted + toppedUp : null) ??
@@ -78,23 +79,26 @@ export function normalizeDeepseekBalance(
   if (total == null || available == null) {
     throw new AdapterError('parse', 'DeepSeek 余额字段缺失（total_balance）');
   }
-  const usedRaw = total - available;
-  const used = Math.max(0, usedRaw);
-  const percentage = total > 0
-    ? clampPct((used / total) * 100)
-    : 0;
-  const currency = first.currency ?? 'CNY';
-  const extra = infos.length > 1 ? `（共 ${infos.length} 个币种账户）` : '';
+  const currency = (first.currency ?? 'CNY').toUpperCase();
+  // note 把 granted / topped_up 拆开，UI 直接念出账户余额结构。
+  // 多币种账户时其余的也列在末尾，便于排查。
+  const parts: string[] = [];
+  if (granted != null) parts.push(`赠额 ${formatMoney(granted, currency)}`);
+  if (toppedUp != null) parts.push(`充值 ${formatMoney(toppedUp, currency)}`);
+  if (infos.length > 1) parts.push(`共 ${infos.length} 个币种账户`);
+  const note = parts.length > 0 ? parts.join(' · ') : null;
   return {
     window: {
       window: 'credits_period',
       label: 'Balance',
-      used: round(used),
-      total: round(total),
-      unit: 'usd',
-      percentage: clampPct(percentage),
+      // 余额型 provider：used/total 设成同一个数值，UI 在 percentage=null
+      // 时只显示一个金额；percentage 显式 null，不当配额百分比算。
+      used: round2(available),
+      total: round2(available),
+      unit: currency,
+      percentage: null,
       resetAt: null,
-      note: `${currency}  可用 ${available}${extra}`,
+      note,
     },
     planName: currency,
   };
