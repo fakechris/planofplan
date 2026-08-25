@@ -116,14 +116,53 @@ export function normalizeCodex(raw: unknown): QuotaWindow[] {
   pushWindow('rolling_5h', '5小时限额', root.rate_limit?.primary_window);
   pushWindow('weekly', '周限额', root.rate_limit?.secondary_window);
 
-  // 模型级附加窗口（如 Codex Spark 5h/weekly）尽力解析；多条用序号区分避免同 key 覆盖
+  // 附加窗口两种形态:
+  // 1) 旧扁平 {used_percent, reset_at}
+  // 2) 2026-08 新嵌套 {limit_name: "GPT-5.3-Codex-Spark", rate_limit:
+  //    {primary_window(5h), secondary_window(周)}}——prolite 套餐的 5h
+  //    限额搬到了这里(顶层 primary 变成周限额),不解析它 5h 窗口就丢了
   let extraIdx = 0;
   for (const extra of root.rate_limit?.additional_rate_limits ?? []) {
     if (!extra || typeof extra !== 'object') continue;
-    const usedPercent = num(extra.used_percent);
+    const entry = extra as {
+      used_percent?: number; reset_at?: number; limit_window_seconds?: number;
+      limit_name?: string;
+      rate_limit?: { primary_window?: WindowPayload; secondary_window?: WindowPayload };
+    };
+    const shortName = typeof entry.limit_name === 'string' && entry.limit_name
+      ? entry.limit_name.split('-').filter(Boolean).pop() ?? entry.limit_name
+      : null;
+    if (entry.rate_limit && typeof entry.rate_limit === 'object') {
+      const nested: Array<[string, WindowPayload | undefined]> = [
+        ['rolling_5h', entry.rate_limit.primary_window],
+        ['weekly', entry.rate_limit.secondary_window],
+      ];
+      for (const [fallbackId, payload] of nested) {
+        if (!payload || typeof payload !== 'object') continue;
+        const usedPercent = num(payload.used_percent);
+        if (usedPercent == null) continue;
+        const duration = num(payload.limit_window_seconds);
+        const isFiveHour = duration != null
+          ? duration <= 6 * 60 * 60
+          : fallbackId === 'rolling_5h';
+        extraIdx += 1;
+        windows.push({
+          window: `extra_${isFiveHour ? '5h' : 'weekly'}`,
+          label: shortName ? `${shortName}·${isFiveHour ? '5h' : '周'}限额` : `Extra${extraIdx}`,
+          used: null,
+          total: null,
+          unit: 'percent',
+          percentage: clampPct(usedPercent),
+          resetAt: num(payload.reset_at) != null ? num(payload.reset_at)! * 1000 : null,
+          note: null,
+        });
+      }
+      continue;
+    }
+    const usedPercent = num(entry.used_percent);
     if (usedPercent == null) continue;
     extraIdx += 1;
-    pushWindow('extra', `Extra${extraIdx}`, extra, false);
+    pushWindow('extra', `Extra${extraIdx}`, entry, false);
   }
 
   // credits：余额信息（无窗口百分比）
