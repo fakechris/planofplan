@@ -544,20 +544,24 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     const days = Math.min(365, Math.max(1, Number(c.req.query('days') ?? 30) || 30));
     const now = Date.now();
     const since = now - days * 86_400_000;
+    // 活跃口径 = 文件 mtime(最新快照),不是扫描时间——扫描器每轮会给
+    // 所有发现的文件续命 lastSeenAt,按它过滤会让一年没动的死计划挤满
+    // 窗口(线上实测踩过)
     const plans = store.listPlanFiles()
-      .filter((plan) => plan.lastSeenAt >= since)
       .map((plan) => {
-        const snapshots = store.planSnapshots(plan.id, 1);
-        const latest = snapshots[0] ?? null;
+        const latest = store.planSnapshots(plan.id, 1)[0] ?? null;
+        const activeAt = plan.lastSnapshotMtimeMs ?? latest?.mtimeMs ?? plan.lastSeenAt;
         return {
           ...plan,
+          activeAt,
           goal: plan.goal ? plan.goal.slice(0, 400) : null,
           checkboxChecked: latest?.checkboxChecked ?? 0,
           checkboxTotal: latest?.checkboxTotal ?? 0,
           snapshotCount: store.planSnapshotCount(plan.id),
         };
       })
-      .sort((a, b) => b.lastSeenAt - a.lastSeenAt);
+      .filter((plan) => plan.activeAt >= since)
+      .sort((a, b) => b.activeAt - a.activeAt);
     return c.json({ days, since, until: now, plans });
   });
 

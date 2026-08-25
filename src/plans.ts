@@ -20,7 +20,7 @@ const DIRECT_NAMES = new Set([
   'todo.md', 'TODO.md', 'backlog.md', 'BACKLOG.md',
 ]);
 const PLAN_DIR = 'docs/plans';
-const HANDOFF_RE = /^HANDOFF[-_].*\.md$/i;
+const HANDOFF_RE = /^HANDOFF(?:[-_].*)?\.md$/i; // HANDOFF.md(无分隔符)也要认
 const TEXT_CAP = 2000;
 
 /** 发现根:session cwd ∪ project root(有界:百级)。 */

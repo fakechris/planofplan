@@ -186,11 +186,12 @@ describe('materializePlanFiles', () => {
       mkdirSync(join(root, 'docs', 'plans'), { recursive: true });
       writeFileSync(join(root, 'docs', 'plans', 'entry-refactor.plan.md'), '# Plan: 入口改造\n\n- [ ] 步骤一\n');
       writeFileSync(join(root, 'HANDOFF-rc9.md'), '# HANDOFF rc9\n\nnext: 收尾\n');
+      writeFileSync(join(root, 'HANDOFF.md'), '# HANDOFF\n\n当前状态\n'); // 无分隔符的标准名
       const store = seededStore(root);
 
-      expect(materializePlanFiles(store)).toBe(3);
+      expect(materializePlanFiles(store)).toBe(4);
       const files = store.listPlanFiles();
-      expect(files).toHaveLength(3);
+      expect(files).toHaveLength(4);
       const taskPlan = files.find((file) => file.path.endsWith('task_plan.md'));
       expect(taskPlan).toMatchObject({
         id: planFileId(join(root, 'task_plan.md')),
@@ -200,7 +201,7 @@ describe('materializePlanFiles', () => {
         repo: null, // 非 git 目录
       });
       expect(files.find((file) => file.path.includes('docs/plans'))?.kind).toBe('detailed_plan');
-      expect(files.find((file) => file.path.includes('HANDOFF'))?.kind).toBe('handoff');
+      expect(files.filter((file) => file.path.includes('HANDOFF')).every((file) => file.kind === 'handoff')).toBe(true);
       expect(store.planSnapshots(taskPlan!.id)[0]).toMatchObject({ checkboxChecked: 3, checkboxTotal: 6 });
       expect(store.planSnapshotCount(taskPlan!.id)).toBe(1);
 
@@ -257,8 +258,9 @@ describe('materializePlanFiles', () => {
 
       const server = createServer(store, scheduler as never, { port: 9291, plans: DEFAULT_PLANS });
       const list = await server.request('http://localhost/api/planfiles?days=30');
-      const listBody = await list.json() as { plans: Array<{ id: string; checkboxTotal: number }> };
+      const listBody = await list.json() as { plans: Array<{ id: string; checkboxTotal: number; activeAt: number }> };
       expect(listBody.plans[0]).toMatchObject({ id: plan.id, checkboxTotal: 6 });
+      expect(listBody.plans[0]!.activeAt).toBeGreaterThan(Date.now() - 86_400_000);
 
       const detail = await server.request(`http://localhost/api/planfiles/${plan.id}`);
       const detailBody = await detail.json() as {

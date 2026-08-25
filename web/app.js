@@ -1216,7 +1216,7 @@ function projectDetailHtml(detail) {
   const plansHtml = (detail.plans || []).slice(0, 12).map((plan) => `
     <button type="button" class="session-related-req" data-nav="planfiles" data-nav-id="${escapeHtml(plan.id)}" title="${escapeHtml(plan.path)}">
       ${escapeHtml(plan.title || plan.path.split('/').pop())}
-      <span>${escapeHtml(PLAN_KIND_LABELS[plan.kind] || plan.kind)} · ${fmtAgo(plan.lastSeenAt, Date.now())}</span>
+      <span>${escapeHtml(PLAN_KIND_LABELS[plan.kind] || plan.kind)} · ${fmtAgo(plan.activeAt ?? plan.lastSeenAt, Date.now())}</span>
     </button>
   `).join('');
   return `
@@ -1567,7 +1567,7 @@ function planItemHtml(plan) {
   return `
     <button type="button" class="session-item${plan.id === openPlanId ? ' active' : ''}" data-plan-open="${escapeHtml(plan.id)}" title="${escapeHtml(plan.path)}">
       <strong>${escapeHtml(plan.title || plan.path.split('/').pop() || plan.path)}</strong>
-      <span><i class="req-origin req-origin-${plan.missingSince ? 'system_inferred' : 'user_explicit'}">${plan.missingSince ? '已消失' : kind}</i>${progress} · ${escapeHtml(dir.split('/').slice(-2).join('/'))} · ${fmtAgo(plan.lastSeenAt, Date.now())}</span>
+      <span><i class="req-origin req-origin-${plan.missingSince ? 'system_inferred' : 'user_explicit'}">${plan.missingSince ? '已消失' : kind}</i>${progress} · ${escapeHtml(dir.split('/').slice(-2).join('/'))} · ${fmtAgo(plan.activeAt ?? plan.lastSeenAt, Date.now())}</span>
     </button>
   `;
 }
@@ -1610,7 +1610,7 @@ function renderPlans() {
   fillPlanFilters(all, repo, kind);
   const visible = all.filter((plan) => (
     (!repo || planRepoName(plan) === repo) && (!kind || plan.kind === kind)
-  )).sort((a, b) => b.lastSeenAt - a.lastSeenAt);
+  )).sort((a, b) => (b.activeAt ?? b.lastSeenAt) - (a.activeAt ?? a.lastSeenAt));
   if (visible.length === 0) {
     listEl.innerHTML = '<div class="usage-empty"><strong>窗口内没有计划文件</strong><span>agent 用 planning-with-files 写计划后会出现在这里。</span></div>';
   } else if (repo) {
@@ -1625,7 +1625,7 @@ function renderPlans() {
       list.push(plan);
       byRepo.set(name, list);
     }
-    const groups = [...byRepo.entries()].sort((a, b) => Math.max(...b[1].map((p) => p.lastSeenAt)) - Math.max(...a[1].map((p) => p.lastSeenAt)));
+    const groups = [...byRepo.entries()].sort((a, b) => Math.max(...b[1].map((p) => p.activeAt ?? p.lastSeenAt)) - Math.max(...a[1].map((p) => p.activeAt ?? p.lastSeenAt)));
     const GROUP_CAP = 50;
     listEl.innerHTML = groups.map(([name, items]) => `
       <div class="plan-group-head" title="${items[0]?.repo || ''}">${escapeHtml(name)}<span>${items.length} 个文件</span></div>
