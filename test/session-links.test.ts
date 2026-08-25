@@ -214,10 +214,10 @@ describe('v6 迁移幂等', () => {
       // ALTER 抛错被吞)+ backfillLaunchLinks 重跑,v7 需求物化空库幂等
       s1.setUserVersion(5);
       const s2 = openDb(dbPath);
-      expect(s2.getUserVersion()).toBe(8);
+      expect(s2.getUserVersion()).toBe(9);
       expect(s2.listSessionLinks()).toHaveLength(1);
       const s3 = openDb(dbPath);
-      expect(s3.getUserVersion()).toBe(8);
+      expect(s3.getUserVersion()).toBe(9);
       expect(s3.listSessionLinks()).toHaveLength(1);
       rmSync(dir, { recursive: true, force: true });
     } catch (error) {

@@ -560,6 +560,19 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     return c.json({ sessionId: id, todos: store.todoSnapshotsForSession(id) });
   });
 
+  // ④ 尾总结(assistant 自报,message_inferred)+ ⑤ 对账素材(该 session
+  // 的归因 commit 数):自报完成与外部证据的并排入口
+  app.get('/api/sessions/:id/notes', (c) => {
+    const id = decodeURIComponent(c.req.param('id'));
+    const session = store.getSession(id);
+    if (!session) return c.json({ ok: false, error: 'unknown session' }, 404);
+    return c.json({
+      sessionId: id,
+      notes: store.progressNotesForSession(id),
+      commitCount: store.listSessionCommits(id).length,
+    });
+  });
+
   app.post('/api/sessions/:id/resume', (c) => {
     const id = decodeURIComponent(c.req.param('id'));
     const session = store.getSession(id);

@@ -190,6 +190,37 @@ export function materializeTodoSnapshots(store: Store): number {
   return rows.length;
 }
 
+/**
+ * ④ 尾总结抽取(§5.3):assistant 干完活的自报(「已完成 X;当前 Y」/
+ * 「本轮 …」句式),message_inferred 档。规则保守起步——前缀强信号 +
+ * ≥40 字,先喂 session 详情,噪声多了再迭代(需求分类同款路径)。
+ * 真实库量级:已完成 144 / 本轮 70 / 下一步 35 / 这一步 20,样本抽查
+ * 基本都是真总结,且常带 commit sha(后续对账素材)。
+ */
+const SUMMARY_PREFIX_RE = /^(?:已完成|这一步|这一轮|本轮|下一步|总结[:：]|Summary:)/;
+const SUMMARY_TEXT_MAX = 2000;
+
+export function isSummaryMessage(text: string): boolean {
+  const trimmed = text.trim();
+  return trimmed.length >= 40 && SUMMARY_PREFIX_RE.test(trimmed);
+}
+
+export function materializeProgressNotes(store: Store): number {
+  const rows = [];
+  for (const row of store.assistantSummaryRows()) {
+    if (!isSummaryMessage(row.text)) continue;
+    rows.push({
+      id: `${row.sessionId}:${row.seq}`,
+      sessionId: row.sessionId,
+      seq: row.seq,
+      ts: row.ts,
+      text: row.text.trim().slice(0, SUMMARY_TEXT_MAX),
+    });
+  }
+  store.replaceAllProgressNotes(rows);
+  return rows.length;
+}
+
 /** repo 归属(remote url,无 remote 退 root,非 git null)。同 root 同轮共享缓存。 */
 function repoOfFactory(): (dir: string) => string | null {
   const cache = new Map<string, string | null>();

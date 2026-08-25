@@ -9,6 +9,7 @@ import type {
   PlanFileRecord,
   PlanSection,
   PlanSnapshotRecord,
+  ProgressNoteRecord,
   RequirementRecord,
   SessionCommit,
   SessionFileTouch,
@@ -29,7 +30,7 @@ import { nameOfUrl } from './repos.ts';
 import { isKnownEnvelope } from './motivation.ts';
 import { backfillLaunchLinks } from './session-links.ts';
 import { materializeRequirements } from './requirements.ts';
-import { materializePlanFiles, materializeTodoSnapshots } from './plans.ts';
+import { materializePlanFiles, materializeProgressNotes, materializeTodoSnapshots } from './plans.ts';
 
 /** projects.id:url 的确定性短 hash(sha1 前 12 位)。无 remote 的 repo 用
  *  root path 做输入(dsh-track 同款退化),同输入必得同 id,物化幂等。 */
@@ -291,6 +292,16 @@ CREATE TABLE IF NOT EXISTS todo_snapshots (
   UNIQUE (session_id, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_todo_snapshots_session ON todo_snapshots(session_id, seq);
+-- ④ 尾总结:assistant 干完活的自报(已完成/本轮/下一步…),message_inferred 档。
+CREATE TABLE IF NOT EXISTS progress_notes (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  ts INTEGER,
+  text TEXT NOT NULL,
+  UNIQUE (session_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_progress_notes_session ON progress_notes(session_id, seq);
 `;
 
 interface SnapshotRow {
@@ -459,6 +470,15 @@ export class Store {
         /* backfill is best-effort;collect 轮会补 */
       }
       db.exec('PRAGMA user_version = 8');
+    }
+    // v9:④ 尾总结(assistant 自报)。纯库内重导,幂等。
+    if (version < 9) {
+      try {
+        materializeProgressNotes(this);
+      } catch {
+        /* backfill is best-effort;collect 轮会补 */
+      }
+      db.exec('PRAGMA user_version = 9');
     }
   }
 
@@ -1673,6 +1693,7 @@ export class Store {
       this.db.query('DELETE FROM requirement_repos WHERE requirement_id IN (SELECT id FROM requirements WHERE session_id = ?)').run(id);
       this.db.query('DELETE FROM requirements WHERE session_id = ?').run(id);
       this.db.query('DELETE FROM todo_snapshots WHERE session_id = ?').run(id);
+      this.db.query('DELETE FROM progress_notes WHERE session_id = ?').run(id);
       this.db.query('DELETE FROM session_repos WHERE session_id = ?').run(id);
       this.db.query('DELETE FROM sessions WHERE id = ?').run(id);
     });
@@ -1841,6 +1862,35 @@ export class Store {
       );
       for (const row of rows) stmt.run(row.id, row.sessionId, row.seq, row.ts, JSON.stringify(row.items));
     });
+  }
+
+  /** ④ 尾总结候选行(SQL 预筛强前缀,JS 再精判,别全量拉 assistant)。 */
+  assistantSummaryRows(): Array<{ sessionId: string; seq: number; ts: number | null; text: string }> {
+    const prefixes = ['已完成%', '这一步%', '本轮%', '这一轮%', '下一步%', '总结:%', '总结：%', 'Summary:%'];
+    const where = prefixes.map(() => "text LIKE ?").join(' OR ');
+    return this.db.query(
+      `SELECT session_id AS sessionId, seq, timestamp AS ts, text
+       FROM session_messages
+       WHERE role = 'assistant' AND length(text) >= 40 AND (${where})
+       ORDER BY session_id, seq`,
+    ).all(...prefixes) as Array<{ sessionId: string; seq: number; ts: number | null; text: string }>;
+  }
+
+  replaceAllProgressNotes(rows: ProgressNoteRecord[]): void {
+    this.withTransaction(() => {
+      this.db.query('DELETE FROM progress_notes').run();
+      const stmt = this.db.query(
+        `INSERT INTO progress_notes (id, session_id, seq, ts, text) VALUES (?, ?, ?, ?, ?)`,
+      );
+      for (const row of rows) stmt.run(row.id, row.sessionId, row.seq, row.ts, row.text);
+    });
+  }
+
+  progressNotesForSession(sessionId: string): ProgressNoteRecord[] {
+    const rows = this.db.query(
+      `SELECT id, session_id, seq, ts, text FROM progress_notes WHERE session_id = ? ORDER BY seq`,
+    ).all(sessionId) as Array<{ id: string; session_id: string; seq: number; ts: number | null; text: string }>;
+    return rows.map((row) => ({ id: row.id, sessionId: row.session_id, seq: row.seq, ts: row.ts, text: row.text }));
   }
 
   todoSnapshotsForSession(sessionId: string): TodoSnapshotRecord[] {
