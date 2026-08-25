@@ -1,12 +1,21 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { existsSync, mkdirSync, readFileSync, chmodSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import type { PlanConfig, ResumeConfig } from './types.ts';
 
 export interface AppConfig {
   port: number;
   plans: PlanConfig[];
   resume?: ResumeConfig;
+  /** planofplan 自用的 LLM(handoff 摘要等);provider 必须是已配置 key 的。 */
+  llm?: LlmConfig;
+}
+
+/** LLM 选择:provider = 已配置凭据的 provider;model 自由填;baseUrl 可覆写端点。 */
+export interface LlmConfig {
+  provider?: string;
+  model?: string;
+  baseUrl?: string;
 }
 
 const DEFAULT_PLANS: PlanConfig[] = [
@@ -134,7 +143,32 @@ export function loadConfig(): AppConfig {
     port: envPort() ?? user.port ?? 9288,
     plans,
     resume: { ...DEFAULT_RESUME, ...(user.resume ?? {}) },
+    llm: user.llm && typeof user.llm === 'object' ? user.llm : undefined,
   };
+}
+
+/** 持久化 llm 配置段(与 config.json 现有内容合并,不动其它键)。 */
+export function saveLlmConfig(partial: LlmConfig): void {
+  const file = configPath();
+  let doc: Record<string, unknown> = {};
+  if (existsSync(file)) {
+    try {
+      doc = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
+    } catch {
+      doc = {};
+    }
+  }
+  const prev = doc.llm && typeof doc.llm === 'object' ? doc.llm as Record<string, unknown> : {};
+  const next: Record<string, unknown> = { ...prev };
+  for (const [key, value] of Object.entries(partial)) {
+    if (value === undefined || value === '') delete next[key];
+    else next[key] = value;
+  }
+  if (Object.keys(next).length === 0) delete doc.llm;
+  else doc.llm = next;
+  mkdirSync(ensureHome(), { recursive: true });
+  writeFileSync(file, JSON.stringify(doc, null, 2) + '\n', { mode: 0o600 });
+  chmodSync(file, 0o600);
 }
 
 /** 将历史上的 GLM legacy/current 双 plan 收敛为一个 provider。 */

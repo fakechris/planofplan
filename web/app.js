@@ -1412,10 +1412,25 @@ async function loadHandoffPanel(type, sourceId) {
   const wrap = document.getElementById('handoffPanel');
   if (!wrap) return;
   try {
-    const data = await request(`/api/handoff/${encodeURIComponent(type)}/${encodeURIComponent(sourceId)}`);
+    const [data, llm] = await Promise.all([
+      request(`/api/handoff/${encodeURIComponent(type)}/${encodeURIComponent(sourceId)}`),
+      request('/api/llm/config').catch(() => null),
+    ]);
+    const providerOptions = ['<option value="">关闭</option>']
+      .concat((llm?.providers || []).map((p) => (
+        `<option value="${escapeHtml(p.id)}"${llm?.llm?.provider === p.id ? ' selected' : ''}>${escapeHtml(p.label)}${p.hasKey ? '' : '(无 key)'}</option>`
+      )))
+      .join('');
     wrap.innerHTML = `
       <div class="session-attrs">
         <h3>交接 <span class="muted">指针 + 摘要,不搬运 transcript</span></h3>
+        <div class="handoff-llm">
+          <span class="muted">AI 摘要:</span>
+          <select id="llmProvider" aria-label="LLM provider">${providerOptions}</select>
+          <input id="llmModel" type="text" placeholder="模型 id" value="${escapeHtml(llm?.llm?.model || '')}" size="14" />
+          <button type="button" class="secondary-btn" data-llm-save>保存并重生成</button>
+          ${data.summaryError ? `<span class="plan-audit-warn">${escapeHtml(data.summaryError)}</span>` : (data.llmUsed ? '<span class="muted">已启用</span>' : '')}
+        </div>
         <div class="handoff-actions">
           <button type="button" class="secondary-btn" data-handoff-copy>复制包</button>
           <button type="button" class="secondary-btn" data-handoff-file>导出 .md</button>
@@ -1433,6 +1448,24 @@ async function loadHandoffPanel(type, sourceId) {
         ${data.history?.length ? `<div class="muted">交接记录 ${data.history.length} 次(最近 ${fmtAgo(data.history[0].createdAt, Date.now())} · ${escapeHtml(data.history[0].mode)})</div>` : ''}
       </div>
     `;
+    wrap.querySelector('[data-llm-save]')?.addEventListener('click', async () => {
+      const result = () => document.getElementById('handoffResult');
+      try {
+        await request('/api/llm/config', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            provider: document.getElementById('llmProvider')?.value || '',
+            model: document.getElementById('llmModel')?.value || '',
+          }),
+        });
+        result().textContent = '已保存,重新生成交接包…';
+        wrap.dataset.open = '1';
+        void loadHandoffPanel(type, sourceId);
+      } catch (error) {
+        result().textContent = `保存失败:${error.message}`;
+      }
+    });
     const result = () => document.getElementById('handoffResult');
     wrap.querySelector('[data-handoff-copy]')?.addEventListener('click', async () => {
       try {
