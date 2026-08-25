@@ -2616,30 +2616,35 @@ function renderSettings() {
   }
   const { config, llm } = latestSettings;
   const rows = (config.plans || []).map((plan) => `
-    <div class="attr-row" data-plan-slug="${escapeHtml(plan.slug)}">
-      <span class="attr-path">${escapeHtml(plan.name)}<span class="muted"> · ${escapeHtml(plan.slug)}</span></span>
-      <span class="attr-meta">${escapeHtml(plan.adapter)}${plan.credRef ? ' · 专属凭据' : ' · 自动检测'}${plan.enabled ? '' : ' · 已停用'}</span>
-      <span class="attr-meta">
-        <button type="button" class="secondary-btn" data-auth-plan="${escapeHtml(plan.slug)}" data-auth-set="${plan.credRef ? '0' : '1'}">${plan.credRef ? '换 key' : '配 key'}</button>
+    <div class="attr-row settings-plan-row" data-plan-slug="${escapeHtml(plan.slug)}">
+      <span class="attr-path">${escapeHtml(plan.name)} <span class="muted">${escapeHtml(plan.slug)}</span></span>
+      <span class="settings-plan-badges">
+        <i class="settings-adapter">${escapeHtml(plan.adapter)}</i>
+        ${plan.credRef
+          ? '<i class="settings-cred settings-cred-set">✓ 专属凭据</i>'
+          : '<i class="settings-cred">自动检测</i>'}
+        ${plan.enabled ? '' : '<i class="settings-cred settings-cred-off">已停用</i>'}
+      </span>
+      <span class="settings-plan-actions">
+        <button type="button" class="secondary-btn" data-auth-plan="${escapeHtml(plan.slug)}">${plan.credRef ? '换 key' : '配 key'}</button>
         <button type="button" class="secondary-btn" data-toggle-plan="${escapeHtml(plan.slug)}" data-enabled="${plan.enabled ? '1' : '0'}">${plan.enabled ? '停用' : '启用'}</button>
         <button type="button" class="secondary-btn" data-del-plan="${escapeHtml(plan.slug)}">删除</button>
       </span>
     </div>
   `).join('');
   listEl.innerHTML = rows || '<div class="muted">还没有 plan</div>';
+  // 凭据配置:额度页同款 dialog(password 输入 + 保存 / 回自动),不再用 prompt
   listEl.querySelectorAll('[data-auth-plan]').forEach((btn) => {
-    btn.addEventListener('click', async () => {
+    btn.addEventListener('click', () => {
       const slug = btn.getAttribute('data-auth-plan');
-      const key = prompt(`为 ${slug} 输入 API key(留空=清除专属凭据)`);
-      if (key === null) return;
-      try {
-        await request(`/api/config/plans/${encodeURIComponent(slug)}/auth`, {
-          method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ key }),
-        });
-        result().textContent = key.trim() ? `${slug} 凭据已保存` : `${slug} 已回退自动检测`;
-        void refreshSettings();
-      } catch (error) { result().textContent = `失败:${error.message}`; }
+      const plan = (config.plans || []).find((row) => row.slug === slug);
+      const dialog = document.getElementById('planKeyDialog');
+      if (!dialog || !plan) return;
+      document.getElementById('planKeyTitle').textContent = plan.name;
+      const form = document.getElementById('planKeyForm');
+      form.dataset.slug = slug;
+      form.querySelector('input[name=apiKey]').value = '';
+      dialog.showModal();
     });
   });
   listEl.querySelectorAll('[data-toggle-plan]').forEach((btn) => {
@@ -2682,6 +2687,35 @@ function renderSettings() {
   if (modelInput && document.activeElement !== modelInput) modelInput.value = llm.llm?.model || '';
   const hint = document.getElementById('settingsLlmHint');
   if (hint) hint.textContent = llm.llm?.provider ? `当前:${llm.llm.provider} · ${llm.llm.model || '(默认模型)'}` : '未启用';
+}
+
+document.getElementById('planKeyClose')?.addEventListener('click', () => {
+  document.getElementById('planKeyDialog')?.close();
+});
+document.getElementById('planKeyForm')?.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const slug = form.dataset.slug;
+  const key = form.querySelector('input[name=apiKey]').value.trim();
+  if (!key) { showToast('请先粘贴 API key', true); return; }
+  await savePlanKey(slug, key);
+});
+document.getElementById('planKeyAuto')?.addEventListener('click', async () => {
+  const form = document.getElementById('planKeyForm');
+  await savePlanKey(form.dataset.slug, '');
+});
+async function savePlanKey(slug, key) {
+  try {
+    await request(`/api/config/plans/${encodeURIComponent(slug)}/auth`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ key }),
+    });
+    document.getElementById('planKeyDialog')?.close();
+    showToast(key ? `${slug} 专属凭据已保存` : `${slug} 已回退自动检测`);
+    void refreshSettings();
+  } catch (error) {
+    showToast(`保存失败:${error.message}`, true);
+  }
 }
 
 document.getElementById('addPlanBtn')?.addEventListener('click', async () => {

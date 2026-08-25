@@ -23,7 +23,8 @@
       <button type="button" role="tab" data-tab="planfiles" aria-selected="false">计划</button>
       <button type="button" role="tab" data-tab="graph" aria-selected="false">图谱</button>
       <button type="button" role="tab" data-tab="usage" aria-selected="false">Token</button>
-      <button type="button" role="tab" data-tab="settings" aria-selected="false">设置</button>
+      <span class="tabs-sep" aria-hidden="true"></span>
+      <button type="button" role="tab" data-tab="settings" aria-selected="false" class="tab-gear" title="设置(plans / 凭据 / LLM)">⚙</button>
     </nav>
     <div class="header-meta">
       <span id="buildIdentity" class="build-identity" title="当前运行构建"></span>
@@ -186,6 +187,26 @@
         <div class="session-attrs">
           <h3>Plans</h3>
           <div id="settingsPlanList"></div>
+          <dialog class="settings-dialog" id="planKeyDialog">
+            <div class="dialog-head">
+              <div>
+                <div class="dialog-kicker">CREDENTIAL</div>
+                <div class="dialog-title" id="planKeyTitle">—</div>
+              </div>
+              <button type="button" class="dialog-close" id="planKeyClose" aria-label="关闭">×</button>
+            </div>
+            <div class="settings">
+              <div class="settings-section">
+                <div class="settings-title">专属 API key</div>
+                <p class="settings-copy">保存后此 plan 只用这把 key(多账号互不串);「使用自动凭据」回到 env / 浏览器会话检测。</p>
+                <form class="key-form" id="planKeyForm">
+                  <input type="password" name="apiKey" autocomplete="new-password" placeholder="粘贴 API key / token" aria-label="API key" />
+                  <button type="submit" class="button-primary">保存</button>
+                  <button type="button" class="button-quiet" id="planKeyAuto">使用自动凭据</button>
+                </form>
+              </div>
+            </div>
+          </dialog>
           <div class="handoff-actions" style="margin-top:12px">
             <input id="newPlanSlug" type="text" placeholder="slug(kimi-work)" size="12" />
             <select id="newPlanAdapter" aria-label="adapter"></select>
