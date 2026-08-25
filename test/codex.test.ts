@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { normalizeCodex } from '../src/adapters/codex.ts';
+import { harvestLocalRateLimits, normalizeCodex } from '../src/adapters/codex.ts';
 import { AdapterError } from '../src/types.ts';
 
 describe('normalizeCodex', () => {
@@ -88,6 +88,39 @@ describe('normalizeCodex', () => {
     ]);
     const spark5h = windows[1]!;
     expect(spark5h.resetAt).toBe(1787689161 * 1000);
+  });
+
+  test('本地 rollout 收割:解析最后一条 rate_limits,过期窗口丢弃', async () => {
+    const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join: j } = await import('node:path');
+    const root = mkdtempSync(j(tmpdir(), 'planofplan-codex-local-'));
+    try {
+      const day = j(root, 'sessions', '2026', '08', '25');
+      mkdirSync(day, { recursive: true });
+      const now = Date.now();
+      const line = (pct: number, resetSec: number) => JSON.stringify({
+        timestamp: new Date(now - 60_000).toISOString(),
+        payload: {
+          rate_limits: {
+            limit_id: 'codex_bengalfox',
+            limit_name: 'GPT-5.3-Codex-Spark',
+            primary: { used_percent: pct, window_minutes: 300, resets_at: resetSec },
+            secondary: { used_percent: pct / 2, window_minutes: 10080, resets_at: Math.floor(now / 1000) + 500_000 },
+          },
+        },
+      });
+      writeFileSync(j(day, 'rollout-x.jsonl'), [
+        line(99, Math.floor(now / 1000) - 9_000), // 旧记录(会被后面覆盖)
+        line(41, Math.floor(now / 1000) + 3_000), // 最新:5h 41%
+      ].join('\n'));
+      const windows = harvestLocalRateLimits(root, now);
+      expect(windows.map((w) => `${w.label}:${w.percentage}`)).toEqual(['Spark·5h限额:41', 'Spark·周限额:20.5']);
+      rmSync(root, { recursive: true, force: true });
+    } catch (error) {
+      rmSync(root, { recursive: true, force: true });
+      throw error;
+    }
   });
 
   test('uses the API window duration when primary is the weekly limit', () => {

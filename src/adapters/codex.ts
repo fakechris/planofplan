@@ -12,6 +12,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { readdirSync, statSync, openSync, readSync, closeSync } from 'node:fs';
 import type { AdapterContext, Credential, PlanAdapter, QuotaWindow } from '../types.ts';
 import { AdapterError } from '../types.ts';
 import { clampPct } from './util.ts';
@@ -76,6 +77,130 @@ interface UsagePayload {
 function num(v: unknown): number | null {
   if (typeof v !== 'number' || !Number.isFinite(v)) return null;
   return v;
+}
+
+interface LocalRateLimitRecord {
+  limitName: string | null;
+  primary: { usedPercent: number; resetsAt: number } | null;
+  secondary: { usedPercent: number; resetsAt: number } | null;
+  atMs: number;
+}
+
+function readTail(path: string, bytes = 128 * 1024): string {
+  let fd: number | null = null;
+  try {
+    fd = openSync(path, 'r');
+    const size = statSync(path).size;
+    const start = Math.max(0, size - bytes);
+    const buf = Buffer.alloc(size - start);
+    const n = readSync(fd, buf, 0, buf.length, start);
+    return buf.subarray(0, n).toString('utf8');
+  } catch {
+    return '';
+  } finally {
+    if (fd != null) closeSync(fd);
+  }
+}
+
+function collectRolloutFiles(root: string): string[] {
+  // sessions/YYYY/MM/DD/rollout-*.jsonl;只关心最近改动的少量文件
+  const out: Array<{ path: string; mtimeMs: number }> = [];
+  const walk = (dir: string, depth: number): void => {
+    if (depth > 4 || out.length > 400) return;
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) walk(full, depth + 1);
+      else if (entry.name.startsWith('rollout-') && entry.name.endsWith('.jsonl')) {
+        try {
+          out.push({ path: full, mtimeMs: statSync(full).mtimeMs });
+        } catch { /* 竞态跳过 */ }
+      }
+    }
+  };
+  walk(join(root, 'sessions'), 0);
+  return out.sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, 12).map((row) => row.path);
+}
+
+function parseRateLimitsPayload(node: unknown): LocalRateLimitRecord | null {
+  if (!node || typeof node !== 'object') return null;
+  const doc = node as {
+    limit_name?: unknown;
+    primary?: unknown;
+    secondary?: unknown;
+  };
+  const win = (raw: unknown): { usedPercent: number; resetsAt: number } | null => {
+    if (!raw || typeof raw !== 'object') return null;
+    const w = raw as { used_percent?: unknown; resets_at?: unknown };
+    const usedPercent = num(w.used_percent);
+    const resetsAt = num(w.resets_at);
+    if (usedPercent == null) return null;
+    return { usedPercent, resetsAt: resetsAt != null ? resetsAt * 1000 : 0 };
+  };
+  const primary = win(doc.primary);
+  const secondary = win(doc.secondary);
+  if (!primary && !secondary) return null;
+  return {
+    limitName: typeof doc.limit_name === 'string' && doc.limit_name
+      ? doc.limit_name.split('-').filter(Boolean).pop() ?? doc.limit_name
+      : null,
+    primary,
+    secondary,
+    atMs: 0,
+  };
+}
+
+/**
+ * 本地收割:codex CLI 每轮响应把 rate_limits 快照写进 rollout 文件;wham/usage
+ * 的 5h 窗口只有活跃用量时才出现(prolite 顶层只剩周限额),rollout 是 5h 数据
+ * 的稳定本地源。取最近改动文件里最后一条快照,按 resets_at 未过期过滤。
+ */
+export function harvestLocalRateLimits(root = codexHome(), now = Date.now()): QuotaWindow[] {
+  for (const file of collectRolloutFiles(root)) {
+    const tail = readTail(file);
+    if (!tail.includes('rate_limits')) continue;
+    let record: LocalRateLimitRecord | null = null;
+    for (const line of tail.split('\n')) {
+      if (!line.includes('rate_limits')) continue;
+      try {
+        const doc = JSON.parse(line) as { timestamp?: unknown; payload?: unknown; rate_limits?: unknown };
+        const payload = doc.payload && typeof doc.payload === 'object'
+          ? (doc.payload as { rate_limits?: unknown }).rate_limits ?? doc.payload
+          : doc.rate_limits;
+        const parsed = parseRateLimitsPayload(payload);
+        if (parsed) {
+          const ts = typeof doc.timestamp === 'string' ? Date.parse(doc.timestamp) : NaN;
+          record = { ...parsed, atMs: Number.isFinite(ts) ? ts : statSync(file).mtimeMs };
+        }
+      } catch { /* 截断行跳过 */ }
+    }
+    if (!record) continue;
+    const windows: QuotaWindow[] = [];
+    const push = (w: { usedPercent: number; resetsAt: number } | null, fiveHour: boolean, name: string | null): void => {
+      if (!w) return;
+      // 窗口已过期(重置时刻在过去超过 1h)说明快照陈旧,不采用
+      if (w.resetsAt > 0 && w.resetsAt < now - 3_600_000) return;
+      windows.push({
+        window: `local_${fiveHour ? '5h' : 'weekly'}`,
+        label: name ? `${name}·${fiveHour ? '5h' : '周'}限额` : (fiveHour ? '5小时限额' : '周限额'),
+        used: null,
+        total: null,
+        unit: 'percent',
+        percentage: clampPct(w.usedPercent),
+        resetAt: w.resetsAt > 0 ? w.resetsAt : null,
+        note: null,
+      });
+    };
+    push(record.primary, true, record.limitName);
+    push(record.secondary, false, record.limitName);
+    if (windows.length > 0) return windows;
+  }
+  return [];
 }
 
 export function normalizeCodex(raw: unknown): QuotaWindow[] {
@@ -254,6 +379,17 @@ export const codexAdapter: PlanAdapter = {
     } catch {
       throw new AdapterError('parse', 'Codex 响应不是合法 JSON');
     }
-    return normalizeCodex(json);
+    const windows = normalizeCodex(json);
+    // prolite 的 5h 窗口只在活跃用量时出现在 usage 响应里;缺它时用本地
+    // rollout 快照补(CLI 每轮都写),失败静默——周限额仍然来自 usage
+    const hasFiveHour = windows.some((w) => w.window === 'rolling_5h' || w.window.startsWith('extra_5h'));
+    if (!hasFiveHour) {
+      try {
+        for (const local of harvestLocalRateLimits()) {
+          if (!windows.some((w) => w.label === local.label)) windows.push(local);
+        }
+      } catch { /* 本地收割是 best-effort */ }
+    }
+    return windows;
   },
 };
