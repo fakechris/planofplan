@@ -932,6 +932,21 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
   } catch {
     /* origin attribution is best-effort */
   }
+  // 无 git cwd 的存量会话补目录身份(新扫描由 workRepoOf 兜底;这里覆盖
+  // 修复前的老行)。必须在 projects/requirements 物化之前跑。
+  try {
+    const home = homedir();
+    const withWork = store.sessionIdsWithWorkRepo();
+    const patches: Array<{ sessionId: string; role: 'work'; url: string; root: string; name: string; evidenceKind: 'observed' }> = [];
+    for (const row of store.listSessionRows()) {
+      if (withWork.has(row.id)) continue;
+      if (!row.cwd || !row.cwd.startsWith('/') || row.cwd === home || row.cwd === '/' || row.cwd === '/tmp' || row.cwd === '/private/tmp' || row.cwd.startsWith('/var/folders/') || row.cwd.startsWith('/private/var/folders/')) continue;
+      patches.push({ sessionId: row.id, role: 'work', url: row.cwd, root: row.cwd, name: basename(row.cwd), evidenceKind: 'observed' });
+    }
+    for (const patch of patches) store.appendSessionRepo(patch);
+  } catch {
+    /* cwd backfill is best-effort */
+  }
   // projects 实体物化(IA 第一步):从 session_repos 增量 upsert,幂等
   try {
     store.materializeProjects();

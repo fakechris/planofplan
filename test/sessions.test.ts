@@ -322,3 +322,40 @@ describe('claude subagent discovery', () => {
     }
   });
 });
+
+describe('无 git cwd 的项目身份(目录即项目)', () => {
+  test('workRepoOf:非 git cwd 兜底为路径身份;junk cwd 跳过', async () => {
+    const { workRepoOf } = await import('../src/session-repos.ts');
+    const home = await import('node:os').then((m) => m.homedir());
+    const s = (cwd: string | null) => ({
+      id: 'claude:x', provider: 'claude', nativeId: 'x', cwd, title: null, sourceFile: null,
+      startedAt: null, updatedAt: Date.now(), inputTokens: 0, outputTokens: 0, totalTokens: 0,
+      estimatedCostUsd: null, seenAt: Date.now(), gitRoot: null, gitUrl: null, gitName: null,
+    }) as never;
+    const repo = workRepoOf(s('/tmp/research-note-xyz' + ''), home);
+    // /tmp 子目录是合法工作目录(只有 /tmp 本体算 junk)
+    expect(repo).toMatchObject({ role: 'work', url: '/tmp/research-note-xyz', root: '/tmp/research-note-xyz', name: 'research-note-xyz' });
+    expect(workRepoOf(s(home), home)).toBeNull();
+    expect(workRepoOf(s('/tmp'), home)).toBeNull();
+    expect(workRepoOf(s('/var/folders/ab/xyz'), home)).toBeNull();
+  });
+
+  test('存量 backfill:无 work 行的会话补路径身份,projects 物化能看见', () => {
+    const store = openMemoryDb();
+    store.upsertSessions([{
+      id: 'claude:research1', provider: 'claude', nativeId: 'r1', cwd: '/Users/x/source/research/cabinet',
+      title: '研究', sourceFile: null, startedAt: null, updatedAt: Date.now(),
+      inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: null, seenAt: Date.now(),
+    }]);
+    expect(store.listSessionRows()[0]!.repos?.filter((r) => r.role === 'work')).toHaveLength(0);
+    // 模拟 collect 的 backfill 段
+    const withWork = store.sessionIdsWithWorkRepo();
+    expect(withWork.size).toBe(0);
+    store.appendSessionRepo({ sessionId: 'claude:research1', role: 'work', url: '/Users/x/source/research/cabinet', root: '/Users/x/source/research/cabinet', name: 'cabinet', evidenceKind: 'observed' });
+    expect(store.sessionIdsWithWorkRepo().has('claude:research1')).toBe(true);
+    // 幂等
+    store.appendSessionRepo({ sessionId: 'claude:research1', role: 'work', url: '/Users/x/source/research/cabinet', root: '/Users/x/source/research/cabinet', name: 'cabinet', evidenceKind: 'observed' });
+    const count = store.listSessionRows()[0]!.repos!.filter((r) => r.role === 'work').length;
+    expect(count).toBe(1);
+  });
+});

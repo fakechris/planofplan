@@ -676,6 +676,20 @@ export class Store {
   }
 
   /** 配置 → db plans 表（INSERT OR IGNORE；已存在时只更新非运行时字段） */
+  /** 追加单条 repo 归属(存量 backfill 用;PK 冲突忽略)。 */
+  appendSessionRepo(row: { sessionId: string; role: string; url: string; root: string | null; name: string; evidenceKind: string }): void {
+    this.db.query(
+      `INSERT OR IGNORE INTO session_repos (session_id, role, url, root, name, evidence_kind, first_seq)
+       VALUES (?, ?, ?, ?, ?, ?, NULL)`,
+    ).run(row.sessionId, row.role, row.url, row.root, row.name, row.evidenceKind);
+  }
+
+  /** 有 work 归属的 session id 集合(backfill 判缺用)。 */
+  sessionIdsWithWorkRepo(): Set<string> {
+    const rows = this.db.query("SELECT DISTINCT session_id FROM session_repos WHERE role = 'work'").all() as Array<{ session_id: string }>;
+    return new Set(rows.map((row) => row.session_id));
+  }
+
   deletePlan(slug: string): void {
     this.db.query('DELETE FROM plans WHERE slug = ?').run(slug);
   }
