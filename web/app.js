@@ -414,6 +414,7 @@ function renderSessions(list) {
     void loadSessionAttribution(open);
     void loadSessionLaunch(open);
     void loadSessionTodos(open.id);
+    void loadSessionPlans(open.id);
   } else {
     readerEl.innerHTML = `
       <div class="usage-empty">
@@ -586,6 +587,36 @@ function bindAttrFold(el) {
     el.querySelector('[data-attr-rest]')?.removeAttribute('hidden');
     btn.remove();
   });
+}
+
+// 相关计划:该 session 碰过的 plan 文件(对话 → 计划,跨页跳转)。
+async function loadSessionPlans(sessionId) {
+  const el = document.getElementById('sessionPlansTrail');
+  if (!el) return;
+  try {
+    const data = await request(`/api/sessions/${encodeURIComponent(sessionId)}`);
+    const plans = data.plans || [];
+    if (plans.length === 0) {
+      el.innerHTML = '';
+      return;
+    }
+    const plansHtml = plans.map((plan) => `
+      <button type="button" class="session-related-req" data-nav="planfiles" data-nav-id="${escapeHtml(plan.id)}" title="${escapeHtml(plan.path)}">
+        ${escapeHtml(plan.title || plan.path.split('/').pop())}
+        <span>${escapeHtml(PLAN_KIND_LABELS[plan.kind] || plan.kind)}</span>
+      </button>
+    `).join('');
+    el.innerHTML = `
+      <div class="session-attrs"><h3>相关计划 <span class="muted">本会话触碰的 plan 文件</span></h3>${plansHtml}</div>
+    `;
+    el.querySelectorAll('[data-nav]').forEach((row) => {
+      row.addEventListener('click', () => {
+        navigate(row.getAttribute('data-nav'), row.getAttribute('data-nav-id') || undefined);
+      });
+    });
+  } catch {
+    el.innerHTML = '';
+  }
 }
 
 // 进展块:Todo 轨迹(TodoWrite 自报)+ 尾总结(assistant 自报)+ 对账提示
@@ -1025,9 +1056,11 @@ function renderGraph(list) {
     const id = g.getAttribute('data-id') || '';
     const p = pos.get(id);
     if (p?.kind === 'session') {
-      openSessionId = id;
-      showTab('sessions');
-      renderSessions(latestSessions);
+      navigate('sessions', id);
+    } else if (p?.kind === 'requirement') {
+      navigate('requirements', id.replace(/^req:/, ''));
+    } else if (p?.kind === 'project') {
+      navigate('projects', id.replace(/^project:/, ''));
     } else if (p?.kind === 'commit') {
       const url = commitUrl(commitRepo.get(id), id.slice(7));
       if (url) window.open(url, '_blank', 'noopener');
@@ -1115,11 +1148,11 @@ async function loadProjectDetail(id) {
     const detail = await request(`/api/projects/${encodeURIComponent(id)}?days=${encodeURIComponent(days)}`);
     if (openProjectId !== id) return; // 已切走
     readerEl.innerHTML = projectDetailHtml(detail);
-    readerEl.querySelectorAll('[data-req-session]').forEach((row) => {
-      row.addEventListener('click', () => {
-        openSessionId = row.getAttribute('data-req-session');
-        showTab('sessions');
-        renderSessions(latestSessions);
+    readerEl.querySelectorAll('[data-nav]').forEach((el2) => {
+      el2.addEventListener('click', () => {
+        const tab = el2.getAttribute('data-nav');
+        const navId = el2.getAttribute('data-nav-id');
+        navigate(tab, navId || undefined);
       });
     });
   } catch {
@@ -1137,7 +1170,7 @@ function projectDetailHtml(detail) {
   `).join('');
 
   const requirementsHtml = (detail.requirements || []).map((req) => `
-    <button type="button" class="session-related-req" data-req-session="${escapeHtml(req.sessionId)}" data-req-id="${escapeHtml(req.id || '')}">
+    <button type="button" class="session-related-req" data-nav="requirements" data-nav-id="${escapeHtml(req.id || '')}" data-nav-session="${escapeHtml(req.sessionId)}">
       ${escapeHtml(req.text)}
       <span><i class="req-origin req-origin-${escapeHtml(req.originLevel || 'system_inferred')}">${req.originLevel === 'user_explicit' ? '用户原话' : '推断'}</i> · ${escapeHtml(req.provider)} · ${fmtAgo(req.updatedAt, Date.now())}</span>
     </button>
@@ -1171,6 +1204,13 @@ function projectDetailHtml(detail) {
     </div>`;
   }).join('');
 
+  // 计划区(项目 → 计划):该 repo 下的 plan 文件,跳计划详情
+  const plansHtml = (detail.plans || []).slice(0, 12).map((plan) => `
+    <button type="button" class="session-related-req" data-nav="planfiles" data-nav-id="${escapeHtml(plan.id)}" title="${escapeHtml(plan.path)}">
+      ${escapeHtml(plan.title || plan.path.split('/').pop())}
+      <span>${escapeHtml(PLAN_KIND_LABELS[plan.kind] || plan.kind)} · ${fmtAgo(plan.lastSeenAt, Date.now())}</span>
+    </button>
+  `).join('');
   return `
     <div class="session-detail-grid">
       <dt>项目</dt><dd>${escapeHtml(detail.name)}</dd>
@@ -1179,6 +1219,7 @@ function projectDetailHtml(detail) {
     </div>
     <div class="session-attrs"><h3>Agent × 活动</h3>${agentsHtml || '<div class="muted">窗口内无活动</div>'}</div>
     <div class="session-attrs"><h3>需求流</h3>${requirementsHtml || '<div class="muted">窗口内没有可推导的需求</div>'}</div>
+    <div class="session-attrs"><h3>计划 <span class="muted">${(detail.plans || []).length} 个 plan 文件</span></h3>${plansHtml || '<div class="muted">该 repo 下没有计划文件</div>'}</div>
     <div class="session-attrs"><h3>产出 commit <span class="muted">● 声明/文件交集 · ○ 时间窗</span></h3>${commitsHtml || '<div class="muted">窗口内无归因 commit</div>'}</div>
     <div class="session-attrs"><h3>Session 时间线</h3>${sessionsHtml || '<div class="muted">窗口内无 session</div>'}</div>
   `;
@@ -1305,11 +1346,12 @@ async function loadRequirementDetail(id) {
     const detail = await request(`/api/requirements/${encodeURIComponent(id)}`);
     if (openRequirementId !== id) return; // 已切走
     readerEl.innerHTML = requirementDetailHtml(detail);
-    readerEl.querySelector('[data-req-session]')?.addEventListener('click', () => {
-      const sessionId = readerEl.querySelector('[data-req-session]')?.getAttribute('data-req-session');
-      openSessionId = sessionId;
-      showTab('sessions');
-      renderSessions(latestSessions);
+    readerEl.querySelectorAll('[data-nav]').forEach((el2) => {
+      el2.addEventListener('click', () => {
+        const tab = el2.getAttribute('data-nav');
+        const navId = el2.getAttribute('data-nav-id');
+        navigate(tab, navId || undefined);
+      });
     });
   } catch {
     readerEl.innerHTML = '<div class="usage-empty"><strong>详情加载失败</strong><span>稍后再试。</span></div>';
@@ -1336,14 +1378,21 @@ function requirementDetailHtml(detail) {
       <span class="attr-meta">${commit.pushed === false ? '未推送' : ''}</span>
     </div>
   `).join('');
+  const plansHtml = (detail.plans || []).map((plan) => `
+    <button type="button" class="session-related-req" data-nav="planfiles" data-nav-id="${escapeHtml(plan.id)}" title="${escapeHtml(plan.path)}">
+      ${escapeHtml(plan.title || plan.path.split('/').pop())}
+      <span>${escapeHtml(PLAN_KIND_LABELS[plan.kind] || plan.kind)}</span>
+    </button>
+  `).join('');
   return `
     <div class="session-detail-grid">
       <dt>需求</dt><dd>${escapeHtml(req.text || '')}</dd>
       <dt>证据</dt><dd>${reqLevelBadge(req.originLevel)}</dd>
       <dt>项目</dt><dd>${escapeHtml(reposHtml)}</dd>
-      <dt>源对话</dt><dd><button type="button" class="inline-link" data-req-session="${escapeHtml(session.id || '')}">${escapeHtml(session.provider || '')}:${escapeHtml(session.title || session.id || '')}</button></dd>
+      <dt>源对话</dt><dd><button type="button" class="inline-link" data-nav="sessions" data-nav-id="${escapeHtml(session.id || '')}">${escapeHtml(session.provider || '')}:${escapeHtml(session.title || session.id || '')}</button></dd>
       <dt>时间</dt><dd>${req.ts ? fmtAgo(req.ts, Date.now()) : '--'}</dd>
     </div>
+    <div class="session-attrs"><h3>相关计划 <span class="muted">span 内触碰的 plan 文件</span></h3>${plansHtml || '<div class="muted">span 内没有触碰计划文件</div>'}</div>
     <div class="session-attrs"><h3>span 内文件 <span class="muted">${detail.filesTotal || 0} 个,按触碰次数</span></h3>${filesHtml || '<div class="muted">span 内没有文件触碰</div>'}</div>
     <div class="session-attrs"><h3>span 内 commit <span class="muted">● 声明 · ○ 时间窗</span></h3>${commitsHtml || '<div class="muted">span 内没有归因 commit</div>'}</div>
   `;
@@ -1488,11 +1537,11 @@ async function loadPlanDetail(id) {
     const detail = await request(`/api/planfiles/${encodeURIComponent(id)}`);
     if (openPlanId !== id) return; // 已切走
     readerEl.innerHTML = planDetailHtml(detail);
-    readerEl.querySelectorAll('[data-plan-session]').forEach((row) => {
-      row.addEventListener('click', () => {
-        openSessionId = row.getAttribute('data-plan-session');
-        showTab('sessions');
-        renderSessions(latestSessions);
+    readerEl.querySelectorAll('[data-nav]').forEach((el2) => {
+      el2.addEventListener('click', () => {
+        const tab = el2.getAttribute('data-nav');
+        const navId = el2.getAttribute('data-nav-id');
+        navigate(tab, navId || undefined);
       });
     });
   } catch {
@@ -1521,11 +1570,28 @@ function planDetailHtml(detail) {
     </div>
   `).join('');
   const sessionsHtml = (detail.sessions || []).slice(0, 10).map((session) => `
-    <button type="button" class="session-related-req" data-plan-session="${escapeHtml(session.id)}" title="${escapeHtml(session.id)}">
+    <button type="button" class="session-related-req" data-nav="sessions" data-nav-id="${escapeHtml(session.id)}" title="${escapeHtml(session.id)}">
       ${escapeHtml(session.requirement?.text || session.title || session.id)}
       <span>${escapeHtml(session.provider)} · ${fmtAgo(session.updatedAt, Date.now())}</span>
     </button>
   `).join('');
+  const requirementsHtml = (detail.requirements || []).slice(0, 8).map((req) => `
+    <button type="button" class="session-related-req" data-nav="requirements" data-nav-id="${escapeHtml(req.id)}">
+      ${escapeHtml(req.text)}
+      <span><i class="req-origin req-origin-${escapeHtml(req.originLevel)}">${req.originLevel === 'user_explicit' ? '用户原话' : '推断'}</i> · ${escapeHtml(req.provider)}</span>
+    </button>
+  `).join('');
+  const planCommitsHtml = (detail.commits || []).slice(0, 10).map((commit) => `
+    <div class="attr-row${commit.kind === 'declared' ? '' : ' attr-dim'}">
+      <span class="attr-dot${commit.kind === 'declared' ? ' attr-dot-strong' : ''}">${commit.kind === 'declared' ? '●' : '○'}</span>
+      <span class="attr-sha">${escapeHtml((commit.sha || '').slice(0, 8))}</span>
+      <span class="attr-summary">${escapeHtml(commit.summary || '(no subject)')}</span>
+      <span class="attr-meta">${commit.pushed === false ? '未推送' : ''}</span>
+    </div>
+  `).join('');
+  const projectHtml = detail.project
+    ? `<dt>项目</dt><dd><button type="button" class="inline-link" data-nav="projects" data-nav-id="${escapeHtml(detail.project.id)}">${escapeHtml(detail.project.name)}</button></dd>`
+    : (plan.repo ? `<dt>项目</dt><dd>${escapeHtml(plan.repo)}(未物化)</dd>` : '');
   return `
     <div class="session-detail-grid">
       <dt>文件</dt><dd title="${escapeHtml(plan.path)}">${escapeHtml(plan.path)}</dd>
@@ -1533,10 +1599,12 @@ function planDetailHtml(detail) {
       <dt>Goal</dt><dd>${escapeHtml(plan.goal || '--')}</dd>
       <dt>当前阶段</dt><dd>${escapeHtml(latest?.currentPhase || plan.currentPhase || '--')}</dd>
       <dt>进度</dt><dd>☑ ${latest ? latest.checkboxChecked : 0}/${latest ? latest.checkboxTotal : 0} · ${snapshots.length} 个快照</dd>
-      ${plan.repo ? `<dt>repo</dt><dd>${escapeHtml(plan.repo)}</dd>` : ''}
+      ${projectHtml}
     </div>
     <div class="session-attrs"><h3>阶段/小节(最新快照)</h3>${sectionsHtml || '<div class="muted">无小节结构</div>'}</div>
     <div class="session-attrs"><h3>快照时间线 <span class="muted">演进态,只观察不推断</span></h3>${timelineHtml || '<div class="muted">只有一份快照</div>'}</div>
+    <div class="session-attrs"><h3>关联需求 <span class="muted">触碰 session 的需求实体</span></h3>${requirementsHtml || '<div class="muted">没有关联需求</div>'}</div>
+    <div class="session-attrs"><h3>关联 commit <span class="muted">触碰 session 的归因产出</span></h3>${planCommitsHtml || '<div class="muted">没有归因 commit</div>'}</div>
     <div class="session-attrs"><h3>谁在推进 <span class="muted">按文件触碰归因</span></h3>${sessionsHtml || '<div class="muted">窗口内没有 session 触碰过该文件</div>'}</div>
   `;
 }
@@ -1573,6 +1641,7 @@ function sessionDetailHtml(session, pool) {
       <dt>开始</dt><dd>${session.startedAt ? fmtTime(session.startedAt, true) : '--'}</dd>
     </div>
     <div id="sessionTodoTrail"></div>
+    <div id="sessionPlansTrail"></div>
     <div class="session-actions">
       ${session.sourceFile ? `<button class="secondary-btn" type="button" data-reveal="${escapeHtml(session.id)}">在 Finder 中显示</button>` : ''}
     </div>
@@ -2316,14 +2385,43 @@ document.querySelectorAll('[data-session-view]').forEach((btn) => {
 });
 
 function currentTab() {
-  const hash = (location.hash || '#plans').replace('#', '');
-  return ['plans', 'sessions', 'projects', 'requirements', 'planfiles', 'graph', 'usage'].includes(hash) ? hash : 'plans';
+  const raw = (location.hash || '#plans').replace('#', '');
+  return ['plans', 'sessions', 'projects', 'requirements', 'planfiles', 'graph', 'usage'].includes(raw.split('/')[0])
+    ? raw.split('/')[0] : 'plans';
+}
+
+// 深链导航:#<tab>/<id>(如 #requirements/req:claude:x:3)。任何位置的
+// 跳转按钮都走 navigate,hashchange 路由器负责打开实体。
+function navigate(tab, id) {
+  location.hash = `#${tab}${id ? `/${encodeURIComponent(id)}` : ''}`;
+}
+
+function applyRoute() {
+  const raw = (location.hash || '#plans').replace('#', '');
+  const [tab, ...rest] = raw.split('/');
+  const id = rest.length > 0 ? decodeURIComponent(rest.join('/')) : null;
+  showTab(tab);
+  if (!id) return;
+  if (tab === 'sessions') {
+    openSessionId = id;
+    renderSessions(latestSessions);
+  } else if (tab === 'projects') {
+    openProjectId = id;
+    renderProjects();
+  } else if (tab === 'requirements') {
+    openRequirementId = id;
+    renderRequirements();
+  } else if (tab === 'planfiles') {
+    openPlanId = id;
+    renderPlans();
+  }
 }
 
 function showTab(name) {
   if (!['plans', 'sessions', 'projects', 'requirements', 'planfiles', 'graph', 'usage'].includes(name)) name = 'plans';
   const hash = `#${name}`;
-  if (location.hash !== hash) location.hash = hash;
+  // 深链(#tab/id)不回写成裸 #tab,避免路由器丢 id 死循环
+  if (location.hash !== hash && !location.hash.startsWith(`${hash}/`)) location.hash = hash;
   document.querySelectorAll('[data-tab]').forEach((btn) => {
     btn.setAttribute('aria-selected', String(btn.getAttribute('data-tab') === name));
   });
@@ -2349,8 +2447,9 @@ document.getElementById('graphSubagents')?.addEventListener('change', (event) =>
 document.querySelectorAll('[data-tab]').forEach((btn) => {
   btn.addEventListener('click', () => showTab(btn.getAttribute('data-tab')));
 });
-window.addEventListener('hashchange', () => showTab(currentTab()));
-showTab(currentTab());
+window.addEventListener('hashchange', () => applyRoute());
+// 冷启动走路由器:支持 #tab/id 深链直接打开实体
+applyRoute();
 
 function maybePollSessionIndex(list) {
   if (list?.indexStatus !== 'running') return;

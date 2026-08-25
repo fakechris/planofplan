@@ -246,7 +246,10 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     const id = decodeURIComponent(c.req.param('id'));
     const session = store.getSession(id);
     if (!session) return c.json({ ok: false, error: 'unknown session' }, 404);
-    return c.json(session);
+    // 跨实体关联:该 session 碰过的计划文件(对话 → 计划)
+    const plans = store.planFilesForSession(id).slice(0, 10)
+      .map((file) => ({ id: file.id, title: file.title, kind: file.kind, path: file.path }));
+    return c.json({ ...session, plans });
   });
 
   app.get('/api/sessions/:id/transcript', async (c) => {
@@ -376,6 +379,10 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
       sessions,
       requirements,
       commits: store.projectCommits(project.url, since),
+      // 跨实体关联:项目下的计划文件(项目 → 计划;身份 = repo url 对齐)
+      plans: store.planFilesForRepo(project.url).slice(0, 30)
+        .map((file) => ({ id: file.id, title: file.title, kind: file.kind, path: file.path, lastSeenAt: file.lastSeenAt }))
+        .sort((a, b) => b.lastSeenAt - a.lastSeenAt),
     });
   });
 
@@ -506,6 +513,10 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
       files: fileList,
       commits,
       nextRequirementId: next?.id ?? null,
+      // 跨实体关联:span 内触碰的计划文件(需求 → 计划)
+      plans: store.planFilesForRequirement(req.sessionId, fromSeq, next ? next.seq : null)
+        .slice(0, 10)
+        .map((file) => ({ id: file.id, title: file.title, kind: file.kind, path: file.path })),
     });
   });
 
@@ -538,9 +549,9 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     if (!plan) return c.json({ ok: false, error: 'unknown plan' }, 404);
     const snapshots = store.planSnapshots(plan.id, 60);
     // 归因桥(thin-observer 缺的一层):谁在推进(触碰 session)+ 为什么(需求)
-    const firstReqs = store.firstRequirementBySession();
+    // + 产出(commit)+ 项目(跨页跳转)
     const sessions = store.sessionsTouchingPath(plan.path).map((session) => {
-      const req = firstReqs.get(session.id);
+      const req = store.firstRequirementBySession().get(session.id);
       return {
         ...session,
         requirement: req ? { id: req.id, text: req.text, originLevel: req.originLevel } : null,
@@ -550,6 +561,9 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
       plan: { ...plan, goal: plan.goal ? plan.goal.slice(0, 2000) : null },
       snapshots,
       sessions,
+      requirements: store.requirementsForPath(plan.path).slice(0, 20),
+      commits: store.commitsForPath(plan.path).slice(0, 20),
+      project: plan.repo ? store.projectByRepo(plan.repo) : null,
     });
   });
 

@@ -264,10 +264,25 @@ describe('materializePlanFiles', () => {
       const detailBody = await detail.json() as {
         snapshots: Array<{ checkboxTotal: number }>;
         sessions: Array<{ id: string; requirement: { text: string } | null }>;
+        requirements: Array<{ text: string }>;
+        commits: Array<{ sha: string }>;
+        project: { id: string; name: string } | null;
       };
       expect(detailBody.snapshots[0]?.checkboxTotal).toBe(6);
       expect(detailBody.sessions[0]?.id).toBe('claude:p1');
       expect(detailBody.sessions[0]?.requirement?.text).toContain('分组列表');
+      // 跨实体关联:plan → requirement(触碰 session 的需求)+ project
+      expect(detailBody.requirements[0]?.text).toContain('分组列表');
+      expect(detailBody.project).toBeNull(); // 非 git 目录
+
+      // 跨实体关联:session → plan / requirement → plan / project → plan
+      const sessionDetail = await server.request('http://localhost/api/sessions/claude:p1');
+      const sessionBody = await sessionDetail.json() as { plans: Array<{ id: string }> };
+      expect(sessionBody.plans[0]?.id).toBe(plan.id);
+
+      const reqDetail = await server.request(`http://localhost/api/requirements/${encodeURIComponent('req:claude:p1:1')}`);
+      const reqBody = await reqDetail.json() as { plans: Array<{ id: string }> };
+      expect(reqBody.plans[0]?.id).toBe(plan.id);
 
       const missing = await server.request('http://localhost/api/planfiles/nope');
       expect(missing.status).toBe(404);

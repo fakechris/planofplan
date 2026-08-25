@@ -2021,6 +2021,97 @@ export class Store {
     return rows.map((row) => ({ id: row.id, provider: row.provider, title: row.title, updatedAt: row.updated_at }));
   }
 
+  // ── 跨实体关联(计划↔对话↔需求↔项目↔commit 的导航层)──────────
+
+  planFilesByPaths(paths: string[]): PlanFileRecord[] {
+    if (paths.length === 0) return [];
+    const files = this.listPlanFiles();
+    const wanted = new Set(paths);
+    return files.filter((file) => wanted.has(file.path));
+  }
+
+  /** session 碰过的计划文件(session → plan 导航)。 */
+  planFilesForSession(sessionId: string): PlanFileRecord[] {
+    const rows = this.db.query(
+      'SELECT DISTINCT file_path FROM session_file_touches WHERE session_id = ?',
+    ).all(sessionId) as Array<{ file_path: string }>;
+    return this.planFilesByPaths(rows.map((row) => row.file_path));
+  }
+
+  /** 需求 span 内触碰的计划文件(requirement → plan;span 语义同需求详情)。 */
+  planFilesForRequirement(sessionId: string, fromSeq: number, toSeqExclusive: number | null): PlanFileRecord[] {
+    return this.planFilesByPaths(this.spanTouches(sessionId, fromSeq, toSeqExclusive).map((touch) => touch.filePath));
+  }
+
+  /** 项目下的计划文件(project → plan;repo url 对齐 projects 身份)。 */
+  planFilesForRepo(repoUrl: string): PlanFileRecord[] {
+    return this.listPlanFiles().filter((file) => file.repo === repoUrl);
+  }
+
+  /** 计划文件关联的需求(plan → requirement:触碰 session 的全部需求,不只首条)。 */
+  requirementsForPath(path: string): Array<RequirementRecord & { provider: string; updatedAt: number }> {
+    const rows = this.db.query(
+      `SELECT r.id, r.session_id, r.seq, r.text, r.origin_level, r.ts,
+              s.provider, s.updated_at
+       FROM requirements r
+       JOIN sessions s ON s.id = r.session_id
+       WHERE r.session_id IN (SELECT DISTINCT session_id FROM session_file_touches WHERE file_path = ?)
+       ORDER BY s.updated_at DESC, r.seq`,
+    ).all(path) as Array<{
+      id: string; session_id: string; seq: number; text: string; origin_level: string;
+      ts: number | null; provider: string; updated_at: number;
+    }>;
+    return rows.map((row) => ({
+      id: row.id,
+      sessionId: row.session_id,
+      seq: row.seq,
+      text: row.text,
+      originLevel: row.origin_level === 'user_explicit' ? 'user_explicit' : 'system_inferred',
+      ts: row.ts,
+      repos: [],
+      provider: row.provider,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  /** 计划文件关联的 commit(plan → commit:触碰 session 的归因 commit,按 sha 去重)。 */
+  commitsForPath(path: string): SessionCommit[] {
+    const rows = this.db.query(
+      `SELECT c.session_id, c.repo, c.sha, c.kind, c.ts, c.summary, c.file_overlap, c.pushed
+       FROM session_commits c
+       WHERE c.session_id IN (SELECT DISTINCT session_id FROM session_file_touches WHERE file_path = ?)
+       ORDER BY c.ts DESC`,
+    ).all(path) as Array<{
+      session_id: string; repo: string; sha: string; kind: string; ts: number | null;
+      summary: string | null; file_overlap: number; pushed: number;
+    }>;
+    const seen = new Set<string>();
+    const commits: SessionCommit[] = [];
+    for (const row of rows) {
+      if (seen.has(row.sha)) continue;
+      seen.add(row.sha);
+      commits.push({
+        sessionId: row.session_id,
+        repo: row.repo,
+        sha: row.sha,
+        kind: row.kind === 'declared' ? 'declared' : 'candidate',
+        ts: row.ts,
+        summary: row.summary ?? '',
+        fileOverlap: !!row.file_overlap,
+        pushed: row.pushed !== 0,
+      });
+    }
+    return commits;
+  }
+
+  /** repo url → 项目实体(跨页跳转要 project id)。 */
+  projectByRepo(repoUrl: string): { id: string; name: string } | null {
+    const row = this.db.query('SELECT id, name FROM projects WHERE url = ? LIMIT 1').get(repoUrl) as
+      | { id: string; name: string }
+      | null;
+    return row ?? null;
+  }
+
   upsertSessionTouches(rows: SessionFileTouch[]): void {
     if (rows.length === 0) return;
     const stmt = this.db.query(
