@@ -15,6 +15,7 @@ import { buildUsageReport } from './usage.ts';
 import { buildSessionList, searchSessions } from './sessions.ts';
 import { pickRequirement } from './motivation.ts';
 import { nameOfUrl, sessionProjectNames } from './repos.ts';
+import { buildHandoffPackage, deliverHandoff, handoffProviders } from './handoff.ts';
 import type { ProjectAgentStat, ProjectListItem, RequirementRecord } from './types.ts';
 import { readTranscript } from './transcript.ts';
 import { launchResume } from './resume.ts';
@@ -585,6 +586,41 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
       notes: store.progressNotesForSession(id),
       commitCount: store.listSessionCommits(id).length,
     });
+  });
+
+  // ── Handoff(§1.7/§2.5:指针 + 摘要,三通道交付)──────────────────
+
+  const handoffLink = (type: string, id: string): string =>
+    `http://localhost:${cfg.port}/#${type === 'planfile' ? 'planfiles' : type === 'session' ? 'sessions' : 'requirements'}/${encodeURIComponent(id)}`;
+
+  app.get('/api/handoff/:type/:id', (c) => {
+    const type = c.req.param('type') as 'session' | 'requirement' | 'planfile';
+    const id = decodeURIComponent(c.req.param('id'));
+    const pkg = buildHandoffPackage(store, type, id, handoffLink(type, id));
+    if (!pkg) return c.json({ ok: false, error: 'unknown source' }, 404);
+    return c.json({
+      ...pkg,
+      deepLink: handoffLink(type, id),
+      providers: handoffProviders(),
+      history: store.handoffsFor(type, id),
+    });
+  });
+
+  app.post('/api/handoff/:type/:id/deliver', async (c) => {
+    const type = c.req.param('type') as 'session' | 'requirement' | 'planfile';
+    const id = decodeURIComponent(c.req.param('id'));
+    const pkg = buildHandoffPackage(store, type, id, handoffLink(type, id));
+    if (!pkg) return c.json({ ok: false, error: 'unknown source' }, 404);
+    const body = await c.req.json().catch(() => ({})) as {
+      mode?: 'file' | 'agent'; provider?: string; targetDir?: string;
+    };
+    const mode = body.mode === 'agent' ? 'agent' : 'file';
+    const result = deliverHandoff(store, pkg, {
+      mode,
+      provider: body.provider,
+      targetDir: body.targetDir,
+    });
+    return c.json(result, result.ok ? 200 : 400);
   });
 
   app.post('/api/sessions/:id/resume', (c) => {

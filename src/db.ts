@@ -302,6 +302,19 @@ CREATE TABLE IF NOT EXISTS progress_notes (
   UNIQUE (session_id, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_progress_notes_session ON progress_notes(session_id, seq);
+-- Handoff(§1.7):一次导出动作一行,交接链可观测。源悬空也保留(历史)。
+CREATE TABLE IF NOT EXISTS handoffs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_type TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  provider TEXT,
+  target_dir TEXT NOT NULL,
+  package_path TEXT NOT NULL,
+  ok INTEGER NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_handoffs_source ON handoffs(source_type, source_id, created_at);
 `;
 
 interface SnapshotRow {
@@ -479,6 +492,10 @@ export class Store {
         /* backfill is best-effort;collect 轮会补 */
       }
       db.exec('PRAGMA user_version = 9');
+    }
+    // v10:Handoff 交接记录表(无 backfill,动作发生时写入)。
+    if (version < 10) {
+      db.exec('PRAGMA user_version = 10');
     }
   }
 
@@ -1891,6 +1908,35 @@ export class Store {
       `SELECT id, session_id, seq, ts, text FROM progress_notes WHERE session_id = ? ORDER BY seq`,
     ).all(sessionId) as Array<{ id: string; session_id: string; seq: number; ts: number | null; text: string }>;
     return rows.map((row) => ({ id: row.id, sessionId: row.session_id, seq: row.seq, ts: row.ts, text: row.text }));
+  }
+
+  insertHandoff(row: {
+    sourceType: string; sourceId: string; mode: string; provider: string | null;
+    targetDir: string; packagePath: string; ok: boolean;
+  }): void {
+    this.db.query(
+      `INSERT INTO handoffs (source_type, source_id, mode, provider, target_dir, package_path, ok, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(row.sourceType, row.sourceId, row.mode, row.provider, row.targetDir, row.packagePath, row.ok ? 1 : 0, Date.now());
+  }
+
+  handoffsFor(sourceType: string, sourceId: string): Array<{
+    mode: string; provider: string | null; targetDir: string; packagePath: string; ok: boolean; createdAt: number;
+  }> {
+    const rows = this.db.query(
+      `SELECT mode, provider, target_dir, package_path, ok, created_at
+       FROM handoffs WHERE source_type = ? AND source_id = ? ORDER BY created_at DESC LIMIT 10`,
+    ).all(sourceType, sourceId) as Array<{
+      mode: string; provider: string | null; target_dir: string; package_path: string; ok: number; created_at: number;
+    }>;
+    return rows.map((row) => ({
+      mode: row.mode,
+      provider: row.provider,
+      targetDir: row.target_dir,
+      packagePath: row.package_path,
+      ok: row.ok !== 0,
+      createdAt: row.created_at,
+    }));
   }
 
   todoSnapshotsForSession(sessionId: string): TodoSnapshotRecord[] {
