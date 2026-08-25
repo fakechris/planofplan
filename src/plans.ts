@@ -280,7 +280,10 @@ export function materializePlanFiles(store: Store, now = Date.now()): number {
         continue; // 竞态:刚消失
       }
       const prior = existing.get(path);
+      // repo 为 NULL 的存量行(非 git 目录修复前入库)要重推导归属,
+      // 不能被 mtime 门控拦住——否则永远挤在「(非 git 目录)」一组里
       if (prior && prior.missingSince == null && prior.lastSnapshotId
+        && prior.repo != null
         && prior.lastSnapshotMtimeMs != null
         && Math.abs(prior.lastSnapshotMtimeMs - stat.mtimeMs) < 1) {
         store.touchPlanFile(prior.id, now); // 内容未变,只续命
@@ -303,7 +306,9 @@ export function materializePlanFiles(store: Store, now = Date.now()): number {
         title: parsed.title,
         goal: parsed.goal,
         currentPhase: parsed.currentPhase,
-        repo: repoOf(dir),
+        // 目录即项目:非 git 的计划目录以发现根为身份(url=git remote →
+        // git root → root 路径),与 session_repos/workRepoOf 同一套纪律
+        repo: repoOf(dir) ?? root,
         mtimeMs: stat.mtimeMs,
         rawHash,
         sections: parsed.sections,
