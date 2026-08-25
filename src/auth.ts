@@ -33,6 +33,11 @@ export function writeCredential(id: string, value: string): void {
   chmodSync(file, 0o600);
 }
 
+/** 已存凭据的 id 列表(设置页展示用)。 */
+export function readAllCredentialIds(): string[] {
+  return Object.keys(loadAll()).sort();
+}
+
 export function deleteCredential(id: string): void {
   const all = loadAll();
   delete all[id];

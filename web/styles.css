@@ -465,6 +465,15 @@ td { font-variant-numeric: tabular-nums; }
   color: var(--text-soft); font-size: var(--text-sm); line-height: 1.55;
   white-space: pre-wrap; word-break: break-word; max-height: 160px; overflow: hidden;
 }
+/* 设置页 + 配置警告横幅 */
+.config-warnings {
+  margin: 0 0 12px; padding: 8px 12px; border-radius: var(--radius-card);
+  background: color-mix(in srgb, var(--accent-2) 12%, var(--surface));
+  color: var(--accent-2); font-size: var(--text-xs);
+}
+.settings-workbench { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 16px; align-items: start; }
+@media (max-width: 900px) { .settings-workbench { grid-template-columns: 1fr; } }
+.settings-col .attr-row { flex-wrap: wrap; gap: 6px; }
 /* Handoff 交接面板 */
 .handoff-btn { margin: var(--space-3) 0; }
 .handoff-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; margin-bottom: var(--space-2); }

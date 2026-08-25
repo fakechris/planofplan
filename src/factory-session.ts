@@ -34,6 +34,8 @@ export interface FactoryBrowserSession {
 }
 
 let currentSession: FactoryBrowserSession | null = null;
+// 多账号:按 slug 隔离的内存会话(默认 factory 保持单例语义)
+const sessionsBySlug = new Map<string, FactoryBrowserSession>();
 
 interface PersistedFactorySession {
   refreshToken: string;
@@ -42,8 +44,9 @@ interface PersistedFactorySession {
   userSub?: string | null;
 }
 
-function persistedSessionPath(): string {
-  return join(ensureHome(), 'factory-session.json');
+function persistedSessionPath(slug = 'factory'): string {
+  // 多账号:非默认 slug 用独立会话文件
+  return join(ensureHome(), slug === 'factory' ? 'factory-session.json' : `factory-session-${slug}.json`);
 }
 
 function cookieFingerprint(cookieHeader: string): string | null {
@@ -69,9 +72,9 @@ function jwtSubject(token: string | null | undefined): string | null {
   }
 }
 
-function readPersistedSession(): PersistedFactorySession | null {
+function readPersistedSession(slug = 'factory'): PersistedFactorySession | null {
   try {
-    const raw = JSON.parse(readFileSync(persistedSessionPath(), 'utf8')) as Partial<PersistedFactorySession>;
+    const raw = JSON.parse(readFileSync(persistedSessionPath(slug), 'utf8')) as Partial<PersistedFactorySession>;
     if (typeof raw.refreshToken !== 'string' || !raw.refreshToken.trim()) return null;
     return {
       refreshToken: raw.refreshToken.trim(),
@@ -89,8 +92,9 @@ function persistRefreshToken(
   organizationId: string | null,
   cookieHeader: string,
   userSub: string | null,
+  slug = 'factory',
 ): void {
-  const file = persistedSessionPath();
+  const file = persistedSessionPath(slug);
   writeFileSync(file, JSON.stringify({
     refreshToken,
     organizationId,
@@ -106,6 +110,7 @@ export function acceptFactoryBrowserCookies(
   workos?: { accessToken?: string | null; refreshToken?: string | null },
   organizationId?: string | null,
   workosCookies?: FactoryBrowserCookie[],
+  slug = 'factory',
 ): boolean {
   const selected = cookies.filter((cookie) =>
     FACTORY_SESSION_COOKIE_NAMES.has(cookie.name) && cookie.value.trim());
@@ -116,7 +121,7 @@ export function acceptFactoryBrowserCookies(
     .map((cookie) => `${cookie.name}=${cookie.value}`)
     .join('; ') || null;
   const selectedCookieHeader = selected.map((cookie) => `${cookie.name}=${cookie.value}`).join('; ');
-  const persisted = readPersistedSession();
+  const persisted = readPersistedSession(slug);
   const persistedMatches = persisted != null
     && (!persisted.cookieFingerprint || persisted.cookieFingerprint === cookieFingerprint(selectedCookieHeader));
   // WorkOS refresh token 一次性轮换：daemon 兑换会消耗浏览器 localStorage 里的 token。
@@ -150,6 +155,7 @@ export function acceptFactoryBrowserCookies(
     workosCookieHeader,
     source,
   };
+  sessionsBySlug.set(slug, currentSession);
   return true;
 }
 
@@ -159,28 +165,53 @@ export function updateFactoryWorkOSSession(tokens: {
   refreshTokenFallback?: string | null;
   organizationId?: string | null;
   workosCookie?: string | null;
-}): void {
-  if (!currentSession) return;
-  currentSession = {
-    ...currentSession,
-    workosAccessToken: tokens.accessToken?.trim() || currentSession.workosAccessToken,
-    workosRefreshToken: tokens.refreshToken?.trim() || currentSession.workosRefreshToken,
-    workosRefreshTokenFallback: tokens.refreshTokenFallback?.trim() || currentSession.workosRefreshTokenFallback,
-    organizationId: tokens.organizationId?.trim() || currentSession.organizationId,
-    workosCookieHeader: tokens.workosCookie?.trim() || currentSession.workosCookieHeader,
-  };
+  sessionSlug?: string | null;
+}, slug?: string): void {
+  const effectiveSlug = slug ?? tokens.sessionSlug ?? 'factory';
+  const session = sessionsBySlug.get(effectiveSlug) ?? currentSession;
+  if (!session) return;
+  sessionsBySlug.set(effectiveSlug, {
+    ...session,
+    workosAccessToken: tokens.accessToken?.trim() || session.workosAccessToken,
+    workosRefreshToken: tokens.refreshToken?.trim() || session.workosRefreshToken,
+    workosRefreshTokenFallback: tokens.refreshTokenFallback?.trim() || session.workosRefreshTokenFallback,
+    organizationId: tokens.organizationId?.trim() || session.organizationId,
+    workosCookieHeader: tokens.workosCookie?.trim() || session.workosCookieHeader,
+  });
+  if (effectiveSlug === 'factory') currentSession = sessionsBySlug.get('factory') ?? currentSession;
   // WorkOS refresh token 一次性轮换。这里必须无条件回写：从持久化恢复的会话
   // （source='persisted'，即 daemon 重启后的唯一形态）兑换会消耗文件里的 token，
   // 新 token 只存在于内存；若不回写，daemon 一旦再重启就拿着已消耗的 token
   // 永久 400。手动 API key 凭据不带 refreshToken，不会走到这里。
   const rotated = tokens.refreshToken?.trim();
   if (rotated) {
-    const userSub = jwtSubject(tokens.accessToken) ?? readPersistedSession()?.userSub ?? null;
-    persistRefreshToken(rotated, currentSession.organizationId, currentSession.cookieHeader, userSub);
+    const session = sessionsBySlug.get(effectiveSlug) ?? currentSession;
+    if (session) {
+      const userSub = jwtSubject(tokens.accessToken) ?? readPersistedSession(effectiveSlug)?.userSub ?? null;
+      persistRefreshToken(rotated, session.organizationId, session.cookieHeader, userSub, effectiveSlug);
+    }
   }
 }
 
-export function getFactoryBrowserSession(): FactoryBrowserSession | null {
+export function getFactoryBrowserSession(slug = 'factory'): FactoryBrowserSession | null {
+  if (slug !== 'factory') {
+    if (!sessionsBySlug.has(slug)) {
+      const persisted = readPersistedSession(slug);
+      if (persisted) {
+        sessionsBySlug.set(slug, {
+          cookieHeader: '',
+          bearerToken: null,
+          workosAccessToken: null,
+          workosRefreshToken: persisted.refreshToken,
+          workosRefreshTokenFallback: null,
+          organizationId: persisted.organizationId,
+          workosCookieHeader: null,
+          source: 'persisted',
+        });
+      }
+    }
+    return sessionsBySlug.get(slug) ?? null;
+  }
   if (!currentSession) {
     const persisted = readPersistedSession();
     if (persisted) {
@@ -199,8 +230,9 @@ export function getFactoryBrowserSession(): FactoryBrowserSession | null {
   return currentSession;
 }
 
-export function clearFactoryBrowserSession(): void {
-  currentSession = null;
+export function clearFactoryBrowserSession(slug = 'factory'): void {
+  sessionsBySlug.delete(slug);
+  if (slug === 'factory') currentSession = null;
 }
 
 export function isFactorySessionCookieName(name: string): boolean {

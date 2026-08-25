@@ -23,6 +23,7 @@
       <button type="button" role="tab" data-tab="planfiles" aria-selected="false">计划</button>
       <button type="button" role="tab" data-tab="graph" aria-selected="false">图谱</button>
       <button type="button" role="tab" data-tab="usage" aria-selected="false">Token</button>
+      <button type="button" role="tab" data-tab="settings" aria-selected="false">设置</button>
     </nav>
     <div class="header-meta">
       <span id="buildIdentity" class="build-identity" title="当前运行构建"></span>
@@ -45,6 +46,7 @@
       </div>
       <div id="heroClock" class="hero-clock"></div>
     </section>
+    <p id="configWarnings" class="config-warnings" hidden></p>
     <section id="summary" class="summary"></section>
     <main id="grid" class="grid"></main>
   </section>
@@ -166,6 +168,41 @@
         <div class="usage-empty">
           <strong>从左边选一个计划文件</strong>
           <span>看快照时间线(checkbox 进度 + 所在 commit)、当前阶段和谁在推进。</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="panel-settings" class="tab-panel" data-panel="settings" hidden>
+    <section class="hero">
+      <div>
+        <p class="eyebrow">SETTINGS</p>
+        <h1>设置</h1>
+        <p class="hero-copy">plans 与凭据(多账号:同 provider 加多个 plan,每个配自己的 key)、LLM 摘要模型。</p>
+      </div>
+    </section>
+    <div class="session-workbench settings-workbench">
+      <div class="settings-col">
+        <div class="session-attrs">
+          <h3>Plans</h3>
+          <div id="settingsPlanList"></div>
+          <div class="handoff-actions" style="margin-top:12px">
+            <input id="newPlanSlug" type="text" placeholder="slug(kimi-work)" size="12" />
+            <select id="newPlanAdapter" aria-label="adapter"></select>
+            <button type="button" class="secondary-btn" id="addPlanBtn">添加</button>
+          </div>
+          <div id="settingsResult" class="muted"></div>
+        </div>
+      </div>
+      <div class="settings-col">
+        <div class="session-attrs">
+          <h3>LLM 摘要(handoff)</h3>
+          <div class="handoff-llm">
+            <select id="settingsLlmProvider" aria-label="LLM provider"></select>
+            <input id="settingsLlmModel" type="text" placeholder="模型 id" size="14" />
+            <button type="button" class="secondary-btn" id="saveLlmBtn">保存</button>
+          </div>
+          <div class="muted" id="settingsLlmHint"></div>
         </div>
       </div>
     </div>
