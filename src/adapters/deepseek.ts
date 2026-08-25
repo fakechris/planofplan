@@ -26,6 +26,7 @@ interface BalanceInfo {
   total_balance?: string;
   granted_balance?: string;
   topped_up_balance?: string;
+  /** Optional — DeepSeek returns this on some account types but not others. */
   available_balance?: string;
 }
 
@@ -66,9 +67,16 @@ export function normalizeDeepseekBalance(
   // 多币种账户：选第一笔；其余附在 note 字段，便于调试。
   const first = infos[0]!;
   const total = num(first.total_balance);
-  const available = num(first.available_balance);
+  const granted = num(first.granted_balance);
+  const toppedUp = num(first.topped_up_balance);
+  // available_balance 在部分账号类型下不返回；fallback 到 granted + topped_up，
+  // 再不行就用 total（账户里全是可用余额，没有"已用"概念）。
+  const available =
+    num(first.available_balance) ??
+    (granted != null && toppedUp != null ? granted + toppedUp : null) ??
+    total;
   if (total == null || available == null) {
-    throw new AdapterError('parse', 'DeepSeek 余额字段缺失（total_balance / available_balance）');
+    throw new AdapterError('parse', 'DeepSeek 余额字段缺失（total_balance）');
   }
   const usedRaw = total - available;
   const used = Math.max(0, usedRaw);

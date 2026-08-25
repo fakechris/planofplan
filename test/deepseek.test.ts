@@ -80,6 +80,35 @@ describe('normalizeDeepseekBalance', () => {
       expect((e as AdapterError).kind).toBe('parse');
     }
   });
+
+  test('available_balance 缺失：用 granted + topped_up 兜底', () => {
+    // DeepSeek 部分账号类型不返回 available_balance；实际响应：
+    // total_balance ≈ granted_balance + topped_up_balance
+    const raw = {
+      is_available: true,
+      balance_infos: [{
+        currency: 'CNY',
+        total_balance: '1861.70',
+        granted_balance: '1854.06',
+        topped_up_balance: '7.63',
+      }],
+    };
+    const result = normalizeDeepseekBalance(raw);
+    // available = 1854.06 + 7.63 ≈ 1861.69，used ≈ 0.01（rounding）
+    expect(result.window.total).toBe(1861.7);
+    expect(result.window.used).toBeLessThan(0.05);
+    expect(result.window.percentage).toBeLessThan(1);
+  });
+
+  test('available_balance + granted/topped_up 都缺：用 total 兜底，used=0', () => {
+    const raw = {
+      balance_infos: [{ currency: 'CNY', total_balance: '100' }],
+    };
+    const result = normalizeDeepseekBalance(raw);
+    expect(result.window.total).toBe(100);
+    expect(result.window.used).toBe(0);
+    expect(result.window.percentage).toBe(0);
+  });
 });
 
 describe('deepseekAdapter', () => {
