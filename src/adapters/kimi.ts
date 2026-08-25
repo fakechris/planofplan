@@ -468,24 +468,30 @@ export async function readKimiWebSession(
   allowCookieFallback = true,
   allowDesktopFallback = true,
 ): Promise<{ token: string; source: string } | null> {
+  // 多账号纪律:非默认 slug 的会话只能来自它自己的会话文件/刷新链——
+  // env token 与 Safari localStorage 是机器级「默认账号」渠道,第二账号
+  // 借道会读到别人的号
+  const primary = planSlug === 'kimi';
   const env = process.env.KIMI_AUTH_TOKEN;
-  if (env && env.trim()) return { token: env.trim(), source: 'env' };
+  if (primary && env && env.trim()) return { token: env.trim(), source: 'env' };
 
   let lsRefreshToken: string | null = null;
   let lsSub: string | null = null;
-  try {
-    const tokens = await readSafariKimiWebTokens();
-    lsRefreshToken = tokens.refreshToken;
-    const claims = tokens.accessToken ? jwtClaims(tokens.accessToken) : {};
-    if (typeof claims.exp !== 'number' || claims.exp * 1000 >= Date.now() + 60_000) {
-      if (tokens.accessToken) return { token: tokens.accessToken, source: 'safari-localstorage' };
+  if (primary) {
+    try {
+      const tokens = await readSafariKimiWebTokens();
+      lsRefreshToken = tokens.refreshToken;
+      const claims = tokens.accessToken ? jwtClaims(tokens.accessToken) : {};
+      if (typeof claims.exp !== 'number' || claims.exp * 1000 >= Date.now() + 60_000) {
+        if (tokens.accessToken) return { token: tokens.accessToken, source: 'safari-localstorage' };
+      }
+      if (typeof claims.sub === 'string' && claims.sub) lsSub = claims.sub;
+    } catch {
+      // localStorage 不可读时继续走刷新链/既有路径
     }
-    if (typeof claims.sub === 'string' && claims.sub) lsSub = claims.sub;
-  } catch {
-    // localStorage 不可读时继续走刷新链/既有路径
   }
 
-  const persisted = readPersistedWebSession();
+  const persisted = readPersistedWebSession(planSlug);
   if (persisted?.accessToken) {
     const claims = jwtClaims(persisted.accessToken);
     const persistedSub = typeof claims.sub === 'string' && claims.sub ? claims.sub : persisted.userSub;
@@ -512,7 +518,7 @@ export async function readKimiWebSession(
       accessToken: refreshed.accessToken,
       refreshToken: refreshed.refreshToken ?? candidate,
       userSub,
-    });
+    }, planSlug);
     return { token: refreshed.accessToken, source: 'kimi-web-session' };
   }
 
@@ -534,13 +540,14 @@ interface KimiWebSessionFile {
   userSub: string | null;
 }
 
-function kimiWebSessionPath(): string {
-  return join(ensureHome(), 'kimi-web-session.json');
+function kimiWebSessionPath(planSlug = 'kimi'): string {
+  // 多账号:非默认 slug 用独立会话文件,避免两个账号互相覆盖刷新链
+  return join(ensureHome(), planSlug === 'kimi' ? 'kimi-web-session.json' : `kimi-web-session-${planSlug}.json`);
 }
 
-function readPersistedWebSession(): KimiWebSessionFile | null {
+function readPersistedWebSession(planSlug = 'kimi'): KimiWebSessionFile | null {
   try {
-    const raw = JSON.parse(readFileSync(kimiWebSessionPath(), 'utf8')) as Partial<KimiWebSessionFile>;
+    const raw = JSON.parse(readFileSync(kimiWebSessionPath(planSlug), 'utf8')) as Partial<KimiWebSessionFile>;
     if (typeof raw.refreshToken !== 'string' || !raw.refreshToken.trim()) return null;
     return {
       accessToken: typeof raw.accessToken === 'string' ? raw.accessToken : '',
@@ -552,8 +559,8 @@ function readPersistedWebSession(): KimiWebSessionFile | null {
   }
 }
 
-function persistWebSession(session: KimiWebSessionFile): void {
-  const file = kimiWebSessionPath();
+function persistWebSession(session: KimiWebSessionFile, planSlug = 'kimi'): void {
+  const file = kimiWebSessionPath(planSlug);
   mkdirSync(dirname(file), { recursive: true });
   const temporary = `${file}.${process.pid}.tmp`;
   writeFileSync(temporary, JSON.stringify(session) + '\n', { mode: 0o600 });

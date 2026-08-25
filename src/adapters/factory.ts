@@ -399,6 +399,7 @@ async function credentialWithWorkOSAccessToken(
     refreshToken: stringValue(tokens.refresh_token),
     refreshTokenFallback: refreshToken,
     organizationId: credential.organizationId,
+    sessionSlug: credential.sessionSlug,
     workosCookie: credential.workosCookie,
   });
   return {
@@ -434,7 +435,7 @@ async function refreshFactoryCredential(credential: Credential): Promise<Credent
  */
 function clearSessionOnAuthFailure(error: unknown, credential: Credential): void {
   if (error instanceof AdapterError && error.kind === 'auth' && credential.source.startsWith('browser:')) {
-    clearFactoryBrowserSession();
+    clearFactoryBrowserSession(credential.sessionSlug ?? 'factory');
   }
 }
 
@@ -451,10 +452,11 @@ export const factoryAdapter: PlanAdapter = {
     }
     const apiKey = apiKeyFromEnvironment();
     if (apiKey) return { kind: 'bearer', value: apiKey, source: 'env' };
-    const session = getFactoryBrowserSession();
+    const session = getFactoryBrowserSession(ctx.plan.slug);
     if (session) {
       return {
         kind: 'bearer',
+        sessionSlug: ctx.plan.slug,
         value: session.workosAccessToken
           ?? (session.workosRefreshToken ? '' : session.bearerToken ?? ''),
         cookie: session.cookieHeader,

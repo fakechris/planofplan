@@ -126,8 +126,12 @@ final class PanelView: NSView {
     static func height(plans: [Plan]) -> CGFloat {
         let maxWindows = CGFloat(max(1, plans.map { $0.windows.count }.max() ?? 1))
         let providerHeight = 278 + maxWindows * 64
-        let indexHeight = CGFloat(324)
-        let cappedIndex = min(indexHeight, 480)
+        // 总览页动态高度:头部 + 前 3 个富行 + 其余每 plan 一行紧凑摘要
+        // (全量展示;上限 720 防 plan 极多时面板失控)
+        let richRows = min(3, plans.count)
+        let compactRows = max(0, plans.count - 3)
+        let indexHeight = 96 + CGFloat(richRows) * 82 + CGFloat(compactRows) * 22 + 52
+        let cappedIndex = min(indexHeight, 720)
         return 12 + max(providerHeight, cappedIndex)
     }
 
@@ -259,7 +263,6 @@ final class PanelView: NSView {
             return pa > pb
         }
         let featured = Array(sorted.prefix(3))
-        let remainingCount = max(0, rows.count - featured.count)
 
         for planIndex in featured {
             let plan = plans[planIndex]
@@ -320,10 +323,24 @@ final class PanelView: NSView {
             y -= 8
         }
 
-        // 其余 plan 摘要
-        if remainingCount > 0 {
-            drawText("其余 \(remainingCount) 个 plan 正常", at: NSPoint(x: contentLeft, y: y - 4),
-                     font: .systemFont(ofSize: 10), color: textTertiary)
+        // 其余 plan:每行紧凑摘要(状态点 + 名称 + 摘要值),不再是「其余 N 个正常」
+        // 一句话——健康与否都要有数据可看(用户实测反馈)
+        for planIndex in sorted.dropFirst(3) {
+            let plan = plans[planIndex]
+            if y < cardRect.minY + 56 { break }
+            let rowRect = NSRect(x: contentLeft, y: y - 18, width: contentWidth, height: 20)
+            indexRowRects.append((rect: rowRect, planIndex: planIndex))
+            let statusColor = color(forStatus: plan.status)
+            statusColor.setFill()
+            NSBezierPath(ovalIn: NSRect(x: contentLeft, y: y - 8, width: 5, height: 5)).fill()
+            drawText(plan.name, at: NSPoint(x: contentLeft + 12, y: y - 11),
+                     font: .systemFont(ofSize: 10.5, weight: .medium), color: textSecondary)
+            let value = PanelView.indexSummaryValue(for: plan)
+            let isBalance = plan.windows.contains(where: PanelView.isBalanceWindow)
+            drawRightAligned(value, y: y - 11, right: cardRect.maxX - 16,
+                             font: .monospacedDigitSystemFont(ofSize: 11, weight: isBalance ? .semibold : .bold),
+                             color: isBalance ? textPrimary : textSecondary)
+            y -= 22
         }
     }
 
@@ -362,38 +379,47 @@ final class PanelView: NSView {
         } else {
             for window in plan.windows {
                 let pct = window.percentage
+                let balance = PanelView.isBalanceWindow(window)
                 let remaining = pct.map { 100 - $0 }
                 let levelColor = color(forRemaining: remaining)
 
                 drawText(window.label, at: NSPoint(x: contentLeft, y: y),
                          font: .systemFont(ofSize: 11, weight: .semibold), color: textSecondary)
-                if let resetAt = window.resetAt {
+                // 余额型没有「恢复」概念,整行不画(与 dashboard 一致)
+                if !balance, let resetAt = window.resetAt {
                     drawRightAligned("恢复 " + PanelView.shortDateTime(resetAt), y: y, right: cardRect.maxX - 16,
                                      font: .systemFont(ofSize: 9.5), color: textTertiary)
                 }
                 y -= 21
 
                 let unlimited = window.note == "不限量" && pct == nil
-                let pctText = unlimited ? "∞" : (pct == nil ? "--%" : "\(Int(pct!.rounded()))%")
+                // 余额型:主数字 = 金额本身(大号白字,与 dashboard 的余额强化一致);
+                // 百分比型:主数字 = 百分比
+                let pctText = balance
+                    ? PanelView.windowValueText(window)
+                    : (unlimited ? "∞" : (pct == nil ? "--%" : "\(Int(pct!.rounded()))%"))
                 let pctAttr = NSAttributedString(string: pctText, attributes: [
                     .font: NSFont.monospacedDigitSystemFont(ofSize: 19, weight: .bold),
-                    .foregroundColor: unlimited ? okColor : levelColor,
+                    .foregroundColor: (balance || unlimited) ? textPrimary : levelColor,
                 ])
                 pctAttr.draw(at: NSPoint(x: contentLeft, y: y - 3))
                 let pctWidth = pctAttr.size().width
 
-                var fraction = ""
-                if let used = window.used, let total = window.total {
-                    fraction = PanelView.shortNumber(used) + " / " + PanelView.shortNumber(total)
-                } else if let used = window.used {
-                    fraction = PanelView.shortNumber(used)
-                }
-                if !fraction.isEmpty {
-                    drawText(fraction, at: NSPoint(x: contentLeft + pctWidth + 8, y: y + 2),
-                             font: .systemFont(ofSize: 10), color: textTertiary)
+                // 余额型不重复 used / total(金额已在主数字)
+                if !balance {
+                    var fraction = ""
+                    if let used = window.used, let total = window.total {
+                        fraction = PanelView.shortNumber(used) + " / " + PanelView.shortNumber(total)
+                    } else if let used = window.used {
+                        fraction = PanelView.shortNumber(used)
+                    }
+                    if !fraction.isEmpty {
+                        drawText(fraction, at: NSPoint(x: contentLeft + pctWidth + 8, y: y + 2),
+                                 font: .systemFont(ofSize: 10), color: textTertiary)
+                    }
                 }
 
-                if let countdown = window.resetAt.map({ PanelView.countdownText(until: $0) }) {
+                if !balance, let countdown = window.resetAt.map({ PanelView.countdownText(until: $0) }) {
                     drawRightAligned(countdown, y: y, right: cardRect.maxX - 16,
                                      font: .monospacedDigitSystemFont(ofSize: 11, weight: .semibold),
                                      color: textPrimary)
@@ -637,6 +663,52 @@ final class PanelView: NSView {
         f.usesGroupingSeparator = true
         f.maximumFractionDigits = 0
         return f.string(from: NSNumber(value: value)) ?? "\(Int(value))"
+    }
+
+    // ── 余额型 provider 语义(与 dashboard formatWindowValue 对齐)──────
+    // deepseek 等:used == total 且无 percentage → 展示余额本身,不画
+    // "--%"、不重复 used/total、不存在「恢复」概念。
+
+    // 纯函数标 nonisolated:要作为谓词传给 first(where:) 等 stdlib 参数
+    nonisolated static func isBalanceWindow(_ w: Window) -> Bool {
+        guard let used = w.used, let total = w.total, w.percentage == nil else { return false }
+        return abs(used - total) < 1e-9
+    }
+
+    nonisolated static func currencySymbol(_ unit: String?) -> String? {
+        switch (unit ?? "").uppercased() {
+        case "CNY", "RMB", "¥": return "¥"
+        case "USD", "$": return "$"
+        default: return nil
+        }
+    }
+
+    /// 窗口数值文本(货币带符号两位小数;其余走 shortNumber)。
+    static func windowValueText(_ w: Window) -> String {
+        guard let used = w.used else { return "--" }
+        guard let sym = currencySymbol(w.unit) else { return shortNumber(used) }
+        let f = NumberFormatter()
+        f.numberStyle = .decimal
+        f.usesGroupingSeparator = true
+        f.minimumFractionDigits = 2
+        f.maximumFractionDigits = 2
+        let body = f.string(from: NSNumber(value: used)) ?? String(format: "%.2f", used)
+        return sym + body
+    }
+
+    /// 总览紧凑行右侧的摘要值:最紧窗口的百分比 / 余额 / ∞ / --。
+    static func indexSummaryValue(for plan: Plan) -> String {
+        if let tight = plan.windows.filter({ $0.percentage != nil })
+            .max(by: { ($0.percentage ?? 0) < ($1.percentage ?? 0) }) {
+            return "\(Int(tight.percentage!.rounded()))%"
+        }
+        if let balance = plan.windows.first(where: isBalanceWindow) {
+            return windowValueText(balance)
+        }
+        if plan.windows.contains(where: { $0.note == "不限量" && $0.percentage == nil }) {
+            return "∞"
+        }
+        return "--"
     }
 
     /// Claude Code 闲置超过 24h 时返回 "25h" / "3d"，否则 nil。

@@ -5,7 +5,8 @@ import type { AppConfig } from './config.ts';
 import type { Store } from './db.ts';
 import type { Scheduler } from './core.ts';
 import { buildOverview } from './core.ts';
-import { writeCredential, deleteCredential } from './auth.ts';
+import { registeredAdapters } from './adapters/index.ts';
+import { writeCredential, deleteCredential, readAllCredentialIds } from './auth.ts';
 import { acceptKimiBrowserCookies, refreshKimiBrowserSession } from './adapters/kimi.ts';
 import { KIMI_BROWSER, KIMI_BROWSERS, type KimiBrowser } from './browser-cookies.ts';
 import { acceptFactoryBrowserCookies } from './factory-session.ts';
@@ -17,8 +18,8 @@ import { pickRequirement } from './motivation.ts';
 import { nameOfUrl, sessionProjectNames } from './repos.ts';
 import { buildHandoffPackage, deliverHandoff, handoffProviders } from './handoff.ts';
 import { LLM_PROVIDERS, llmKeyFor, llmProviderStatus, synthesizeHandoffSummary, withSummary } from './llm.ts';
-import { loadConfig, saveLlmConfig } from './config.ts';
-import type { ProjectAgentStat, ProjectListItem, RequirementRecord } from './types.ts';
+import { loadConfig, saveLlmConfig, savePlansConfig } from './config.ts';
+import type { PlanConfig, ProjectAgentStat, ProjectListItem, RequirementRecord } from './types.ts';
 import { readTranscript } from './transcript.ts';
 import { launchResume } from './resume.ts';
 import { getStartupSettings, setLaunchOnStartup } from './startup.ts';
@@ -80,7 +81,20 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
   };
 
   app.get('/api/overview', (c) => {
-    return c.json(buildOverview(store, cfg.plans, Date.now()));
+    const overview = buildOverview(store, cfg.plans, Date.now());
+    // 多账号校验:同 adapter 多 plan 时,未设 credRef 的会共用自动检测
+    // 渠道(env/浏览器)——两个号读成同一个。提示而不是拒绝。
+    const byAdapter = new Map<string, number>();
+    for (const plan of cfg.plans) byAdapter.set(plan.adapter, (byAdapter.get(plan.adapter) ?? 0) + 1);
+    const warnings: string[] = [];
+    for (const [adapter, count] of byAdapter) {
+      if (count < 2) continue;
+      const missing = cfg.plans.filter((plan) => plan.adapter === adapter && !plan.credRef).map((plan) => plan.slug);
+      if (missing.length > 0) {
+        warnings.push(`${adapter} 有 ${count} 个 plan,其中 ${missing.join('/')} 未设置专属凭据(credRef),会与其它账号共用自动检测渠道`);
+      }
+    }
+    return c.json({ ...overview, warnings });
   });
 
   app.get('/api/build-info', (c) => {
@@ -649,6 +663,75 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     });
   });
 
+  // ── 设置:plans 增删改 + auth key(多账号入口)──────────────────
+
+  app.get('/api/config', (c) => {
+    return c.json({
+      plans: cfg.plans,
+      adapters: registeredAdapters(),
+      credentials: readAllCredentialIds(),
+    });
+  });
+
+  app.put('/api/config/plans', async (c) => {
+    const body = await c.req.json().catch(() => null) as {
+      slug?: string; name?: string; adapter?: string;
+      enabled?: boolean; pollIntervalSec?: number; credRef?: string | null;
+    } | null;
+    if (!body?.slug || !/^[0-9a-z_-]{1,32}$/i.test(body.slug)) {
+      return c.json({ ok: false, error: 'slug 必填(字母数字-_，≤32 字符)' }, 400);
+    }
+    if (!body.adapter || !registeredAdapters().includes(body.adapter)) {
+      return c.json({ ok: false, error: `adapter 必须是:${registeredAdapters().join('/')}` }, 400);
+    }
+    const existing = cfg.plans.find((plan) => plan.slug === body.slug);
+    const next: PlanConfig = {
+      slug: body.slug,
+      name: body.name?.trim() || body.slug,
+      adapter: body.adapter,
+      enabled: body.enabled ?? existing?.enabled ?? true,
+      pollIntervalSec: Math.max(15, body.pollIntervalSec ?? existing?.pollIntervalSec ?? 60),
+      credRef: body.credRef ?? existing?.credRef ?? null,
+      extra: existing?.extra ?? {},
+    };
+    cfg.plans = existing
+      ? cfg.plans.map((plan) => (plan.slug === body.slug ? next : plan))
+      : [...cfg.plans, next];
+    savePlansConfig(cfg.plans);
+    store.syncPlan(next);
+    return c.json({ ok: true, plans: cfg.plans });
+  });
+
+  app.delete('/api/config/plans/:slug', (c) => {
+    const slug = c.req.param('slug');
+    if (!cfg.plans.some((plan) => plan.slug === slug)) {
+      return c.json({ ok: false, error: 'unknown plan' }, 404);
+    }
+    cfg.plans = cfg.plans.filter((plan) => plan.slug !== slug);
+    savePlansConfig(cfg.plans);
+    store.deletePlan(slug);
+    return c.json({ ok: true, plans: cfg.plans });
+  });
+
+  // plan 专属凭据:存 key(credentials.json)并把 credRef 指过来;key 空串=清除
+  app.post('/api/config/plans/:slug/auth', async (c) => {
+    const slug = c.req.param('slug');
+    const plan = cfg.plans.find((row) => row.slug === slug);
+    if (!plan) return c.json({ ok: false, error: 'unknown plan' }, 404);
+    const body = await c.req.json().catch(() => null) as { key?: string } | null;
+    const key = body?.key?.trim() ?? '';
+    if (key) {
+      writeCredential(slug, key);
+      plan.credRef = slug;
+    } else {
+      deleteCredential(slug);
+      plan.credRef = null;
+    }
+    savePlansConfig(cfg.plans);
+    store.syncPlan(plan);
+    return c.json({ ok: true, credRef: plan.credRef });
+  });
+
   app.post('/api/llm/config', async (c) => {
     const body = await c.req.json().catch(() => ({})) as {
       provider?: string; model?: string; baseUrl?: string;
@@ -842,7 +925,8 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
         : []
     );
     let accepted = false;
-    if (planSlug === 'factory') {
+    const importPlan = store.getPlan(planSlug);
+    if (planSlug === 'factory' || importPlan?.adapter === 'factory') {
       const workosCookies = (body.workos?.cookies ?? []).flatMap((cookie) =>
         typeof cookie.name === 'string' && typeof cookie.value === 'string'
           ? [{ ...cookie, name: cookie.name, value: cookie.value }]
@@ -854,6 +938,7 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
         body.workos,
         body.workos?.organizationId,
         workosCookies,
+        planSlug,
       );
     } else if (planSlug === 'kimi') {
       // Safari can retain more than one kimi-auth record while a session is

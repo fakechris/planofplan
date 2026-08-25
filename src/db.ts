@@ -676,6 +676,10 @@ export class Store {
   }
 
   /** 配置 → db plans 表（INSERT OR IGNORE；已存在时只更新非运行时字段） */
+  deletePlan(slug: string): void {
+    this.db.query('DELETE FROM plans WHERE slug = ?').run(slug);
+  }
+
   syncPlan(cfg: PlanConfig): void {
     const existing = this.getPlan(cfg.slug);
     const now = Date.now();

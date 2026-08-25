@@ -98,7 +98,14 @@ function savePlanOrder(slugs) {
 
 function applyOrder(plans) {
   const order = loadPlanOrder();
-  if (!order.length) return plans;
+  if (!order.length) {
+    // 无自定义顺序时默认按 adapter 分组:同 provider 的多账号卡挨着
+    // (多账号支持后,kimi-personal/kimi-work 不再散落各处)
+    const rank = new Map([...new Set(plans.map((p) => p.adapter))].sort()
+      .map((adapter, i) => [adapter, i]));
+    return [...plans].sort((a, b) => (rank.get(a.adapter) ?? 99) - (rank.get(b.adapter) ?? 99)
+      || String(a.slug).localeCompare(String(b.slug)));
+  }
   const idx = new Map(order.map((slug, i) => [slug, i]));
   return [...plans].sort((a, b) => {
     const ai = idx.has(a.slug) ? idx.get(a.slug) : Number.POSITIVE_INFINITY;
@@ -2373,6 +2380,13 @@ async function render() {
     maybePollSessionIndex(latestSessions);
     if (dragInFlight) return;
     const grid = document.getElementById('grid');
+    // 多账号凭据冲突等配置警告(daemon 侧计算)
+    const warnEl = document.getElementById('configWarnings');
+    if (warnEl) {
+      const warns = latestOverview.warnings || [];
+      warnEl.hidden = warns.length === 0;
+      warnEl.textContent = warns.join('；');
+    }
     const nextGrid = document.createDocumentFragment();
     for (const p of applyOrder(latestOverview.plans)) nextGrid.appendChild(renderPlan(p, now));
     grid.replaceChildren(nextGrid);
@@ -2511,7 +2525,7 @@ document.querySelectorAll('[data-session-view]').forEach((btn) => {
 
 function currentTab() {
   const raw = (location.hash || '#plans').replace('#', '');
-  return ['plans', 'sessions', 'projects', 'requirements', 'planfiles', 'graph', 'usage'].includes(raw.split('/')[0])
+  return ['plans', 'sessions', 'projects', 'requirements', 'planfiles', 'graph', 'usage', 'settings'].includes(raw.split('/')[0])
     ? raw.split('/')[0] : 'plans';
 }
 
@@ -2543,7 +2557,7 @@ function applyRoute() {
 }
 
 function showTab(name) {
-  if (!['plans', 'sessions', 'projects', 'requirements', 'planfiles', 'graph', 'usage'].includes(name)) name = 'plans';
+  if (!['plans', 'sessions', 'projects', 'requirements', 'planfiles', 'graph', 'usage', 'settings'].includes(name)) name = 'plans';
   const hash = `#${name}`;
   // 深链(#tab/id)不回写成裸 #tab,避免路由器丢 id 死循环
   if (location.hash !== hash && !location.hash.startsWith(`${hash}/`)) location.hash = hash;
@@ -2557,6 +2571,7 @@ function showTab(name) {
   if (name === 'projects') void refreshProjects();
   if (name === 'requirements') void refreshRequirements();
   if (name === 'planfiles') void refreshPlans();
+  if (name === 'settings') void refreshSettings();
 }
 
 document.getElementById('graphCandidates')?.addEventListener('change', (event) => {
@@ -2572,6 +2587,133 @@ document.getElementById('graphSubagents')?.addEventListener('change', (event) =>
 document.querySelectorAll('[data-tab]').forEach((btn) => {
   btn.addEventListener('click', () => showTab(btn.getAttribute('data-tab')));
 });
+
+// ── 设置页(plans/凭据/LLM)────────────────────────────────────────
+
+let latestSettings = null;
+
+async function refreshSettings() {
+  if (!document.getElementById('settingsPlanList')) return;
+  try {
+    const [config, llm] = await Promise.all([
+      request('/api/config'),
+      request('/api/llm/config'),
+    ]);
+    latestSettings = { config, llm };
+  } catch {
+    latestSettings = null;
+  }
+  renderSettings();
+}
+
+function renderSettings() {
+  const listEl = document.getElementById('settingsPlanList');
+  const result = () => document.getElementById('settingsResult');
+  if (!listEl) return;
+  if (!latestSettings) {
+    listEl.innerHTML = '<div class="muted">配置读取失败</div>';
+    return;
+  }
+  const { config, llm } = latestSettings;
+  const rows = (config.plans || []).map((plan) => `
+    <div class="attr-row" data-plan-slug="${escapeHtml(plan.slug)}">
+      <span class="attr-path">${escapeHtml(plan.name)}<span class="muted"> · ${escapeHtml(plan.slug)}</span></span>
+      <span class="attr-meta">${escapeHtml(plan.adapter)}${plan.credRef ? ' · 专属凭据' : ' · 自动检测'}${plan.enabled ? '' : ' · 已停用'}</span>
+      <span class="attr-meta">
+        <button type="button" class="secondary-btn" data-auth-plan="${escapeHtml(plan.slug)}" data-auth-set="${plan.credRef ? '0' : '1'}">${plan.credRef ? '换 key' : '配 key'}</button>
+        <button type="button" class="secondary-btn" data-toggle-plan="${escapeHtml(plan.slug)}" data-enabled="${plan.enabled ? '1' : '0'}">${plan.enabled ? '停用' : '启用'}</button>
+        <button type="button" class="secondary-btn" data-del-plan="${escapeHtml(plan.slug)}">删除</button>
+      </span>
+    </div>
+  `).join('');
+  listEl.innerHTML = rows || '<div class="muted">还没有 plan</div>';
+  listEl.querySelectorAll('[data-auth-plan]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const slug = btn.getAttribute('data-auth-plan');
+      const key = prompt(`为 ${slug} 输入 API key(留空=清除专属凭据)`);
+      if (key === null) return;
+      try {
+        await request(`/api/config/plans/${encodeURIComponent(slug)}/auth`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ key }),
+        });
+        result().textContent = key.trim() ? `${slug} 凭据已保存` : `${slug} 已回退自动检测`;
+        void refreshSettings();
+      } catch (error) { result().textContent = `失败:${error.message}`; }
+    });
+  });
+  listEl.querySelectorAll('[data-toggle-plan]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const slug = btn.getAttribute('data-toggle-plan');
+      const plan = (config.plans || []).find((row) => row.slug === slug);
+      if (!plan) return;
+      try {
+        await request('/api/config/plans', {
+          method: 'PUT', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ ...plan, enabled: !(plan.enabled) }),
+        });
+        void refreshSettings();
+      } catch (error) { result().textContent = `失败:${error.message}`; }
+    });
+  });
+  listEl.querySelectorAll('[data-del-plan]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const slug = btn.getAttribute('data-del-plan');
+      if (!confirm(`删除 plan ${slug}?`)) return;
+      try {
+        await request(`/api/config/plans/${encodeURIComponent(slug)}`, { method: 'DELETE' });
+        result().textContent = `${slug} 已删除`;
+        void refreshSettings();
+      } catch (error) { result().textContent = `失败:${error.message}`; }
+    });
+  });
+
+  const adapterSel = document.getElementById('newPlanAdapter');
+  if (adapterSel && adapterSel.options.length === 0) {
+    adapterSel.innerHTML = (config.adapters || []).map((a) => `<option value="${escapeHtml(a)}">${escapeHtml(a)}</option>`).join('');
+  }
+  const providerSel = document.getElementById('settingsLlmProvider');
+  if (providerSel) {
+    providerSel.innerHTML = '<option value="">关闭</option>' + (llm.providers || []).map((p) => (
+      `<option value="${escapeHtml(p.id)}"${llm.llm?.provider === p.id ? ' selected' : ''}>${escapeHtml(p.label)}${p.hasKey ? '' : '(无 key)'}</option>`
+    )).join('');
+  }
+  const modelInput = document.getElementById('settingsLlmModel');
+  if (modelInput && document.activeElement !== modelInput) modelInput.value = llm.llm?.model || '';
+  const hint = document.getElementById('settingsLlmHint');
+  if (hint) hint.textContent = llm.llm?.provider ? `当前:${llm.llm.provider} · ${llm.llm.model || '(默认模型)'}` : '未启用';
+}
+
+document.getElementById('addPlanBtn')?.addEventListener('click', async () => {
+  const slug = document.getElementById('newPlanSlug')?.value?.trim();
+  const adapter = document.getElementById('newPlanAdapter')?.value;
+  const result = () => document.getElementById('settingsResult');
+  if (!slug) { result().textContent = 'slug 必填'; return; }
+  try {
+    await request('/api/config/plans', {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ slug, adapter, name: slug }),
+    });
+    result().textContent = `${slug} 已添加,点「配 key」绑定账号凭据`;
+    document.getElementById('newPlanSlug').value = '';
+    void refreshSettings();
+  } catch (error) { result().textContent = `失败:${error.message}`; }
+});
+
+document.getElementById('saveLlmBtn')?.addEventListener('click', async () => {
+  const provider = document.getElementById('settingsLlmProvider')?.value || '';
+  const model = document.getElementById('settingsLlmModel')?.value || '';
+  const result = () => document.getElementById('settingsResult');
+  try {
+    await request('/api/llm/config', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ provider, model }),
+    });
+    result().textContent = 'LLM 配置已保存';
+    void refreshSettings();
+  } catch (error) { result().textContent = `失败:${error.message}`; }
+});
+
 window.addEventListener('hashchange', () => applyRoute());
 // 冷启动走路由器:支持 #tab/id 深链直接打开实体
 applyRoute();

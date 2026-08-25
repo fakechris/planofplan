@@ -171,6 +171,27 @@ export function saveLlmConfig(partial: LlmConfig): void {
   chmodSync(file, 0o600);
 }
 
+/**
+ * 持久化 plans 配置(整体替换 config.json 的 plans 段;用户显式配置后
+ * 不再回退 DEFAULT_PLANS)。设置页写这里,daemon 重启后仍生效。
+ */
+export function savePlansConfig(plans: PlanConfig[]): void {
+  const file = configPath();
+  let doc: Record<string, unknown> = {};
+  if (existsSync(file)) {
+    try {
+      doc = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
+    } catch {
+      doc = {};
+    }
+  }
+  if (plans.length === 0) delete doc.plans;
+  else doc.plans = plans;
+  mkdirSync(ensureHome(), { recursive: true });
+  writeFileSync(file, JSON.stringify(doc, null, 2) + '\n', { mode: 0o600 });
+  chmodSync(file, 0o600);
+}
+
 /** 将历史上的 GLM legacy/current 双 plan 收敛为一个 provider。 */
 export function normalizePlanSet(input: PlanConfig[]): PlanConfig[] {
   const glm = input.filter((plan) => plan.adapter === 'glm');
