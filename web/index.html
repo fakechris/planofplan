@@ -238,6 +238,10 @@
       </div>
     </section>
     <div class="graph-toolbar">
+      <div class="session-view-toggle" role="group" aria-label="视图">
+        <button type="button" id="graphViewCols" data-graph-view="cols" aria-pressed="true">图谱</button>
+        <button type="button" id="graphViewCalendar" data-graph-view="calendar" aria-pressed="false">日历纱线</button>
+      </div>
       <select id="graphProject" aria-label="按项目过滤">
         <option value="all">全部项目</option>
       </select>
@@ -252,6 +256,7 @@
       <span id="graphStats" class="muted"></span>
     </div>
     <div id="graphCanvas" class="graph-canvas"></div>
+    <div id="calendarCanvas" class="graph-canvas" hidden></div>
   </section>
 
   <section id="panel-usage" class="tab-panel" data-panel="usage" hidden>

@@ -1852,6 +1852,27 @@ export class Store {
     }));
   }
 
+  /** 需求→repo url 列表(纱线图项目归属用)。 */
+  requirementRepoUrls(): Map<string, string[]> {
+    const rows = this.db.query('SELECT requirement_id, url FROM requirement_repos').all() as Array<{
+      requirement_id: string; url: string;
+    }>;
+    const map = new Map<string, string[]>();
+    for (const row of rows) {
+      const list = map.get(row.requirement_id) ?? [];
+      list.push(row.url);
+      map.set(row.requirement_id, list);
+    }
+    return map;
+  }
+
+  /** 会话→work repo url(纱线图的兜底项目归属)。 */
+  sessionWorkRepoUrls(): Array<{ sid: string; url: string }> {
+    return this.db.query(
+      `SELECT session_id AS sid, url FROM session_repos WHERE role = 'work'`,
+    ).all() as Array<{ sid: string; url: string }>;
+  }
+
   requirementById(id: string): RequirementRecord | null {
     return this.listRequirements().find((row) => row.id === id) ?? null;
   }

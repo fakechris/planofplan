@@ -122,6 +122,131 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     }
   });
 
+  // ── 日历纱线数据(dsh-track calendar-yarn 同构,数据全来自已物化实体)──
+  // X=天, Y=项目泳道, 节点=需求(span 归因项目), 纱线=会话的需求序列,
+  // 金色菱形=项目切换点, 紫色边=spawned-by, 跨天连续会话的活跃天数序列。
+  app.get('/api/calendar', (c) => {
+    const days = Math.min(90, Math.max(7, Number(c.req.query('days') ?? 30) || 30));
+    const now = Date.now();
+    const since = now - days * 86_400_000;
+    const dayBase = since - (since % 86_400_000);
+
+    // 需求:窗口内 user 起源,带 span 归因的项目名 + 事件量(touch+commit 数)
+    const reqs = store.listRequirements().filter((r) => {
+      const ts = r.ts ?? 0;
+      return ts >= since && ts < now;
+    });
+    const projectByUrl = new Map(store.listProjects().map((p) => [p.url, p]));
+    const reqRepos = store.requirementRepoUrls();
+    // 每个需求的事件量:span 内 touch 数(有 touches 表的行)
+    const eventsByReq = new Map<string, number>();
+    for (const r of reqs) {
+      const touches = store.spanTouches(r.sessionId, r.seq, null);
+      eventsByReq.set(r.id, touches.length);
+    }
+
+    // 会话:窗口内每个 session 的需求序列(按 seq 排序)
+    const sessionById = new Map(store.listSessionRows().map((s) => [s.id, s]));
+    const reqsBySession = new Map<string, typeof reqs>();
+    for (const r of reqs) {
+      const list = reqsBySession.get(r.sessionId) ?? [];
+      list.push(r);
+      reqsBySession.set(r.sessionId, list);
+    }
+    // 活跃天:每个 session 的需求分布在不同天的列表
+    const activeDaysBySession = new Map<string, number[]>();
+    for (const r of reqs) {
+      const day = Math.floor(((r.ts ?? 0) - dayBase) / 86_400_000);
+      if (day < 0 || day >= days) continue;
+      const list = activeDaysBySession.get(r.sessionId) ?? [];
+      if (!list.includes(day)) list.push(day);
+      activeDaysBySession.set(r.sessionId, list);
+    }
+
+    // 项目泳道:有活动的项目按需求量排序,零活动折叠
+    const evByProj = new Map<string, number>();
+    for (const r of reqs) {
+      for (const url of reqRepos.get(r.id) ?? []) {
+        const p = projectByUrl.get(url);
+        if (p) evByProj.set(p.name, (evByProj.get(p.name) ?? 0) + 1);
+      }
+    }
+    const activeProjects = [...evByProj.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([name]) => name);
+    const allProjectNames = new Set(store.listProjects().map((p) => p.name));
+
+    // session_links 边(spawned-by 的紫色线)
+    const edges: Array<{ from: string; to: string; kind: string }> = [];
+    for (const link of store.listSessionLinks()) {
+      if (link.kind !== 'spawned-by') continue;
+      edges.push({ from: link.fromSession, to: link.toSession, kind: link.kind });
+    }
+
+    interface CalReq {
+      id: string; sessionId: string; proj: string; text: string;
+      day: number; events: number; originLevel: string;
+    }
+    interface CalSession {
+      id: string; provider: string; reqIds: string[]; activeDays: number[]; projects: string[];
+    }
+    // 无 span 归因的需求退到「会话的 work 项目」——比 unk 有信息量得多
+    const sessionWorkProject = new Map<string, string>();
+    {
+      const rows = store.sessionWorkRepoUrls();
+      for (const row of rows) {
+        const p = projectByUrl.get(row.url);
+        if (p && !sessionWorkProject.has(row.sid)) sessionWorkProject.set(row.sid, p.name);
+      }
+    }
+    const calReqs: CalReq[] = [];
+    for (const r of reqs) {
+      const day = Math.floor(((r.ts ?? 0) - dayBase) / 86_400_000);
+      if (day < 0 || day >= days) continue;
+      const repos = reqRepos.get(r.id) ?? [];
+      const projNames = repos.map((u) => projectByUrl.get(u)?.name ?? '').filter(Boolean);
+      calReqs.push({
+        id: r.id,
+        sessionId: r.sessionId,
+        proj: projNames[0] ?? sessionWorkProject.get(r.sessionId) ?? 'unk',
+        text: r.text.slice(0, 80),
+        day,
+        events: eventsByReq.get(r.id) ?? 0,
+        originLevel: r.originLevel,
+      });
+    }
+    const calSessions: CalSession[] = [];
+    for (const [sid, list] of reqsBySession) {
+      const session = sessionById.get(sid);
+      if (!session) continue;
+      const sorted = list.slice().sort((a, b) => a.seq - b.seq);
+      const projSet = new Set<string>();
+      for (const r of sorted) {
+        for (const url of reqRepos.get(r.id) ?? []) {
+          const p = projectByUrl.get(url);
+          if (p) projSet.add(p.name);
+        }
+      }
+      calSessions.push({
+        id: sid,
+        provider: session.provider,
+        reqIds: sorted.map((r) => r.id),
+        activeDays: (activeDaysBySession.get(sid) ?? []).sort((a, b) => a - b),
+        projects: [...projSet],
+      });
+    }
+
+    return c.json({
+      days,
+      dayBase: new Date(dayBase).toISOString(),
+      projects: [...allProjectNames].map((name) => ({ name, hue: '' })),
+      activeProjects,
+      requirements: calReqs,
+      sessions: calSessions,
+      edges,
+    });
+  });
+
   app.get('/api/plans/:slug', (c) => {
     const slug = c.req.param('slug');
     const plan = store.getPlan(slug);
