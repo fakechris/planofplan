@@ -568,6 +568,24 @@ a.attr-sha:hover { text-decoration: underline; }
 .gnode:hover rect { stroke: var(--accent-2); }
 .gedge { fill: none; stroke: var(--border); stroke-width: 1.2; }
 .gedge-weak { stroke-dasharray: 4 4; opacity: 0.45; }
+/* 日历纱线视图 */
+.calendar-svg { display: block; }
+.cal-lane-label {
+  fill: var(--muted); font-size: 10px; font-weight: 500;
+  font-family: var(--font-mono, monospace);
+}
+.cal-day-label { fill: var(--muted); font-size: 9px; text-anchor: middle; font-family: var(--font-mono, monospace); }
+.cal-day-line { stroke: var(--border); stroke-width: 0.5; opacity: 0.3; }
+.cal-thread {
+  fill: none; stroke: #B9C4D2; stroke-opacity: 0.25; stroke-width: 1.2;
+  cursor: pointer; transition: stroke-opacity var(--dur-fast, 0.15s);
+}
+.cal-thread:hover { stroke-opacity: 0.7; }
+.cal-switch { fill: var(--surface); stroke: #E0B34E; stroke-width: 1.2; }
+.cal-req { cursor: pointer; transition: r var(--dur-fast, 0.1s); }
+.cal-req:hover { r: calc(r + 2); }
+.cal-req-user_explicit { fill: color-mix(in srgb, var(--accent-2) 55%, transparent); stroke: var(--accent-2); stroke-width: 1; }
+.cal-req-system_inferred { fill: var(--surface-hover); stroke: var(--muted); stroke-width: 0.8; }
 .g-dim { opacity: 0.12; }
 .g-more { fill: var(--muted); font-size: var(--text-xs); font-family: var(--font-mono); }
 

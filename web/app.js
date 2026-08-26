@@ -1078,6 +1078,209 @@ function renderGraph(list) {
   el.replaceChildren(svg);
 }
 
+
+// ── 图谱页:日历纱线视图(dsh-track calendar-yarn 移植,vanilla SVG)─────
+
+let graphViewMode = 'cols';
+let latestCalendar = null;
+
+document.querySelectorAll('[data-graph-view]').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    graphViewMode = btn.getAttribute('data-graph-view');
+    document.querySelectorAll('[data-graph-view]').forEach((other) => {
+      other.setAttribute('aria-pressed', String(other === btn));
+    });
+    const colsEl = document.getElementById('graphCanvas');
+    const calEl = document.getElementById('calendarCanvas');
+    if (colsEl) colsEl.hidden = graphViewMode !== 'cols';
+    if (calEl) calEl.hidden = graphViewMode !== 'calendar';
+    // 切换过滤条可见性(日历有自己的口径)
+    const projectSel = document.getElementById('graphProject');
+    const candCheck = document.getElementById('graphCandidates');
+    const subCheck = document.getElementById('graphSubagents');
+    if (projectSel) projectEl(projectSel, graphViewMode === 'cols');
+    if (candCheck) projectEl(candCheck, graphViewMode === 'cols');
+    if (subCheck) projectEl(subCheck, graphViewMode === 'cols');
+    if (graphViewMode === 'calendar') void refreshCalendar();
+  });
+});
+function projectEl(el, visible) { el.style.display = visible ? '' : 'none'; }
+
+async function refreshCalendar() {
+  const el = document.getElementById('calendarCanvas');
+  if (!el) return;
+  try {
+    const days = document.getElementById('usageDays')?.value || '30';
+    latestCalendar = await request(`/api/calendar?days=${encodeURIComponent(days)}`);
+  } catch {
+    latestCalendar = null;
+  }
+  renderCalendar();
+}
+
+function renderCalendar() {
+  const el = document.getElementById('calendarCanvas');
+  if (!el) return;
+  if (!latestCalendar) {
+    el.innerHTML = '<div class="usage-empty"><strong>日历数据不可用</strong><span>daemon 连接失败。</span></div>';
+    return;
+  }
+  const data = latestCalendar;
+  if (!data.requirements || data.requirements.length === 0) {
+    el.innerHTML = '<div class="usage-empty"><strong>窗口内没有需求</strong><span>调大天数或先让 agent 干活。</span></div>';
+    return;
+  }
+
+  // 泳道:活跃项目按需求量排序,零活动的折叠
+  const evByProj = {};
+  for (const r of data.requirements) evByProj[r.proj] = (evByProj[r.proj] ?? 0) + 1;
+  const activeLanes = Object.keys(evByProj).filter((p) => p !== 'unk').sort((a, b) => evByProj[b] - evByProj[a]);
+  const lanes = [...activeLanes, ...(evByProj.unk ? ['unk'] : [])];
+  const laneIdx = {};
+  lanes.forEach((l, i) => { laneIdx[l] = i; });
+  const laneOf = (p) => laneIdx[p] !== undefined ? p : 'unk';
+
+  // 布局参数
+  const DAY_W = Math.max(64, Math.floor(Math.min(1100, window.innerWidth - 200) / data.days));
+  const LANE_H = Math.max(72, Math.min(110, Math.floor(520 / Math.max(1, lanes.length))));
+  const TOP = 28;
+  const W = data.days * DAY_W + 120;
+  const H = TOP + lanes.length * LANE_H + 10;
+  const laneY = (i) => TOP + i * LANE_H + LANE_H / 2;
+
+  // 需求节点:格子内贪心螺旋防重叠
+  const cells = new Map();
+  for (const r of data.requirements) {
+    const k = r.day + '|' + laneOf(r.proj);
+    const list = cells.get(k) ?? [];
+    list.push({ r: 3 + Math.log2((r.events || 1) + 1) * 1.1, req: r });
+    cells.set(k, list);
+  }
+  const pos = new Map();
+  for (const [k, items] of cells) {
+    const [d, lid] = k.split('|');
+    const dd = Number(d), li = laneIdx[lid] ?? lanes.length - 1;
+    items.sort((a, b) => b.r - a.r);
+    const halfW = DAY_W / 2 - 4, halfH = LANE_H / 2 - 4;
+    const placed = [];
+    for (const it of items) {
+      let ok = false;
+      for (let t = 0; t < 200 && !ok; t++) {
+        const ang = t * 2.399963, rad = t === 0 ? 0 : 2.0 * Math.sqrt(t) + 2;
+        let px = Math.cos(ang) * rad, py = Math.sin(ang) * rad;
+        px = Math.max(-halfW + it.r, Math.min(halfW - it.r, px));
+        py = Math.max(-halfH + it.r, Math.min(halfH - it.r, py));
+        if (!placed.some((q) => { const dx = q.px - px, dy = q.py - py; return dx * dx + dy * dy < (q.r + it.r + 1.5) ** 2; })) {
+          it.px = px; it.py = py; placed.push({ px, py, r: it.r }); ok = true;
+        }
+      }
+      if (!ok) { it.px = 0; it.py = 0; }
+      pos.set(it.req.id, { x: dd * DAY_W + DAY_W / 2 + (it.px ?? 0), y: laneY(li) + (it.py ?? 0), r: it.r });
+    }
+  }
+
+  // 纱线:会话的需求序列(≥2 个需求的才画)
+  const reqById = new Map(data.requirements.map((r) => [r.id, r]));
+  const threads = [];
+  for (const session of data.sessions) {
+    const list = (session.reqIds ?? []).filter((id) => pos.has(id));
+    if (list.length >= 2) threads.push({ sid: session.id, provider: session.provider, list });
+  }
+  let switchCount = 0;
+
+  const svgNs = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(svgNs, 'svg');
+  svg.setAttribute('width', String(W));
+  svg.setAttribute('height', String(H));
+  svg.setAttribute('class', 'graph-svg calendar-svg');
+
+  // 泳道底色 + 标签
+  lanes.forEach((lane, i) => {
+    const rect = document.createElementNS(svgNs, 'rect');
+    rect.setAttribute('x', '0'); rect.setAttribute('y', String(TOP + i * LANE_H));
+    rect.setAttribute('width', String(W)); rect.setAttribute('height', String(LANE_H));
+    rect.setAttribute('fill', i % 2 === 0 ? 'rgba(255,255,255,0.02)' : 'transparent');
+    svg.appendChild(rect);
+    const text = document.createElementNS(svgNs, 'text');
+    text.setAttribute('x', '8'); text.setAttribute('y', String(laneY(i) + 3));
+    text.setAttribute('class', 'cal-lane-label');
+    text.textContent = lane === 'unk' ? '未归属' : lane.length > 12 ? lane.slice(0, 12) + '…' : lane;
+    svg.appendChild(text);
+  });
+  // 天分隔线 + 日期标签(每 3 天)
+  for (let d = 0; d <= data.days; d += 3) {
+    const line = document.createElementNS(svgNs, 'line');
+    line.setAttribute('x1', String(d * DAY_W + 120)); line.setAttribute('x2', String(d * DAY_W + 120));
+    line.setAttribute('y1', String(TOP)); line.setAttribute('y2', String(H - 10));
+    line.setAttribute('class', 'cal-day-line');
+    svg.appendChild(line);
+    if (d < data.days) {
+      const t = new Date(Date.parse(data.dayBase) + d * 86400000);
+      const label = document.createElementNS(svgNs, 'text');
+      label.setAttribute('x', String(d * DAY_W + 120 + DAY_W / 2));
+      label.setAttribute('y', '16');
+      label.setAttribute('class', 'cal-day-label');
+      label.textContent = `${t.getMonth() + 1}/${t.getDate()}`;
+      svg.appendChild(label);
+    }
+  }
+  // 偏移:泳道标签占 120px,所有 x 加 120
+  const OX = 120;
+
+  // 纱线(贝塞尔 + 切换菱形)
+  for (const t of threads) {
+    let g = document.createElementNS(svgNs, 'g');
+    g.setAttribute('data-cal-session', t.sid);
+    for (let i = 1; i < t.list.length; i++) {
+      const a = pos.get(t.list[i - 1]), b = pos.get(t.list[i]);
+      if (!a || !b) continue;
+      const mx = (a.x + b.x) / 2;
+      const path = document.createElementNS(svgNs, 'path');
+      path.setAttribute('d', `M ${a.x + OX} ${a.y} C ${mx + OX} ${a.y}, ${mx + OX} ${b.y}, ${b.x + OX} ${b.y}`);
+      path.setAttribute('class', 'cal-thread');
+      g.appendChild(path);
+      const projA = laneOf(reqById.get(t.list[i - 1])?.proj ?? 'unk');
+      const projB = laneOf(reqById.get(t.list[i])?.proj ?? 'unk');
+      if (projA !== projB) {
+        switchCount++;
+        const sx = (a.x + b.x) / 2 + OX, sy = (a.y + b.y) / 2;
+        const dia = document.createElementNS(svgNs, 'path');
+        dia.setAttribute('d', `M ${sx} ${sy - 3.5} L ${sx + 3.5} ${sy} L ${sx} ${sy + 3.5} L ${sx - 3.5} ${sy} Z`);
+        dia.setAttribute('class', 'cal-switch');
+        g.appendChild(dia);
+      }
+    }
+    g.addEventListener('click', (event) => {
+      event.stopPropagation();
+      navigate('sessions', t.sid);
+    });
+    svg.appendChild(g);
+  }
+
+  // 需求节点
+  for (const r of data.requirements) {
+    const p = pos.get(r.id);
+    if (!p) continue;
+    const circle = document.createElementNS(svgNs, 'circle');
+    circle.setAttribute('cx', String(p.x + OX)); circle.setAttribute('cy', String(p.y));
+    circle.setAttribute('r', String(p.r));
+    circle.setAttribute('class', `cal-req cal-req-${r.originLevel}`);
+    circle.setAttribute('data-cal-req', r.id);
+    const title = document.createElementNS(svgNs, 'title');
+    title.textContent = `${r.text} · ${r.events} events · ${r.originLevel}`;
+    circle.appendChild(title);
+    circle.addEventListener('click', (event) => {
+      event.stopPropagation();
+      navigate('requirements', r.id);
+    });
+    svg.appendChild(circle);
+  }
+
+  el.replaceChildren(svg);
+  const stats = document.getElementById('graphStats');
+  if (stats) stats.textContent = `${lanes.length} 个项目 · ${data.requirements.length} 需求 · ${threads.length} 纱线 · 切换 ${switchCount}`;
+}
+
 // ── 项目页(IA 重设计第一步)────────────────────────────────────
 // 列表态 = 项目卡片行;详情态 = agent × 活动 / 需求流 / 产出 commit /
 // session 时间线。数据失败静默降级(区块留空,不影响其它 tab)。
