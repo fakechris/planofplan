@@ -189,7 +189,7 @@ describe('materializePlanFiles', () => {
       writeFileSync(join(root, 'HANDOFF.md'), '# HANDOFF\n\n当前状态\n'); // 无分隔符的标准名
       const store = seededStore(root);
 
-      expect(materializePlanFiles(store)).toBe(4);
+      expect(materializePlanFiles(store, { spotlight: false })).toBe(4);
       const files = store.listPlanFiles();
       expect(files).toHaveLength(4);
       const taskPlan = files.find((file) => file.path.endsWith('task_plan.md'));
@@ -206,7 +206,7 @@ describe('materializePlanFiles', () => {
       expect(store.planSnapshotCount(taskPlan!.id)).toBe(1);
 
       // mtime 未变 → 只续命,不追加快照
-      materializePlanFiles(store);
+      materializePlanFiles(store, { spotlight: false });
       expect(store.planSnapshotCount(taskPlan!.id)).toBe(1);
 
       // 内容演进(勾掉一项,mtime 推后)→ 新快照,确定性 id 不冲突
@@ -214,18 +214,18 @@ describe('materializePlanFiles', () => {
       const mtime = statSync(join(root, 'task_plan.md')).mtimeMs + 5000;
       writeFileSync(join(root, 'task_plan.md'), evolved);
       utimesSync(join(root, 'task_plan.md'), mtime / 1000, mtime / 1000);
-      materializePlanFiles(store);
+      materializePlanFiles(store, { spotlight: false });
       expect(store.planSnapshotCount(taskPlan!.id)).toBe(2);
       expect(store.planSnapshots(taskPlan!.id)[0]).toMatchObject({ checkboxChecked: 4, checkboxTotal: 6 });
       // 同内容重扫(只 bump mtime)→ 快照幂等(同 raw_hash 同 id)
       const again = statSync(join(root, 'task_plan.md')).mtimeMs + 8000;
       utimesSync(join(root, 'task_plan.md'), again / 1000, again / 1000);
-      materializePlanFiles(store);
+      materializePlanFiles(store, { spotlight: false });
       expect(store.planSnapshotCount(taskPlan!.id)).toBe(2);
 
       // 文件消失 → missing_since,行与历史快照保留
       rmSync(join(root, 'HANDOFF-rc9.md'));
-      materializePlanFiles(store);
+      materializePlanFiles(store, { spotlight: false });
       const handoff = store.listPlanFiles().find((file) => file.path.includes('HANDOFF'));
       expect(handoff?.missingSince).not.toBeNull();
       expect(store.planSnapshotCount(handoff!.id)).toBe(1);
@@ -241,7 +241,7 @@ describe('materializePlanFiles', () => {
     try {
       writeFileSync(join(root, 'task_plan.md'), TASK_PLAN);
       const store = seededStore(root);
-      materializePlanFiles(store);
+      materializePlanFiles(store, { spotlight: false });
       // 模拟该 session 触碰过 plan 文件 + 有需求实体
       store.upsertSessionTouches([{
         id: 't1', sessionId: 'claude:p1', provider: 'claude',
