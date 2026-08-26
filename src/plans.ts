@@ -30,6 +30,24 @@ const NOT_PLAN_RE = /^(?:\._|README|CHANGELOG|CONTRIBUTING|SECURITY|CODE_OF_COND
 const PLAN_DIR_RE = /(?:^|\/)(?:plans|specs)(?:$|\/)/;
 const HANDOFF_RE = /^HANDOFF(?:[-_].*)?\.md$/i; // HANDOFF.md(无分隔符)也要认
 const SKIP_DIRS = new Set(['node_modules', 'target', 'dist', 'build', 'vendor', 'venv']);
+// 记忆/配置类:名字可能带 plan/roadmap 但不是计划文档
+const NOT_PLAN_EXTRA = /^(?:MEMORY|feedback_)/i;
+
+/** Spotlight 兜底通道:常见固定名的机器级搜索(未索引/无权限时为空)。 */
+function spotlightPlanFiles(): string[] {
+  const out: string[] = [];
+  try {
+    const res = execFileSync('mdfind', [
+      'kMDItemFSName == "task_plan.md"c || kMDItemFSName == "IMPLEMENTATION_PLAN.md"c || kMDItemFSName == "PLAN.md"c || kMDItemFSName == "plan.md"c || kMDItemFSName == "roadmap.md"c || kMDItemFSName == "progress.md"c',
+    ], { encoding: 'utf8', timeout: 15_000, maxBuffer: 8 * 1024 * 1024 });
+    for (const line of res.split('\n')) {
+      if (line.endsWith('.md') && !line.includes('/node_modules/')) out.push(line);
+    }
+  } catch {
+    /* best-effort */
+  }
+  return out;
+}
 const TEXT_CAP = 2000;
 
 /** 发现根:session cwd ∪ project root(有界:百级)。 */
@@ -283,64 +301,96 @@ function headOfFactory(): (dir: string) => string | null {
 /**
  * 扫盘物化(mtime 门控):内容变化才捕获新快照(确定性 id 幂等);
  * 文件消失置 missing_since,重现则清掉。git 调用每轮按 root 缓存。
+ *
+ * 发现三通道(根因修复:计划文件会写在任何地方,cwd 目录树猜不全)——
+ *  A. file_touches 遥测:agent 实际写过的计划类路径(App Support 研究
+ *     目录、~/.claude/plans 随机名 plan-mode 文件、memory 里的 roadmap
+ *     都只能从这抓到);项目归属用「写它的会话」的 work repo
+ *  B. cwd/project-root 目录树递归(新文件尚未进遥测时的兜底)
+ *  C. Spotlight mdfind(人手写的、无会话遥测的机器级兜底)
  */
-export function materializePlanFiles(store: Store, now = Date.now()): number {
+export function materializePlanFiles(store: Store, options: { now?: number; spotlight?: boolean } = {}): number {
+  const now = options.now ?? Date.now();
   const roots = planRootsOf(store.sessionCwds(), store.projectRoots());
+  const rootSet = new Set(roots);
   const repoOf = repoOfFactory();
   const headOf = headOfFactory();
   const existing = new Map(store.listPlanFiles().map((row) => [row.path, row]));
   const seen = new Set<string>();
   let captured = 0;
+
+  // 通道 A:touches(带会话的项目归属)
+  const touchedRepo = new Map<string, string>();
+  for (const row of store.touchedPlanFilePaths()) {
+    if (NOT_PLAN_EXTRA.test(basename(row.path))) continue;
+    touchedRepo.set(row.path, row.repoUrl ?? '');
+  }
+  // 通道 B:目录树
+  const walked = new Set<string>();
   for (const root of roots) {
-    for (const path of discoverPlanFiles(root)) {
-      seen.add(path);
-      let stat;
-      try {
-        stat = statSync(path);
-      } catch {
-        continue; // 竞态:刚消失
-      }
-      const prior = existing.get(path);
-      // repo 为 NULL 的存量行(非 git 目录修复前入库)要重推导归属,
-      // 不能被 mtime 门控拦住——否则永远挤在「(非 git 目录)」一组里
-      if (prior && prior.missingSince == null && prior.lastSnapshotId
-        && prior.repo != null
-        && prior.lastSnapshotMtimeMs != null
-        && Math.abs(prior.lastSnapshotMtimeMs - stat.mtimeMs) < 1) {
-        store.touchPlanFile(prior.id, now); // 内容未变,只续命
-        continue;
-      }
-      let text: string;
-      try {
-        text = readFileSync(path, 'utf8');
-      } catch {
-        continue;
-      }
-      const rawHash = createHash('sha1').update(text).digest('hex');
-      const parsed = parsePlanMarkdown(text);
-      const id = planFileId(path);
-      const dir = dirname(path);
-      const row = {
-        id,
-        path,
-        kind: planKindOf(path),
-        title: parsed.title,
-        goal: parsed.goal,
-        currentPhase: parsed.currentPhase,
-        // 目录即项目:非 git 的计划目录以发现根为身份(url=git remote →
-        // git root → root 路径),与 session_repos/workRepoOf 同一套纪律
-        repo: repoOf(dir) ?? root,
-        mtimeMs: stat.mtimeMs,
-        rawHash,
-        sections: parsed.sections,
-        checkboxChecked: parsed.checkboxChecked,
-        checkboxTotal: parsed.checkboxTotal,
-        commitSha: headOf(dir),
-        now,
-      };
-      store.upsertPlanFileWithSnapshot(row);
-      captured += 1;
+    for (const path of discoverPlanFiles(root)) walked.add(path);
+  }
+  // 通道 C:Spotlight
+  const spotlit = new Set(options.spotlight === false ? [] : spotlightPlanFiles());
+
+  const candidates = new Set<string>([...touchedRepo.keys(), ...walked, ...spotlit]);
+  for (const path of candidates) {
+    seen.add(path);
+    let stat;
+    try {
+      stat = statSync(path);
+    } catch {
+      continue; // 竞态:刚消失
     }
+    const prior = existing.get(path);
+    // repo 为 NULL 的存量行(非 git 目录修复前入库)要重推导归属,
+    // 不能被 mtime 门控拦住——否则永远挤在「(非 git 目录)」一组里
+    if (prior && prior.missingSince == null && prior.lastSnapshotId
+      && prior.repo != null
+      && prior.lastSnapshotMtimeMs != null
+      && Math.abs(prior.lastSnapshotMtimeMs - stat.mtimeMs) < 1) {
+      store.touchPlanFile(prior.id, now); // 内容未变,只续命
+      continue;
+    }
+    let text: string;
+    try {
+      text = readFileSync(path, 'utf8');
+    } catch {
+      continue;
+    }
+    const rawHash = createHash('sha1').update(text).digest('hex');
+    const parsed = parsePlanMarkdown(text);
+    const id = planFileId(path);
+    const dir = dirname(path);
+    // 项目归属优先级:写它的会话的 work repo(通道 A 独有,把 ~/.claude/
+    // plans 的随机名文件落到正确项目)→ git remote → git root →
+    // 最近已知项目根 → 文件所在目录(目录即项目)
+    const nearestRoot = [...rootSet]
+      .filter((root) => path.startsWith(`${root}/`))
+      .sort((a, b) => b.length - a.length)[0];
+    const touched = touchedRepo.get(path);
+    const repo = (touched && touched.length > 0 ? touched : null)
+      ?? repoOf(dir)
+      ?? nearestRoot
+      ?? dir;
+    const row = {
+      id,
+      path,
+      kind: planKindOf(path),
+      title: parsed.title,
+      goal: parsed.goal,
+      currentPhase: parsed.currentPhase,
+      repo,
+      mtimeMs: stat.mtimeMs,
+      rawHash,
+      sections: parsed.sections,
+      checkboxChecked: parsed.checkboxChecked,
+      checkboxTotal: parsed.checkboxTotal,
+      commitSha: headOf(dir),
+      now,
+    };
+    store.upsertPlanFileWithSnapshot(row);
+    captured += 1;
   }
   // 消失的文件:置 missing_since(行保留,历史快照可查)
   for (const row of existing.values()) {

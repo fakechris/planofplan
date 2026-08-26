@@ -478,7 +478,7 @@ export class Store {
     if (version < 8) {
       try {
         materializeTodoSnapshots(this);
-        materializePlanFiles(this);
+        materializePlanFiles(this, { spotlight: false });
       } catch {
         /* backfill is best-effort;collect 轮会补 */
       }
@@ -688,6 +688,44 @@ export class Store {
   sessionIdsWithWorkRepo(): Set<string> {
     const rows = this.db.query("SELECT DISTINCT session_id FROM session_repos WHERE role = 'work'").all() as Array<{ session_id: string }>;
     return new Set(rows.map((row) => row.session_id));
+  }
+
+  /**
+   * 计划发现通道 A(证据驱动):agent 实际触碰过的计划类 md 路径,
+   * 带最近触碰会话的 work 项目归属——计划文件可能写在任何地方
+   * (App Support 研究目录、~/.claude/plans、memory),cwd 目录树
+   * 永远猜不全,但 touch 遥测从不撒谎。
+   */
+  touchedPlanFilePaths(): Array<{ path: string; repoUrl: string | null }> {
+    const rows = this.db.query(
+      `SELECT t.file_path AS path, t.session_id AS sessionId, MAX(t.ts) AS lastTs
+       FROM session_file_touches t
+       WHERE t.file_path LIKE '%.md'
+         AND (lower(t.file_path) LIKE '%plan%' OR lower(t.file_path) LIKE '%roadmap%'
+              OR lower(t.file_path) LIKE '%todo.md' OR lower(t.file_path) LIKE '%backlog%'
+              OR lower(t.file_path) LIKE '%handoff%'
+              OR t.file_path LIKE '%/plans/%' OR t.file_path LIKE '%/specs/%')
+       GROUP BY t.file_path`,
+    ).all() as Array<{ path: string; sessionId: string | null; lastTs: number | null }>;
+    // 会话 → work repo url(一次性;触摸文件归到"写它的会话的项目"下,
+    // ~/.claude/plans 的随机名文件由此落到正确的项目组)
+    const workRepo = new Map<string, string>();
+    const repoRows = this.db.query(
+      `SELECT sr.session_id AS sessionId, sr.url AS url, MAX(s.updated_at) AS ua
+       FROM session_repos sr JOIN sessions s ON s.id = sr.session_id
+       WHERE sr.role = 'work' GROUP BY sr.session_id`,
+    ).all() as Array<{ sessionId: string; url: string }>;
+    for (const row of repoRows) workRepo.set(row.sessionId, row.url);
+    // 每个文件取最近一次触碰的会话(同文件多会话时)
+    const latest = new Map<string, string | null>();
+    const perFile = new Map<string, { sessionId: string | null; lastTs: number | null }>();
+    for (const row of rows) {
+      const prev = perFile.get(row.path);
+      if (!prev || (row.lastTs ?? 0) >= (prev.lastTs ?? 0)) perFile.set(row.path, { sessionId: row.sessionId, lastTs: row.lastTs });
+    }
+    for (const [path, info] of perFile) latest.set(path, info.sessionId);
+    return rows.map((row) => ({ path: row.path, repoUrl: latest.get(row.path) ? workRepo.get(latest.get(row.path)!) ?? null : null }))
+      .filter((row, index, all) => all.findIndex((r) => r.path === row.path) === index);
   }
 
   deletePlan(slug: string): void {
