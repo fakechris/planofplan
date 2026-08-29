@@ -25,6 +25,7 @@ import { readTranscript } from './transcript.ts';
 import { launchResume } from './resume.ts';
 import { getStartupSettings, setLaunchOnStartup } from './startup.ts';
 import { startSessionWatcher } from './watcher.ts';
+import { registerMcpRoutes } from './mcp.ts';
 
 // In dev (bun src/cli.ts), import.meta.dir points at src/ and ../web = repo/web.
 // In a bun build --compile binary, import.meta.dir is a virtual $bunfs/root path
@@ -1329,6 +1330,10 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
     }
     return c.text('not found', 404);
   });
+
+  // 只读 MCP server(streamable HTTP 子集):被监控的 agent 反过来查配额与谱系。
+  // 工具面见 src/mcp.ts;Host 校验同样覆盖。必须注册在静态兜底之前。
+  registerMcpRoutes(app, store, cfg);
 
   // 文件监听(参照 obelisk ADR-0009 的形态):根目录 recursive watch + 静默窗
   // 防抖 + 有界批。flush 不重造扫描——spawn 同一个 sessions --refresh 子进程,
