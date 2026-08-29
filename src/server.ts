@@ -404,11 +404,19 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
     const query = c.req.query('q')?.trim() || '';
     const refresh = c.req.query('refresh') === '1';
     const includeSubagents = c.req.query('subagents') === '1';
+    const includeHidden = c.req.query('hidden') === '1';
     const now = Date.now();
     const since = now - days * 86_400_000;
     const allRows = store.listSessionRows();
     if (refresh || allRows.length === 0) startSessionIndex(days);
-    let rows = allRows;
+    // 用户数据层联入:星标/隐藏标志。hidden 默认排除(图谱/列表都不吃),
+    // 「显示已隐藏」显式带 hidden=1 才包含;墓碑 session 已不在库,天然不出现。
+    const userMeta = store.getSessionUserMetaMap();
+    let rows = allRows.filter((row) => includeHidden || !userMeta.get(row.id)?.hidden)
+      .map((row) => {
+        const meta = userMeta.get(row.id);
+        return meta ? { ...row, starred: meta.starred, hidden: meta.hidden } : row;
+      });
     if (provider) rows = rows.filter((row) => row.provider === provider);
     if (project) rows = rows.filter((row) => sessionProjectNames(row).includes(project));
     if (query) {
@@ -421,9 +429,11 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
         if (have.has(hit.sessionId)) continue;
         const session = store.getSession(hit.sessionId);
         if (!session) continue;
+        if (!includeHidden && userMeta.get(session.id)?.hidden) continue;
         if (provider && session.provider !== provider) continue;
         if (project && !sessionProjectNames(session).includes(project)) continue;
-        matched.push(session);
+        const meta = userMeta.get(session.id);
+        matched.push(meta ? { ...session, starred: meta.starred, hidden: meta.hidden } : session);
         have.add(session.id);
       }
       rows = matched.map((row) => ({ ...row, messageHit: hitBySession.get(row.id) ?? null }));
@@ -468,6 +478,59 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
         changedFiles: sessionIndexLast.changedFiles,
       },
     });
+  });
+
+  // 已删除列表(恢复入口);必须先于 /api/sessions/:id 注册,否则 'deleted' 被当 id
+  app.get('/api/sessions/deleted', (c) => {
+    return c.json({ deleted: store.listTombstonedSessions() });
+  });
+
+  // 用户数据层动作:星标/隐藏/删除(墓碑)/恢复。L0 源文件永远不动。
+  const readBoolBody = async (c: { req: { json(): Promise<unknown> } }, field: string) => {
+    let body: Record<string, unknown> | null = null;
+    try {
+      body = (await c.req.json()) as Record<string, unknown>;
+    } catch {
+      return { error: 'body 必须是 JSON' };
+    }
+    const value = body?.[field];
+    if (typeof value !== 'boolean') return { error: `${field} 必须是 boolean` };
+    return { value };
+  };
+
+  app.post('/api/sessions/:id/star', async (c) => {
+    const id = decodeURIComponent(c.req.param('id'));
+    const parsed = await readBoolBody(c, 'starred');
+    if ('error' in parsed) return c.json({ ok: false, error: parsed.error }, 400);
+    store.setSessionStar(id, parsed.value!);
+    broadcastSSE('sessions-changed', { kind: 'star', id, on: parsed.value });
+    return c.json({ ok: true, starred: parsed.value });
+  });
+
+  app.post('/api/sessions/:id/hide', async (c) => {
+    const id = decodeURIComponent(c.req.param('id'));
+    const parsed = await readBoolBody(c, 'hidden');
+    if ('error' in parsed) return c.json({ ok: false, error: parsed.error }, 400);
+    store.setSessionHidden(id, parsed.value!);
+    broadcastSSE('sessions-changed', { kind: 'hide', id, on: parsed.value });
+    return c.json({ ok: true, hidden: parsed.value });
+  });
+
+  app.delete('/api/sessions/:id', (c) => {
+    const id = decodeURIComponent(c.req.param('id'));
+    const session = store.getSession(id);
+    store.tombstoneSession(id, session?.sourceFile ?? null);
+    broadcastSSE('sessions-changed', { kind: 'deleted', id });
+    return c.json({ ok: true });
+  });
+
+  app.post('/api/sessions/:id/restore', (c) => {
+    const id = decodeURIComponent(c.req.param('id'));
+    store.restoreSession(id);
+    // 墓碑已清,立刻补一轮扫描把 session 扫回来
+    startSessionIndex(30, 'restore');
+    broadcastSSE('sessions-changed', { kind: 'restored', id });
+    return c.json({ ok: true });
   });
 
   app.get('/api/sessions/:id', (c) => {

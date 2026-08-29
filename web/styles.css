@@ -449,6 +449,16 @@ td { font-variant-numeric: tabular-nums; }
 }
 .session-item span { color: var(--muted); font-size: var(--text-xs); }
 .session-item .session-origin { font-style: normal; color: var(--muted); }
+.session-item .session-star { font-style: normal; color: var(--accent-2); margin-right: 4px; }
+/* 已删除(墓碑)区块:只在「显示已隐藏」勾选时出现在列表底部 */
+.session-deleted { margin-top: 16px; padding-top: 10px; border-top: 1px dashed var(--border); }
+.session-deleted h3 { font-size: var(--text-xs); color: var(--muted); font-weight: var(--weight-semibold); }
+.session-deleted-row {
+  display: flex; align-items: center; gap: 8px; padding: 4px 0;
+  font-size: var(--text-xs); color: var(--muted);
+}
+.session-deleted-row strong { flex: 0 0 auto; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.session-deleted-row span { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 需求 origin 分级徽标(§1.5):用户原话高置信,推断低一档 */
 .req-origin { font-style: normal; font-size: 0.9em; padding: 0 6px; border-radius: 999px; }
 .req-origin-user_explicit {
