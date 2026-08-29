@@ -175,8 +175,8 @@ export interface SessionMessageRow {
   sessionId: string;
   /** 源文件行号 / part 序号，会话内排序用。 */
   seq: number;
-  role: 'user' | 'assistant' | 'tool';
-  kind: 'text' | 'tool_use';
+  role: 'user' | 'assistant' | 'tool' | 'system';
+  kind: 'text' | 'tool_use' | 'summary';
   toolName: string | null;
   text: string;
   timestamp: number | null;

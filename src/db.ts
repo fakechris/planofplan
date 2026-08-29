@@ -1440,7 +1440,13 @@ export class Store {
          cwd = COALESCE(excluded.cwd, sessions.cwd),
          title = COALESCE(excluded.title, sessions.title),
          source_file = COALESCE(excluded.source_file, sessions.source_file),
-         started_at = COALESCE(excluded.started_at, sessions.started_at),
+         -- 合并语义(参照 obelisk persist 层):started_at 取 MIN、updated_at 取
+         -- MAX——codex 同一 session 的多个 rollout 续写文件先后入库,时间界
+         -- 不能被后扫的文件回退;任一侧为 null 时退化为 fill-if-null
+         started_at = CASE
+           WHEN sessions.started_at IS NULL OR excluded.started_at IS NULL
+             THEN COALESCE(sessions.started_at, excluded.started_at)
+           ELSE MIN(sessions.started_at, excluded.started_at) END,
          git_root = COALESCE(excluded.git_root, sessions.git_root),
          git_url = COALESCE(excluded.git_url, sessions.git_url),
          git_name = COALESCE(excluded.git_name, sessions.git_name),
@@ -1448,7 +1454,10 @@ export class Store {
          -- 既有值(例如 herdr 升级),backfill/专用 pass 负责修正
          origin = COALESCE(?, sessions.origin),
          parent_id = COALESCE(?, sessions.parent_id),
-         updated_at = excluded.updated_at,
+         updated_at = CASE
+           WHEN sessions.updated_at IS NULL OR excluded.updated_at IS NULL
+             THEN COALESCE(sessions.updated_at, excluded.updated_at)
+           ELSE MAX(sessions.updated_at, excluded.updated_at) END,
          seen_at = excluded.seen_at`,
     );
     this.withTransaction(() => {
