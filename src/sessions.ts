@@ -22,7 +22,7 @@ import type { Store } from './db.ts';
 import { buildWorkGraph } from './graph.ts';
 import { repoRefOf, sessionProjectNames } from './repos.ts';
 import { attachRepos, extractSessionRepos, TOUCH_BYTES } from './session-repos.ts';
-import { messagesFromRecord, messagesFromZcodeDb, isClaudeMetaRecord, isCodexMetaUserText } from './transcript.ts';
+import { messagesFromRecord, messagesFromZcodeDb, isClaudeMetaRecord, isClaudeCompactSummary, isCodexMetaUserText } from './transcript.ts';
 import { touchesFromRecord } from './file-touches.ts';
 import { collectSessionCommits } from './commit-attribution.ts';
 import {
@@ -252,6 +252,8 @@ function claudeTitle(records: Record<string, unknown>[]): string | null {
   for (const record of records) {
     if (record.type !== 'user') continue;
     if (isClaudeMetaRecord(record)) continue;
+    // compact 续跑摘要当标题 = 截断的英文摘要,比无标题更糟
+    if (isClaudeCompactSummary(record)) continue;
     const message = record.message && typeof record.message === 'object'
       ? record.message as Record<string, unknown>
       : record;
@@ -729,8 +731,9 @@ function yieldEventLoop(): Promise<void> {
 /** 消息抽取规则版本:改 messagesFromX / 加 touch 行为层时 +1,老水位自动失效触发全量重扫。 */
 // v3:claude isMeta 记录与 codex 系统信封不再进消息索引;标题来源多元化
 // (ai-title / history.jsonl / session_index.jsonl),全量重扫顺带刷新全部标题。
-// (FTS 瘦身走 db v11 迁移直接重建索引,不动消息也不需要这个版本号。)
-export const MESSAGE_PARSER_VERSION = 3;
+// v4:claude isCompactSummary 续跑摘要重分类为 kind='summary'/role='system'
+// (可搜、不进需求抽取与标题),需求物化在下一轮 collect 自动自愈。
+export const MESSAGE_PARSER_VERSION = 4;
 const MSG_BATCH = 400;
 
 interface StreamedLine {

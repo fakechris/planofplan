@@ -68,9 +68,16 @@ function pushTurn(turns: TranscriptTurn[], role: TranscriptTurn['role'], text: s
 /**
  * claude 的 isMeta 记录(如 structured-output-enforce 注入)不是用户/助手可见
  * 文本,标题与消息索引都要跳过。与 `<command-` 信封过滤是两套独立信号。
+ * isCompactSummary 是第三种信号:compact 续跑摘要(真实内容,可搜)但不
+ * 是用户原话——重分类为 kind='summary'/role='system',不进需求抽取。
  */
 export function isClaudeMetaRecord(record: Record<string, unknown>): boolean {
   return record.isMeta === true;
+}
+
+/** compact 续跑摘要:用户消息形态、isCompactSummary=true(2026-08 本机实证)。 */
+export function isClaudeCompactSummary(record: Record<string, unknown>): boolean {
+  return record.isCompactSummary === true;
 }
 
 /**
@@ -103,6 +110,8 @@ function turnsFromClaude(records: Record<string, unknown>[]): TranscriptTurn[] {
   for (const record of records) {
     if (record.type !== 'user' && record.type !== 'assistant') continue;
     if (isClaudeMetaRecord(record)) continue;
+    // compact 摘要是大段英文续跑说明,进正文视图只会淹没真实对话;搜索走消息索引
+    if (record.type === 'user' && isClaudeCompactSummary(record)) continue;
     const message = record.message && typeof record.message === 'object'
       ? record.message as Record<string, unknown>
       : record;
@@ -368,6 +377,17 @@ function messagesFromClaudeRecord(sessionId: string, record: Record<string, unkn
   const message = record.message && typeof record.message === 'object'
     ? record.message as Record<string, unknown>
     : record;
+  // compact 续跑摘要:可搜(FTS 含 summary),但不是用户原话——
+  // role='system' 使 listUserMessageRows/需求抽取自动排除
+  if (record.type === 'user' && isClaudeCompactSummary(record)) {
+    const text = textOf(message.content).trim();
+    if (!text) return [];
+    return [{
+      id: `${sessionId}:${uuid}`, sessionId, seq, role: 'system', kind: 'summary',
+      toolName: null, text: clipField(text), timestamp: tsOf(record.timestamp),
+      model: null, inputTokens: null, outputTokens: null,
+    }];
+  }
   const usage = message.usage && typeof message.usage === 'object'
     ? message.usage as Record<string, unknown>
     : null;

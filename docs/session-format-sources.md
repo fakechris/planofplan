@@ -26,6 +26,10 @@
 - **注入与信封**：`isMeta:true` 记录（如 `[structured-output-envelope]`
   structured-output 强制注入）不是用户输入；`<command-…` / `<local-command-…`
   / `[` 开头的用户消息是命令信封。标题与消息索引都要跳过。
+- **compact 续跑摘要**（2026-08 本机实证，18 个文件）：不是独立 type，而是
+  `isCompactSummary:true` 的用户消息，content 以 "This session is being
+  continued…" 开头内嵌摘要。处理：重分类 `kind='summary'/role='system'`——
+  FTS 可搜（压缩后的会话仍能搜到早期意图），但不进需求抽取与标题。
 - **history.jsonl**（`~/.claude/history.jsonl`，projects 的兄弟文件）：
   `{display, sessionId, timestamp, project, pastedContents}` 每条用户输入一行；
   用于无标题 session 的兜底（首条非信封 display）。
