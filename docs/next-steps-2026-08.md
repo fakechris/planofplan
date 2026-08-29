@@ -31,7 +31,7 @@ obelisk = agent 记忆检索（CodeAct 查询面，已以插件进 DSH）；Wake
 
 ## 2. 批次排序
 
-### 第一批 —— 基建收尾（本批先做 A、E）
+### 第一批 —— 基建收尾（✅ 已全部落地，2026-08-29）
 
 1. **watcher + 单飞索引触发 + SSE**（差距 A）。参考 obelisk ADR-0009 的形态：根目录
    recursive watch + 静默窗防抖 + maxWait 有界批（吵闹的活跃 session 不饿死 flush）。
@@ -40,14 +40,18 @@ obelisk = agent 记忆检索（CodeAct 查询面，已以插件进 DSH）；Wake
    服务端 `/api/events` SSE 广播 `index` / `sessions-indexed`；前端 EventSource 收到
    后节流触发 `render()`。
    验收：活跃 session 写入后，dashboard 无人工操作 ≤5s 内出现新消息；footer 显示
-   索引状态与最近索引时间。
+   索引状态与最近索引时间。（隔离 E2E 冒烟已验证全链路）
    后续优化（先测量再决定）：changedPaths 定向发现（省 walk 成本；需处理
    kimi wire.jsonl / grok chat_history.jsonl → 目录文件的反向映射）。
-2. **session_user_meta + 墓碑**（差距 B）：`session_user_meta(session_id, file_path,
-   starred, hidden, deleted_at)`，独立于可重建索引，`listSessionRows`/删除清理路径
-   联动。验收：hidden/star 在 rebuild 后幸存；删除走墓碑不复活。
-3. **Host 头校验 + 可选鉴权**（差距 E，本批顺手做 Host 部分）：仅放行
-   localhost/127.0.0.1/[::1] 的 Host（`PLANOFPLAN_ALLOWED_HOSTS` 可扩），403 其余。
+2. **session_user_meta + 墓碑**（差距 B，Wake 模式）：`session_user_meta` 表
+   （session_id 主键 + file_path 副键）独立于可重建索引；star/hidden 走部分更新，
+   删除 = 墓碑 + 级联清 L1 行（L0 源文件永远不动）；catalog 扫描三道闸
+   （发现层拦 file_path、行层拦 id、stub 层拦 usage 回填）+ 存量清理；
+   `/api/sessions` 默认排除 hidden（`?hidden=1` 显式包含，FTS 命中路径同闸）；
+   端点：star/hide/DELETE/restore + `/api/sessions/deleted` 恢复入口。
+   验收：hidden/star 在 rebuild 后幸存（测试覆盖）；删除走墓碑不复活（测试覆盖）。
+3. **Host 头校验 + 可选鉴权**（差距 E）：仅放行 localhost/127.0.0.1/[::1] 的 Host
+   （`PLANOFPLAN_ALLOWED_HOSTS` 可扩），403 其余。鉴权开关暂缓（无对外暴露场景）。
 
 ### 第二批 —— 元数据质量（喂当前主战场：计划发现）
 

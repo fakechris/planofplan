@@ -227,7 +227,7 @@ async function load() {
     request('/api/overview'),
     request('/api/build-info'),
     request(`/api/usage?days=${encodeURIComponent(days)}`),
-    request(`/api/sessions?days=${encodeURIComponent(days)}`).catch(() => null),
+    request(`/api/sessions?${sessionListParams()}`).catch(() => null),
   ]);
   return { overview, buildInfo, usage, sessions };
 }
@@ -310,9 +310,11 @@ function filteredSessions(list) {
   const query = (document.getElementById('sessionSearch')?.value || '').trim().toLowerCase();
   const hideUntitled = document.getElementById('sessionHideUntitled')?.checked;
   const showAutomated = document.getElementById('sessionShowAutomated')?.checked;
-  return (list?.sessions || []).filter((session) => {
+  const starredOnly = document.getElementById('sessionStarredOnly')?.checked;
+  const kept = (list?.sessions || []).filter((session) => {
     // 默认只看真实用户会话;自动化(subagent/插件/exec/herdr)勾选才显示
     if (!showAutomated && (session.origin || 'user') !== 'user') return false;
+    if (starredOnly && !session.starred) return false;
     const title = session.title || '';
     const untitled = !title.trim();
     if (hideUntitled && untitled) return false;
@@ -333,6 +335,8 @@ function filteredSessions(list) {
     }
     return true;
   });
+  // 星标置顶(稳定排序:其余保持服务端的 updatedAt 序)
+  return kept.sort((a, b) => Number(b.starred ?? false) - Number(a.starred ?? false));
 }
 
 function renderSessions(list) {
@@ -373,6 +377,7 @@ function renderSessions(list) {
   listEl.innerHTML = sessionView === 'projects'
     ? projectListHtml(visible, sessions.length)
     : sessionListHtml(visible, sessions.length);
+  if (document.getElementById('sessionShowHidden')?.checked) void loadDeletedSessions(listEl);
   listEl.querySelectorAll('[data-session-id]').forEach((row) => {
     row.addEventListener('click', () => {
       openSessionId = row.getAttribute('data-session-id');
@@ -401,6 +406,7 @@ function renderSessions(list) {
   });
   if (open) {
     readerEl.innerHTML = sessionDetailHtml(open, sessions);
+    bindSessionUserActions(readerEl);
     readerEl.querySelector('[data-reveal]')?.addEventListener('click', async (event) => {
       event.stopPropagation();
       const id = event.currentTarget.getAttribute('data-reveal');
@@ -433,6 +439,82 @@ function renderSessions(list) {
   }
 }
 
+// 用户数据层动作:星标/隐藏/删除。删除只落墓碑(L0 源文件不动),在「显示已隐藏」
+// 的已删除区块里可恢复。动作完成后按当前过滤条件原样重取列表。
+function bindSessionUserActions(readerEl) {
+  readerEl.querySelector('[data-star]')?.addEventListener('click', async (event) => {
+    event.stopPropagation();
+    const btn = event.currentTarget;
+    const on = btn.getAttribute('data-on') === '1';
+    try {
+      await request(`/api/sessions/${encodeURIComponent(btn.getAttribute('data-star'))}/star`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ starred: on }),
+      });
+      showToast(on ? '已星标' : '已取消星标');
+      await reloadSessionsList();
+    } catch (error) { showToast(error.message, true); }
+  });
+  readerEl.querySelector('[data-hide]')?.addEventListener('click', async (event) => {
+    event.stopPropagation();
+    const btn = event.currentTarget;
+    const on = btn.getAttribute('data-on') === '1';
+    try {
+      await request(`/api/sessions/${encodeURIComponent(btn.getAttribute('data-hide'))}/hide`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ hidden: on }),
+      });
+      showToast(on ? '已隐藏,勾选「显示已隐藏」可找回' : '已取消隐藏');
+      await reloadSessionsList();
+    } catch (error) { showToast(error.message, true); }
+  });
+  readerEl.querySelector('[data-delete]')?.addEventListener('click', async (event) => {
+    event.stopPropagation();
+    const btn = event.currentTarget;
+    const id = btn.getAttribute('data-delete');
+    if (!confirm('删除这条对话?只从 planofplan 移除(源日志文件不动),可在「显示已隐藏」里恢复。')) return;
+    try {
+      await request(`/api/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      if (openSessionId === id) openSessionId = null;
+      showToast('已删除');
+      await reloadSessionsList();
+    } catch (error) { showToast(error.message, true); }
+  });
+}
+
+// 已删除(墓碑)列表:只在「显示已隐藏」勾选时挂在列表底部,提供恢复入口
+async function loadDeletedSessions(listEl) {
+  let deleted = [];
+  try {
+    deleted = (await request('/api/sessions/deleted')).deleted || [];
+  } catch {
+    return;
+  }
+  if (deleted.length === 0) return;
+  const box = document.createElement('div');
+  box.className = 'session-deleted';
+  box.innerHTML = `
+    <h3>已删除(${deleted.length})——源日志未动,可恢复</h3>
+    ${deleted.map((row) => `
+      <div class="session-deleted-row">
+        <strong>${escapeHtml(row.sessionId)}</strong>
+        <span>${escapeHtml(row.filePath || '')}</span>
+        <button class="secondary-btn" type="button" data-restore="${escapeHtml(row.sessionId)}">恢复</button>
+      </div>
+    `).join('')}
+  `;
+  listEl.appendChild(box);
+  box.querySelectorAll('[data-restore]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      try {
+        await request(`/api/sessions/${encodeURIComponent(btn.getAttribute('data-restore'))}/restore`, { method: 'POST' });
+        showToast('已恢复,正在重新扫描');
+        await reloadSessionsList();
+      } catch (error) { showToast(error.message, true); }
+    });
+  });
+}
+
 // origin 徽标文案(仅非 user 时显示;判定见 src/session-origin.ts)
 const ORIGIN_LABELS = {
   subagent: 'subagent',
@@ -448,10 +530,12 @@ function sessionItemHtml(session, nested = false) {
     : '';
   const originLabel = ORIGIN_LABELS[session.origin] || '';
   const originHtml = originLabel ? ` · <i class="session-origin">${originLabel}</i>` : '';
+  const star = session.starred ? '<i class="session-star" title="星标">★</i>' : '';
+  const hiddenTag = session.hidden ? ' · <i class="session-origin">已隐藏</i>' : '';
   return `
     <button type="button" class="session-item${session.id === openSessionId ? ' active' : ''}${nested ? ' session-item-sub' : ''}" data-session-id="${escapeHtml(session.id)}">
-      <strong>${nested ? '↳ ' : ''}${escapeHtml(session.requirement || session.title || '无标题')}</strong>
-      <span>${escapeHtml(session.provider)} · ${escapeHtml(sessionProjectName(session))} · ${fmtAgo(session.updatedAt, Date.now())}${session.totalTokens ? ` · ${fmtTokens(session.totalTokens)}` : ''}${originHtml}</span>
+      <strong>${star}${nested ? '↳ ' : ''}${escapeHtml(session.requirement || session.title || '无标题')}</strong>
+      <span>${escapeHtml(session.provider)} · ${escapeHtml(sessionProjectName(session))} · ${fmtAgo(session.updatedAt, Date.now())}${session.totalTokens ? ` · ${fmtTokens(session.totalTokens)}` : ''}${originHtml}${hiddenTag}</span>
       ${hitHtml}
     </button>
   `;
@@ -1978,6 +2062,9 @@ function sessionDetailHtml(session, pool) {
     <button type="button" class="secondary-btn handoff-btn" data-handoff="session" data-handoff-id="${escapeHtml(session.id)}">交接…</button>
     <div id="handoffPanel"></div>
     <div class="session-actions">
+      <button class="secondary-btn" type="button" data-star="${escapeHtml(session.id)}" data-on="${session.starred ? '0' : '1'}">${session.starred ? '取消星标' : '星标'}</button>
+      <button class="secondary-btn" type="button" data-hide="${escapeHtml(session.id)}" data-on="${session.hidden ? '0' : '1'}">${session.hidden ? '取消隐藏' : '隐藏'}</button>
+      <button class="secondary-btn" type="button" data-delete="${escapeHtml(session.id)}">删除</button>
       ${session.sourceFile ? `<button class="secondary-btn" type="button" data-reveal="${escapeHtml(session.id)}">在 Finder 中显示</button>` : ''}
     </div>
     <div id="sessionFiles" class="session-attrs"></div>
@@ -2691,11 +2778,32 @@ function resetSessionFilters() {
   sessionVisibleCount = 40;
   if (latestSessions) renderSessions(latestSessions);
 }
+
+// 列表请求的公共参数:窗口天数 + 「显示已隐藏」时带 hidden=1(默认服务端排除)
+function sessionListParams() {
+  const days = document.getElementById('usageDays')?.value || '30';
+  const hidden = document.getElementById('sessionShowHidden')?.checked ? '&hidden=1' : '';
+  return `days=${encodeURIComponent(days)}${hidden}`;
+}
+
+// 用户动作(星标/隐藏/删除/恢复)后按当前过滤条件原样重取列表
+async function reloadSessionsList() {
+  try {
+    const q = (document.getElementById('sessionSearch')?.value || '').trim();
+    latestSessions = await request(`/api/sessions?${sessionListParams()}&q=${encodeURIComponent(q)}`);
+    sessionServerQuery = q.toLowerCase();
+    renderSessions(latestSessions);
+  } catch {
+    /* daemon restarting */
+  }
+}
 document.getElementById('sessionProvider')?.addEventListener('change', resetSessionFilters);
 document.getElementById('sessionProject')?.addEventListener('change', resetSessionFilters);
 document.getElementById('sessionCwd')?.addEventListener('change', resetSessionFilters);
 document.getElementById('sessionHideUntitled')?.addEventListener('change', resetSessionFilters);
 document.getElementById('sessionShowAutomated')?.addEventListener('change', resetSessionFilters);
+document.getElementById('sessionStarredOnly')?.addEventListener('change', resetSessionFilters);
+document.getElementById('sessionShowHidden')?.addEventListener('change', () => { void reloadSessionsList(); });
 // 搜索框:输入即本地过滤元数据,停顿 300ms 后带 q 问服务端(并集消息正文 FTS)
 let sessionSearchTimer = null;
 let sessionServerQuery = '';
@@ -2708,8 +2816,7 @@ async function refetchSessionsForSearch() {
   const q = (document.getElementById('sessionSearch')?.value || '').trim();
   if (q === sessionServerQuery) return;
   try {
-    const days = document.getElementById('usageDays')?.value || '30';
-    latestSessions = await request(`/api/sessions?days=${encodeURIComponent(days)}&q=${encodeURIComponent(q)}`);
+    latestSessions = await request(`/api/sessions?${sessionListParams()}&q=${encodeURIComponent(q)}`);
     sessionServerQuery = q.toLowerCase();
     renderSessions(latestSessions);
   } catch {
@@ -2986,6 +3093,7 @@ function initLiveEvents() {
     return; // 无 SSE 就退回轮询,功能不缺
   }
   es.addEventListener('sessions-indexed', () => refreshFromLiveEvent());
+  es.addEventListener('sessions-changed', () => refreshFromLiveEvent());
   es.addEventListener('index', (event) => {
     // 索引开始时立刻同步 footer 状态,不等下一次 render
     try {
@@ -3009,7 +3117,7 @@ function maybePollSessionIndex(list) {
     try {
       const days = document.getElementById('usageDays')?.value || '30';
       const q = (document.getElementById('sessionSearch')?.value || '').trim();
-      latestSessions = await request(`/api/sessions?days=${encodeURIComponent(days)}&q=${encodeURIComponent(q)}`);
+      latestSessions = await request(`/api/sessions?${sessionListParams()}&q=${encodeURIComponent(q)}`);
       renderSessions(latestSessions);
       maybePollSessionIndex(latestSessions);
     } catch {

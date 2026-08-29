@@ -855,7 +855,12 @@ function indexSessionFileMessages(
 export async function collectSessionCatalog(store: Store, options: SessionCollectOptions = {}): Promise<number> {
   const since = options.since ?? Date.now() - 30 * DAY_MS;
   const until = options.until ?? Date.now();
-  const discovered = discoverSessionFiles(options, since);
+  // 墓碑过滤(参照 Wake 的双键设计):用户删除的 session 不能在重建后复活。
+  // 三道闸:发现层拦 file_path、行层拦 session id、stub 层拦 usage 回填;
+  // 收尾再把墓碑期间漏进库的存量行清掉。
+  const tombstones = store.tombstonedSessionInfo();
+  const discovered = discoverSessionFiles(options, since)
+    .filter((file) => !tombstones.paths.has(file.path));
 
   // 增量两道闸:目录行按 seenAt 复用(跳过 head 解析);消息级按
   // session_index_state 水位,mtime 未变整体跳过,文件尾部增长则从字节偏移
@@ -900,6 +905,7 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
     }
     scanned += 1;
     for (const row of extractSessionRecords(file.provider, file.path, file.mtimeMs)) {
+      if (tombstones.ids.has(row.id)) continue;
       const withWork = attachGit(row);
       let repos: SessionRepo[];
       if (file.provider === 'zcode') {
@@ -927,9 +933,17 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
   }
   store.upsertSessions(rows);
   for (const row of rows) store.replaceSessionRepos(row.id, row.repos ?? []);
-  store.upsertSessions(sessionStubsFromUsage(store, since, until, new Set(rows.map((row) => row.id))));
-  // 清理:源文件已被删除/轮换的 session,连同消息索引和 repo 归属一起删
+  store.upsertSessions(
+    sessionStubsFromUsage(store, since, until, new Set(rows.map((row) => row.id)))
+      .filter((stub) => !tombstones.ids.has(stub.id)),
+  );
+  // 清理:墓碑期间漏进库的行先删;源文件已被删除/轮换的 session,
+  // 连同消息索引和 repo 归属一起删
   for (const row of store.listSessionRows()) {
+    if (tombstones.ids.has(row.id)) {
+      store.deleteSession(row.id);
+      continue;
+    }
     if (!row.sourceFile) continue;
     if (!(CATALOG_PROVIDERS as readonly string[]).includes(row.provider)) continue;
     if (!existsSync(row.sourceFile)) store.deleteSession(row.id);

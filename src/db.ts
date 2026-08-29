@@ -184,6 +184,18 @@ CREATE TABLE IF NOT EXISTS session_index_state (
   lines INTEGER NOT NULL DEFAULT 0,
   parser_version INTEGER NOT NULL DEFAULT 1
 );
+-- 用户数据层:星标/隐藏/删除墓碑(参照 Wake 的 tombstones 双键设计)。
+-- L1 目录可整体重建,用户意图必须独立存放:重建后墓碑拦住被删 session 复活,
+-- 星标/隐藏也要幸存。file_path 键在 id 提取规则变化时兜底。
+CREATE TABLE IF NOT EXISTS session_user_meta (
+  session_id TEXT PRIMARY KEY,
+  file_path TEXT,
+  starred INTEGER NOT NULL DEFAULT 0,
+  hidden INTEGER NOT NULL DEFAULT 0,
+  deleted_at INTEGER,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_session_user_meta_file ON session_user_meta(file_path);
 -- 文件 touch 行为层:tool_use 入参里的结构化文件路径(Bash command 不解析)。
 CREATE TABLE IF NOT EXISTS session_file_touches (
   id TEXT PRIMARY KEY,
@@ -1770,6 +1782,95 @@ export class Store {
       this.db.query('DELETE FROM session_repos WHERE session_id = ?').run(id);
       this.db.query('DELETE FROM sessions WHERE id = ?').run(id);
     });
+  }
+
+  // ── 用户数据层:星标/隐藏/墓碑 ──────────────────────────────────────
+  // 独立于可重建的 L1:catalog 扫描按这里的墓碑过滤,重建不复活被删 session。
+
+  getSessionUserMetaMap(): Map<string, { starred: boolean; hidden: boolean; deletedAt: number | null; filePath: string | null }> {
+    const rows = this.db.query(
+      'SELECT session_id, file_path, starred, hidden, deleted_at FROM session_user_meta',
+    ).all() as Array<{ session_id: string; file_path: string | null; starred: number; hidden: number; deleted_at: number | null }>;
+    return new Map(rows.map((row) => [row.session_id, {
+      starred: row.starred === 1,
+      hidden: row.hidden === 1,
+      deletedAt: row.deleted_at,
+      filePath: row.file_path,
+    }]));
+  }
+
+  private upsertSessionUserMeta(id: string, patch: { starred?: boolean; hidden?: boolean; filePath?: string | null }): void {
+    const now = Date.now();
+    const starred = patch.starred == null ? null : patch.starred ? 1 : 0;
+    const hidden = patch.hidden == null ? null : patch.hidden ? 1 : 0;
+    // 先按部分更新(COALESCE 只覆盖显式给出的字段);行不存在再整行插入
+    const updated = this.db.query(
+      `UPDATE session_user_meta SET
+         starred = COALESCE(?, starred),
+         hidden = COALESCE(?, hidden),
+         file_path = COALESCE(?, file_path),
+         updated_at = ?
+       WHERE session_id = ?`,
+    ).run(starred, hidden, patch.filePath ?? null, now, id);
+    if (updated.changes === 0) {
+      this.db.query(
+        `INSERT INTO session_user_meta (session_id, file_path, starred, hidden, deleted_at, updated_at)
+         VALUES (?, ?, ?, ?, NULL, ?)`,
+      ).run(id, patch.filePath ?? null, starred ?? 0, hidden ?? 0, now);
+    }
+  }
+
+  setSessionStar(id: string, on: boolean): void {
+    this.upsertSessionUserMeta(id, { starred: on });
+  }
+
+  setSessionHidden(id: string, on: boolean): void {
+    this.upsertSessionUserMeta(id, { hidden: on });
+  }
+
+  /** 删除 = 墓碑 + 级联清掉 L1 行:源文件不动(L0 只读),重建后靠墓碑拦回归。 */
+  tombstoneSession(id: string, filePath: string | null): void {
+    this.withTransaction(() => {
+      this.db.query(
+        `INSERT INTO session_user_meta (session_id, file_path, starred, hidden, deleted_at, updated_at)
+         VALUES (?, ?, 0, 0, ?, ?)
+         ON CONFLICT(session_id) DO UPDATE SET deleted_at = excluded.deleted_at, updated_at = excluded.updated_at,
+           file_path = COALESCE(excluded.file_path, session_user_meta.file_path)`,
+      ).run(id, filePath, Date.now(), Date.now());
+      this.deleteSession(id);
+    });
+  }
+
+  /** 恢复:清墓碑(下一轮扫描自然把 session 扫回来)。 */
+  restoreSession(id: string): void {
+    this.db.query(
+      'UPDATE session_user_meta SET deleted_at = NULL, hidden = 0, updated_at = ? WHERE session_id = ?',
+    ).run(Date.now(), id);
+  }
+
+  /** 墓碑双键视图:id 集合(拦 session 行)+ file_path 集合(拦扫描发现)。 */
+  tombstonedSessionInfo(): { ids: Set<string>; paths: Set<string> } {
+    const rows = this.db.query(
+      'SELECT session_id, file_path FROM session_user_meta WHERE deleted_at IS NOT NULL',
+    ).all() as Array<{ session_id: string; file_path: string | null }>;
+    const ids = new Set<string>();
+    const paths = new Set<string>();
+    for (const row of rows) {
+      ids.add(row.session_id);
+      if (row.file_path) paths.add(row.file_path);
+    }
+    return { ids, paths };
+  }
+
+  /** 已删除列表(恢复入口用):只给元数据,正文已随墓碑清掉。 */
+  listTombstonedSessions(): Array<{ sessionId: string; filePath: string | null; deletedAt: number }> {
+    return (this.db.query(
+      'SELECT session_id, file_path, deleted_at FROM session_user_meta WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC',
+    ).all() as Array<{ session_id: string; file_path: string | null; deleted_at: number }>).map((row) => ({
+      sessionId: row.session_id,
+      filePath: row.file_path,
+      deletedAt: row.deleted_at,
+    }));
   }
 
   countSessionMessages(sessionId?: string): number {

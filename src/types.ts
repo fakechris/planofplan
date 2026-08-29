@@ -153,6 +153,10 @@ export interface SessionRecord {
   parentId?: string | null;
   /** 环境型启动方标识(如 `herdr:pane:10`);不进 session_links 边表。 */
   originDetail?: string | null;
+  /** 用户数据层(session_user_meta):星标,由读侧联入,不落 sessions 表。 */
+  starred?: boolean;
+  /** 用户数据层:隐藏,列表默认过滤,「显示已隐藏」时可见。 */
+  hidden?: boolean;
   /** 需求文本:从 session_messages 用户消息流抽取(motivation.ts),由读侧附上。 */
   requirement?: string | null;
   /**
