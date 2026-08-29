@@ -2718,6 +2718,10 @@ function sessionFromRow(row: {
 export function openDb(path: string): Store {
   const db = new Database(path, { strict: true });
   db.exec(`PRAGMA journal_mode = WAL;`);
+  // 多写者共存:daemon 内(调度器/启动扫描)与扫描子进程会并发写同一 DB。
+  // WAL 只串行化写事务,不给 busy_timeout 时第二个写者立刻 SQLITE_BUSY
+  // 直接把未捕获异常抛到顶层。5s 重试窗足够跨过毫秒级的写事务。
+  db.exec(`PRAGMA busy_timeout = 5000;`);
   return new Store(db);
 }
 

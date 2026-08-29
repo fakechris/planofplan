@@ -193,11 +193,20 @@ export class Scheduler {
       const adapter = getAdapter(plan.adapter);
       if (!adapter) continue;
       const intervalSec = plan.pollIntervalSec > 0 ? plan.pollIntervalSec : 60;
-      void this.refreshPlan(plan.slug);
+      void this.safeRefresh(plan.slug);
       const t = setInterval(() => {
         void this.maybePoll(plan.slug);
       }, intervalSec * 1000);
       this.timers.set(plan.slug, t);
+    }
+  }
+
+  /** 调度器入口必须吞错:refreshPlan 的未捕获拒绝(SQLITE_BUSY 等)会把整个 daemon 带崩。 */
+  private async safeRefresh(slug: string): Promise<void> {
+    try {
+      await this.refreshPlan(slug);
+    } catch {
+      /* 记录在 plan state 里,不冒泡 */
     }
   }
 
@@ -209,7 +218,7 @@ export class Scheduler {
   private async maybePoll(slug: string): Promise<void> {
     const state = this.store.getState(slug);
     if (state?.paused_until != null && state.paused_until > Date.now()) return; // 退避中
-    await this.refreshPlan(slug);
+    await this.safeRefresh(slug);
   }
 
   async refreshPlan(slug: string): Promise<RefreshResult> {

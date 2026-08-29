@@ -76,6 +76,32 @@ GET /api/usage?days=7&provider=codex
 GET /api/usage?days=30&refresh=1
 ```
 
+## MCP（agent 查 planofplan）
+
+daemon 在 `POST http://localhost:<port>/mcp` 提供只读 MCP（streamable HTTP，
+无会话状态；Host 头校验同样生效）。被监控的 agent 可以反过来查配额与谱系——
+这是三家里没人做的错位面：agentsview/obelisk 的 agent 面是通用历史检索，
+这里只有配额 + 谱系。五个工具：
+
+- `plan_quota_status` 各订阅的配额窗口与重置倒计时
+- `usage_summary` 本地日志的 token 用量/成本估算（按天/provider/模型）
+- `session_search` 跨全部 agent 会话的元数据 ∪ 消息正文 FTS 搜索
+- `repo_lineage` 一个仓库最近的会话→需求→commit 谱系
+- `requirement_status` 最近抽取的需求及其 commit 落地状态
+
+接入 Claude Code：
+
+```bash
+claude mcp add --transport http planofplan http://localhost:9288/mcp
+```
+
+接入 Codex（`~/.codex/config.toml`）：
+
+```toml
+[mcp_servers.planofplan]
+url = "http://localhost:9288/mcp"
+```
+
 ## macOS menubar app
 
 构建并安装到唯一运行位置 `/Applications/planofplan.app`：

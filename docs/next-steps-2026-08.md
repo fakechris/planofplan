@@ -67,11 +67,17 @@ obelisk = agent 记忆检索（CodeAct 查询面，已以插件进 DSH）；Wake
    transcript 视图。新信封出现时往 `CODEX_META_ENVELOPES` 追加并升
    parser 版本。
 
-### 第三批 —— 差异化新面
+### 第三批 —— 差异化新面（✅ 已落地，2026-08-29）
 
-6. **只读 MCP server**（差距 D 的错位打法）：暴露 `plan_quota_status` /
-   `usage_summary` / `repo_lineage` / `requirement_status` / `session_search`。
-   依赖第一批（agent 查到的数据必须新鲜）。不做通用历史检索（obelisk 已占位）。
+6. **只读 MCP server**（差距 D 的错位打法）：`POST /mcp`（streamable HTTP
+   子集,手写 JSON-RPC 最小协议面,无 SDK 依赖）暴露
+   `plan_quota_status` / `usage_summary` / `session_search` /
+   `repo_lineage` / `requirement_status`。Host 头校验覆盖;README 补了
+   Claude Code / Codex 接入命令。不做通用历史检索（obelisk 已占位）。
+   落地时顺带修掉一个被 watcher 放大的潜伏崩溃:调度器/启动扫描/扫描
+   子进程三方并发写 SQLite,WAL 下无 busy_timeout 时第二个写者
+   SQLITE_BUSY 直接带崩 daemon——补 `PRAGMA busy_timeout=5000` +
+   调度器入口吞错（`safeRefresh`）。
 
 ### 第四批 —— 机制与制度（见缝插针）
 
