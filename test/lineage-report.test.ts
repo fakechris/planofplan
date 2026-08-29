@@ -34,7 +34,7 @@ function seed() {
     { id: 'u1', day: new Date(NOW).toISOString().slice(0, 10), timestamp: NOW - 3000, provider: 'claude', model: 'claude-fable-5',
       inputTokens: 1000, cachedInputTokens: 0, cacheCreationInputTokens: 0, outputTokens: 500,
       reasoningOutputTokens: 0, totalTokens: 1500, billableTokens: null, estimatedCostUsd: 0.02,
-      source: 'local', confidence: 'measured', sessionId: 'claude:a' } as UsageRecord,
+      source: 'local', confidence: 'measured', sessionId: 'a' } as UsageRecord, // session_id 存原生 uuid(无前缀)
   ]);
   return store;
 }

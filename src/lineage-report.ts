@@ -46,13 +46,16 @@ export function buildLineageReport(store: Store, since: number, until: number): 
     list.push(commit);
     commitsBySession.set(commit.sessionId, list);
   }
-  const usageBySession = new Map<string, { tokens: number; cost: number | null }>();
+  // usage_records.session_id 存的是各家原生 uuid(无 provider 前缀),与
+  // sessions.id('claude:<uuid>' 等)不同键——用 provider|native 复合键对齐
+  const usageByNative = new Map<string, { tokens: number; cost: number | null }>();
   for (const record of store.getUsageRecords(since, until)) {
     if (!record.sessionId) continue;
-    const bucket = usageBySession.get(record.sessionId) ?? { tokens: 0, cost: 0 };
+    const key = `${record.provider}|${record.sessionId}`;
+    const bucket = usageByNative.get(key) ?? { tokens: 0, cost: 0 };
     bucket.tokens += record.totalTokens;
     bucket.cost = (bucket.cost ?? 0) + (record.estimatedCostUsd ?? 0);
-    usageBySession.set(record.sessionId, bucket);
+    usageByNative.set(key, bucket);
   }
 
   const items: LineageReportItem[] = [];
@@ -62,7 +65,7 @@ export function buildLineageReport(store: Store, since: number, until: number): 
     const commits = (commitsBySession.get(requirement.sessionId) ?? [])
       .filter((commit) => commit.ts == null || (commit.ts >= since && commit.ts < until))
       .map((commit) => ({ sha: commit.sha, kind: commit.kind, summary: commit.summary }));
-    const usage = usageBySession.get(requirement.sessionId);
+    const usage = usageByNative.get(`${session.provider}|${session.nativeId}`);
     items.push({
       requirementId: requirement.id,
       text: requirement.text,
