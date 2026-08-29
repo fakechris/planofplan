@@ -14,6 +14,7 @@ import type {
 } from './types.ts';
 import { fetchOfficialUsage } from './official-usage.ts';
 import { collectSessionCatalog } from './sessions.ts';
+import { modelPriceFor } from './pricing.ts';
 
 const DAY_MS = 86_400_000;
 
@@ -173,7 +174,12 @@ const MODEL_PRICE_FAMILIES: Array<{
 
 function costFor(model: string, usage: NumericUsage): number | null {
   const normalized = model.toLowerCase();
-  const price = MODEL_PRICE_FAMILIES.find((family) => family.match.test(normalized));
+  // 回退链:价格快照(可刷新的数据文件,新模型不再等代码更新) → 家族正则 → null。
+  // 两套价格同为 USD/MTok;快照条目来自 LiteLLM(缺 cache 价的字段按 0 计)。
+  const price = modelPriceFor(model) ?? (() => {
+    const family = MODEL_PRICE_FAMILIES.find((f) => f.match.test(normalized));
+    return family ? { input: family.input, cached: family.cached, cacheCreation: family.cacheCreation, output: family.output } : null;
+  })();
   if (!price) return null;
   const billableInput = normalized.includes('claude')
     ? usage.inputTokens
