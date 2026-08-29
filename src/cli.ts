@@ -13,6 +13,7 @@ import type { Store } from './db.ts';
 import type { QuotaWindow } from './types.ts';
 import { buildUsageReport, collectUsageReport } from './usage.ts';
 import { buildSessionList, collectSessionCatalog, searchSessions } from './sessions.ts';
+import { refreshPricingSnapshot, pricingSnapshotStatus } from './pricing.ts';
 import { sessionProject } from './repos.ts';
 
 const argv = process.argv.slice(2);
@@ -38,6 +39,8 @@ function help(): void {
   planofplan usage [--json] [--provider sl] 全 plan 用量输出
   planofplan tokens [--json] [--days N] [--provider sl] token usage & spend 报表
   planofplan sessions [--json] [--days N] [--provider sl] [--search q] [--refresh] 本地 session 目录
+  planofplan pricing refresh                拉取 LiteLLM 模型价格快照(离线时用内置家族表估算)
+  planofplan pricing status                 显示价格快照状态
   planofplan status                         各 plan 调度/凭据/最近抓取状态
   planofplan refresh [slug]                 手动刷新一个/全部 plan
   planofplan browser-auth                  读取 Safari kimi-auth 并刷新 Kimi
@@ -140,6 +143,33 @@ function formatTokens(value: number): string {
   if (value < 1_000_000) return `${grouped(value / 1_000, value >= 10_000 ? 0 : 1)}K`;
   if (value < 1_000_000_000) return `${grouped(value / 1_000_000, value >= 10_000_000 ? 1 : 2)}M`;
   return `${grouped(value / 1_000_000_000, 2)}B`;
+}
+
+// ── pricing ────────────────────────────────────────────────────────
+async function pricingCmd(): Promise<void> {
+  const sub = argv[1];
+  if (sub === 'refresh') {
+    console.log('正在拉取 LiteLLM 价格快照…');
+    const result = await refreshPricingSnapshot();
+    if (result.ok) {
+      console.log(`已写入 ${result.path}(${result.models} 个模型,${new Date(result.fetchedAt ?? Date.now()).toLocaleString('zh-CN')})`);
+    } else {
+      console.error(`拉取失败:${result.error}(继续用内置家族表/旧快照估算)`);
+      process.exitCode = 1;
+    }
+    return;
+  }
+  const s = pricingSnapshotStatus();
+  if (!s.exists) {
+    console.log('尚无价格快照。运行 planofplan pricing refresh 拉取;当前用内置家族表估算。');
+    return;
+  }
+  if (s.source == null) {
+    console.log('价格快照文件存在但不可解析,已回退内置家族表。可运行 planofplan pricing refresh 重建。');
+    return;
+  }
+  console.log(`价格快照:${s.source} · ${s.models} 个模型 · 拉取于 ${new Date(s.fetchedAt ?? 0).toLocaleString('zh-CN')}`);
+  console.log('回退链:快照(精确/归一化匹配) → 内置家族正则 → 未知模型不虚构价格');
 }
 
 // ── serve ──────────────────────────────────────────────────────────
@@ -408,6 +438,9 @@ switch (cmd) {
     break;
   case 'sessions':
     await sessionsCmd();
+    break;
+  case 'pricing':
+    await pricingCmd();
     break;
   case 'status':
     status();
