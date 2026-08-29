@@ -65,10 +65,44 @@ function pushTurn(turns: TranscriptTurn[], role: TranscriptTurn['role'], text: s
   turns.push(toolName ? { role, text: clipped, toolName } : { role, text: clipped });
 }
 
+/**
+ * claude 的 isMeta 记录(如 structured-output-enforce 注入)不是用户/助手可见
+ * 文本,标题与消息索引都要跳过。与 `<command-` 信封过滤是两套独立信号。
+ */
+export function isClaudeMetaRecord(record: Record<string, unknown>): boolean {
+  return record.isMeta === true;
+}
+
+/**
+ * codex 用户消息里的系统信封前缀(2026-08 本机普查):环境上下文/插件推荐/
+ * 内部上下文等,不是用户原话。显式清单而非「< 开头即信封」——用户粘贴
+ * HTML 片段是真实输入,不能误杀。新信封出现时在此追加并升 MESSAGE_PARSER_VERSION。
+ */
+const CODEX_META_ENVELOPES = new Set([
+  'environment_context',
+  'codex_internal_context',
+  'recommended_plugins',
+  'turn_aborted',
+  'user_action',
+  'goal_context',
+  'subagent_notification',
+  'image',
+  'task',
+  'skill',
+  'user_shell_command',
+]);
+
+export function isCodexMetaUserText(text: string): boolean {
+  if (!text.startsWith('<')) return false;
+  const tag = /^<([a-z_]+)/.exec(text)?.[1] ?? null;
+  return tag != null && CODEX_META_ENVELOPES.has(tag);
+}
+
 function turnsFromClaude(records: Record<string, unknown>[]): TranscriptTurn[] {
   const turns: TranscriptTurn[] = [];
   for (const record of records) {
     if (record.type !== 'user' && record.type !== 'assistant') continue;
+    if (isClaudeMetaRecord(record)) continue;
     const message = record.message && typeof record.message === 'object'
       ? record.message as Record<string, unknown>
       : record;
@@ -120,7 +154,10 @@ function turnsFromCodex(records: Record<string, unknown>[]): TranscriptTurn[] {
         continue;
       }
       const role = payload.role;
-      if (role === 'user') pushTurn(turns, 'user', textOf(payload.content));
+      if (role === 'user') {
+        const text = textOf(payload.content);
+        if (!isCodexMetaUserText(text)) pushTurn(turns, 'user', text);
+      }
       if (role === 'assistant') pushTurn(turns, 'assistant', textOf(payload.content));
     }
   }
@@ -325,6 +362,7 @@ function toolRow(
 
 function messagesFromClaudeRecord(sessionId: string, record: Record<string, unknown>, seq: number): SessionMessageRow[] {
   if (record.type !== 'user' && record.type !== 'assistant') return [];
+  if (isClaudeMetaRecord(record)) return [];
   const uuid = typeof record.uuid === 'string' ? record.uuid : null;
   if (!uuid) return [];
   const message = record.message && typeof record.message === 'object'
@@ -375,6 +413,7 @@ function messagesFromCodexRecord(sessionId: string, record: Record<string, unkno
   if (payloadType === 'function_call_output' || payloadType === 'custom_tool_call_output') return [];
   const role = payload.role;
   if (role !== 'user' && role !== 'assistant') return [];
+  if (role === 'user' && isCodexMetaUserText(textOf(payload.content))) return [];
   const row = textRow(sessionId, id, seq, role, textOf(payload.content), ts);
   return row ? [row] : [];
 }
