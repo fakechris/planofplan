@@ -50,6 +50,8 @@ export interface SessionCollectOptions {
   kimiRoot?: string;
   grokRoot?: string;
   dshRoot?: string;
+  /** 消息/touch/水位保留天数(目录行永久保留);0 = 关闭清理。默认取 PLANOFPLAN_MESSAGE_RETENTION_DAYS 或 90。 */
+  messageRetentionDays?: number;
 }
 
 const DAY_MS = 86_400_000;
@@ -727,6 +729,7 @@ function yieldEventLoop(): Promise<void> {
 /** 消息抽取规则版本:改 messagesFromX / 加 touch 行为层时 +1,老水位自动失效触发全量重扫。 */
 // v3:claude isMeta 记录与 codex 系统信封不再进消息索引;标题来源多元化
 // (ai-title / history.jsonl / session_index.jsonl),全量重扫顺带刷新全部标题。
+// (FTS 瘦身走 db v11 迁移直接重建索引,不动消息也不需要这个版本号。)
 export const MESSAGE_PARSER_VERSION = 3;
 const MSG_BATCH = 400;
 
@@ -1044,6 +1047,23 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
     if (!row.sourceFile) continue;
     if (!(CATALOG_PROVIDERS as readonly string[]).includes(row.provider)) continue;
     if (!existsSync(row.sourceFile)) store.deleteSession(row.id);
+  }
+  // 库维护(有界,失败不拖垮扫描):磁盘上已不存在的孤儿水位(实测积累过
+  // 359/1920 行)按存在性清理;消息按保留期裁剪,目录行永久保留。
+  try {
+    const statePaths = store.listSessionIndexStatePaths();
+    const deadStates = statePaths.filter((path) => !existsSync(path));
+    if (deadStates.length > 0) store.deleteSessionIndexStates(deadStates);
+    const scanPaths = store.listUsageScanFilePaths();
+    const deadScans = scanPaths.filter((path) => !existsSync(path));
+    if (deadScans.length > 0) store.deleteUsageScanFiles(deadScans);
+    const retentionDays = options.messageRetentionDays
+      ?? Number(process.env.PLANOFPLAN_MESSAGE_RETENTION_DAYS ?? 90);
+    if (Number.isFinite(retentionDays) && retentionDays > 0) {
+      store.pruneSessionDataBefore(Date.now() - retentionDays * DAY_MS);
+    }
+  } catch {
+    /* maintenance is best-effort */
   }
   applySessionUsage(store, since, until);
   // commit 归因(第二环):有界 git 调用(每 repo 一次 git log + timeout),

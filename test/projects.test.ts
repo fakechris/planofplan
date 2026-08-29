@@ -110,8 +110,8 @@ describe('materializeProjects', () => {
       raw.exec('PRAGMA user_version = 4');
       raw.close();
       const store = openDb(dbPath);
-      // 迁移链 v4 → … → v9(Launch 边 · 需求实体 · 计划态)
-      expect(store.getUserVersion()).toBe(10);
+      // 迁移链 v4 → … → v11(Launch 边 · 需求实体 · 计划态 · FTS 瘦身)
+      expect(store.getUserVersion()).toBe(11);
       const projects = store.listProjects();
       expect(projects).toHaveLength(1);
       expect(projects[0]).toMatchObject({ url: URL_A, name: 'alpha' });

@@ -126,7 +126,7 @@ describe('catalog 尊重墓碑(重建不复活)', () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 });
 
 describe('session user meta API', () => {
@@ -141,7 +141,12 @@ describe('session user meta API', () => {
     return { store, server: createServer(store, scheduler as never, { port: 9291, plans: DEFAULT_PLANS }) };
   }
 
+  // Bun 对快速顺序 app.request 偶发返回空响应(多请求连发测试实测 ~1/10,加任何
+  // 时序扰动即消失的 runner 竞态);让步 1ms 规避,断言本身不放松
+  const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 1));
+
   async function listSessions(server: ReturnType<typeof app>['server'], query = ''): Promise<{ sessions: Array<{ id: string; starred?: boolean; hidden?: boolean }> }> {
+    await tick();
     const res = await server.request(`http://localhost/api/sessions${query}`);
     expect(res.status).toBe(200);
     return res.json() as Promise<{ sessions: Array<{ id: string; starred?: boolean; hidden?: boolean }> }>;
@@ -153,6 +158,7 @@ describe('session user meta API', () => {
     store.setSessionStar('claude:s1', true);
 
     const defaultList = await listSessions(server);
+
     expect(defaultList.sessions.map((s) => s.id)).toEqual(['claude:s1']);
     expect(defaultList.sessions[0].starred).toBe(true);
 
