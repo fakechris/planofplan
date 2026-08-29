@@ -1338,7 +1338,8 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
   // 文件监听(参照 obelisk ADR-0009 的形态):根目录 recursive watch + 静默窗
   // 防抖 + 有界批。flush 不重造扫描——spawn 同一个 sessions --refresh 子进程,
   // 行级水位保证未变文件近零成本;与页面触发的单飞闸门互斥。
-  if (options.live) {
+  // PLANOFPLAN_DISABLE_WATCHER=1 是运维逃生门:watcher 异常时不用回滚代码。
+  if (options.live && process.env.PLANOFPLAN_DISABLE_WATCHER !== '1') {
     const watcher = startSessionWatcher((paths) => {
       sessionIndexLast.changedFiles = paths.length;
       startSessionIndex(30, 'watch');

@@ -64,9 +64,10 @@ planofplan auth clear <slug>             清掉手动 key
 - Dashboard 普通打开和 `GET /api/usage` 默认只读已保存数据，不会同步扫描大日志目录。
   使用 Dashboard 的“扫描本地日志”按钮，或调用 `GET /api/usage?days=30&refresh=1`
   显式启动后台扫描；扫描期间 API 会返回上次已保存的数据和 `scanStatus`。
-- Session catalog（`planofplan sessions` / `/api/sessions`）在 daemon 启动时自动增量索引：
-  文件 mtime 未变的直接复用旧记录，只重扫新文件/变动文件；扫描过程分片让出事件循环，
-  不会阻塞 dashboard 响应。
+- Session catalog（`planofplan sessions` / `/api/sessions`）在 daemon 启动时增量索引，
+  之后由文件监听（`src/watcher.ts`）实时驱动：session 目录有写入就自动触发增量扫描
+  并通过 SSE（`/api/events`）推送 dashboard 刷新，无需打开页面或手动扫描；
+  未变文件按行级水位跳过，扫描过程分片让出事件循环。
 
 JSON API：
 
@@ -221,15 +222,18 @@ launchctl print gui/$(id -u)/local.planofplan.daemon      # 查看守护状态
 ## 架构
 
 ```
-src/cli.ts        入口：serve / usage / status / refresh / auth
-src/core.ts       Scheduler（轮询/退避/stale）+ overview 组装
-src/db.ts         SQLite：plans / snapshots / plan_state / usage_records
+src/cli.ts        入口：serve / usage / status / refresh / auth / pricing
+src/core.ts       Scheduler（轮询/退避/stale，入口吞错）+ overview 组装
+src/db.ts         SQLite：plans / snapshots / usage_records / sessions / session_user_meta
 src/auth.ts       manual key 存取（0600）+ env 读取
 src/adapters/     每 plan 一个 adapter：detectCredentials -> fetchUsage -> QuotaWindow[]
 src/usage.ts      本地 JSONL scanner、token 去重、日期/model/provider 聚合
-src/sessions.ts   session 目录（文件头 catalog + 与 usage 同趟扫描）
+src/pricing.ts    模型价格快照（LiteLLM 拉取 + 家族表兜底）
+src/sessions.ts   session 目录（catalog + 消息级索引 + 行级水位 + 墓碑过滤）
+src/watcher.ts    文件监听：根目录 recursive watch + 静默窗/maxWait 防抖
+src/mcp.ts        只读 MCP server（/mcp，五个配额/谱系工具）
 src/official-usage.ts  Anthropic / Factory Analytics + 可选 Codex app-server usage
-web/              静态前端（无构建，vanilla JS + CSS）
+web/              静态前端（无构建，vanilla JS + CSS；SSE 实时刷新）
 ```
 
 adapter 接口见 `src/types.ts`。MiniMax 的端点/解析规格出处：CodexBar `docs/minimax.md` + `MiniMaxUsageFetcher.swift`、JinHanAI/coding-plan-monitor（实测实现）。
