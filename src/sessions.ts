@@ -22,7 +22,7 @@ import type { Store } from './db.ts';
 import { buildWorkGraph } from './graph.ts';
 import { repoRefOf, sessionProjectNames } from './repos.ts';
 import { attachRepos, extractSessionRepos, TOUCH_BYTES } from './session-repos.ts';
-import { messagesFromRecord, messagesFromZcodeDb } from './transcript.ts';
+import { messagesFromRecord, messagesFromZcodeDb, isClaudeMetaRecord, isCodexMetaUserText } from './transcript.ts';
 import { touchesFromRecord } from './file-touches.ts';
 import { collectSessionCommits } from './commit-attribution.ts';
 import {
@@ -241,8 +241,15 @@ function walkFiles(root: string, since: number, match: (name: string, path: stri
 }
 
 function claudeTitle(records: Record<string, unknown>[]): string | null {
+  // 官方 AI 标题最优先:claude 自己起的 slug,比首条用户消息启发式准
+  for (const record of records) {
+    if (record.type !== 'ai-title') continue;
+    const aiTitle = typeof record.aiTitle === 'string' ? record.aiTitle.trim() : '';
+    if (aiTitle) return titleify(aiTitle);
+  }
   for (const record of records) {
     if (record.type !== 'user') continue;
+    if (isClaudeMetaRecord(record)) continue;
     const message = record.message && typeof record.message === 'object'
       ? record.message as Record<string, unknown>
       : record;
@@ -329,7 +336,7 @@ function extractCodex(path: string, mtimeMs: number): SessionRecord | null {
       const role = payload.role;
       if (role === 'user') {
         const text = titleify(textOf(payload.content));
-        if (text && !isShortAck(text)) title = text;
+        if (text && !isShortAck(text) && !isCodexMetaUserText(textOf(payload.content))) title = text;
       }
     }
   }
@@ -644,6 +651,69 @@ export function sessionWatchRoots(): string[] {
   ])];
 }
 
+// ── 标题补充源(官方优先于启发式) ────────────────────────────────────
+// codex 的 session_index.jsonl 与 claude 的 history.jsonl 都是 harness 自己
+// 落盘的轻量元数据:不读 rollout 正文就能拿到官方线程名/首条用户输入。
+
+/** codex 官方线程名(<codex home>/session_index.jsonl):id → thread_name。百行量级,整读。 */
+function readCodexIndexTitles(options: SessionCollectOptions): Map<string, string> {
+  const sessionsRoot = options.codexRoot ?? process.env.CODEX_HOME ?? join(homedir(), '.codex', 'sessions');
+  const map = new Map<string, string>();
+  try {
+    const raw = readFileSync(join(dirname(sessionsRoot), 'session_index.jsonl'), 'utf8');
+    for (const line of raw.split('\n')) {
+      if (!line.trim()) continue;
+      try {
+        const entry = JSON.parse(line) as { id?: unknown; thread_name?: unknown };
+        if (typeof entry.id !== 'string' || typeof entry.thread_name !== 'string') continue;
+        const title = titleify(entry.thread_name);
+        if (title) map.set(entry.id, title);
+      } catch {
+        /* 脏行跳过 */
+      }
+    }
+  } catch {
+    /* 无索引文件:标题走启发式 */
+  }
+  return map;
+}
+
+/**
+ * claude history.jsonl(<config>/history.jsonl):sessionId → 首条真实用户输入。
+ * 只兜底无标题 session;信封/斜杠命令/短确认与 claudeTitle 同规则过滤。
+ * 2MB 量级整读,每轮 catalog 一次,几十毫秒内。
+ */
+function readClaudeHistoryTitles(options: SessionCollectOptions): Map<string, string> {
+  const claudeRoots = options.claudeRoots ?? [
+    process.env.CLAUDE_CONFIG_DIR ? join(process.env.CLAUDE_CONFIG_DIR, 'projects') : '',
+    join(homedir(), '.config', 'claude', 'projects'),
+    join(homedir(), '.claude', 'projects'),
+  ].filter(Boolean);
+  const map = new Map<string, string>();
+  for (const root of claudeRoots) {
+    try {
+      const raw = readFileSync(join(dirname(root), 'history.jsonl'), 'utf8');
+      for (const line of raw.split('\n')) {
+        if (!line.trim()) continue;
+        try {
+          const entry = JSON.parse(line) as { sessionId?: unknown; display?: unknown };
+          if (typeof entry.sessionId !== 'string' || map.has(entry.sessionId)) continue;
+          const text = typeof entry.display === 'string' ? entry.display.trim() : '';
+          if (!text || isShortAck(text) || text.startsWith('/')) continue;
+          if (text.startsWith('<command-') || text.startsWith('<local-command') || text.startsWith('[')) continue;
+          const title = titleify(text);
+          if (title) map.set(entry.sessionId, title);
+        } catch {
+          /* 脏行跳过 */
+        }
+      }
+    } catch {
+      /* 无 history 文件:跳过该根 */
+    }
+  }
+  return map;
+}
+
 const CATALOG_YIELD_BATCH = 8;
 
 function yieldEventLoop(): Promise<void> {
@@ -655,7 +725,9 @@ function yieldEventLoop(): Promise<void> {
 // 文件只在尾部增长时从字节偏移续读;压缩文件(zstd)无法按字节续扫,整量重解。
 
 /** 消息抽取规则版本:改 messagesFromX / 加 touch 行为层时 +1,老水位自动失效触发全量重扫。 */
-export const MESSAGE_PARSER_VERSION = 2;
+// v3:claude isMeta 记录与 codex 系统信封不再进消息索引;标题来源多元化
+// (ai-title / history.jsonl / session_index.jsonl),全量重扫顺带刷新全部标题。
+export const MESSAGE_PARSER_VERSION = 3;
 const MSG_BATCH = 400;
 
 interface StreamedLine {
@@ -801,7 +873,7 @@ function indexSessionFileMessages(
   readMtimeMs: number,
   readSize: number,
   state: SessionIndexState | null,
-): SessionRepo[] {
+): { repos: SessionRepo[]; aiTitle: string | null } {
   const canAppend = state != null
     && state.parserVersion === MESSAGE_PARSER_VERSION
     && !isCompressedLog(readPath)
@@ -810,6 +882,9 @@ function indexSessionFileMessages(
     && readSize > state.parsedBytes;
   const baseLines = canAppend && state ? state.lines : 0;
   const repoRecords: unknown[] = [];
+  // claude 的 ai-title 记录位置不固定(可深至数千行),头部解析常漏;
+  // 消息索引的全量/续扫流式读必然路过它,顺手捕获最后一条
+  let aiTitle: string | null = null;
   // 整个文件的消息/touch 写入包在一个事务里:WAL 下每次 COMMIT 都是一次 fsync,
   // 按批提交会把活跃 session 的续扫拖慢一个数量级
   store.withTransaction(() => {
@@ -832,6 +907,12 @@ function indexSessionFileMessages(
         /* 单批写入失败不拖垮整趟目录扫描 */
       }
       for (const { record, end } of lines) {
+        if (session.provider === 'claude'
+          && record.type === 'ai-title'
+          && typeof record.aiTitle === 'string'
+          && record.aiTitle.trim()) {
+          aiTitle = record.aiTitle.trim();
+        }
         if (end > TOUCH_BYTES && !isCompressedLog(readPath)) continue;
         repoRecords.push(record);
       }
@@ -847,9 +928,10 @@ function indexSessionFileMessages(
     return r;
   });
   const fresh = extractSessionRepos(session, { records: repoRecords });
-  return canAppend
+  const repos = canAppend
     ? mergeSessionRepos(store.listSessionRepos(session.id), fresh)
     : fresh;
+  return { repos, aiTitle };
 }
 
 export async function collectSessionCatalog(store: Store, options: SessionCollectOptions = {}): Promise<number> {
@@ -922,7 +1004,9 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
         // 照常 upsert,repos 复用已存的,不做全量重扫。
         repos = store.listSessionRepos(row.id);
       } else if (readSize > 0) {
-        repos = indexSessionFileMessages(store, withWork, readPath, readMtimeMs, readSize, state);
+        const indexed = indexSessionFileMessages(store, withWork, readPath, readMtimeMs, readSize, state);
+        repos = indexed.repos;
+        if (indexed.aiTitle) withWork.title = titleify(indexed.aiTitle);
       } else {
         repos = extractSessionRepos(withWork);
       }
@@ -930,6 +1014,19 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
     }
     processed += 1;
     if (processed % CATALOG_YIELD_BATCH === 0) await yieldEventLoop();
+  }
+  // 标题补充源,对复用行同样生效:codex 官方线程名覆盖启发式,claude history
+  // 兜底无标题 session(信封开头的会话头部解析抽不出标题)
+  const codexIndexTitles = readCodexIndexTitles(options);
+  const claudeHistoryTitles = readClaudeHistoryTitles(options);
+  for (const row of rows) {
+    if (row.provider === 'codex') {
+      const official = codexIndexTitles.get(row.nativeId);
+      if (official) row.title = official;
+    } else if (row.provider === 'claude' && !row.title) {
+      const fallback = claudeHistoryTitles.get(row.nativeId);
+      if (fallback) row.title = fallback;
+    }
   }
   store.upsertSessions(rows);
   for (const row of rows) store.replaceSessionRepos(row.id, row.repos ?? []);

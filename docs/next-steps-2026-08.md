@@ -53,11 +53,19 @@ obelisk = agent 记忆检索（CodeAct 查询面，已以插件进 DSH）；Wake
 3. **Host 头校验 + 可选鉴权**（差距 E）：仅放行 localhost/127.0.0.1/[::1] 的 Host
    （`PLANOFPLAN_ALLOWED_HOSTS` 可扩），403 其余。鉴权开关暂缓（无对外暴露场景）。
 
-### 第二批 —— 元数据质量（喂当前主战场：计划发现）
+### 第二批 —— 元数据质量（✅ 已落地，2026-08-29，喂当前主战场：计划发现）
 
-4. **标题来源多元化**（差距 C）：Claude `ai-title`/`history.jsonl`、Codex
-   `session_index.jsonl`。验收：无标题占比显著下降；Codex catalog 发现成本下降。
-5. **is_meta 过滤**（research 文档 P1 #6）：命令信封、skill 注入不进标题与搜索。
+4. **标题来源多元化**（差距 C）：官方优先于启发式——claude `ai-title` 记录
+   （头部解析 + 消息索引流式读双路捕获,记录可深至数千行）→
+   `history.jsonl` 首条真实用户输入兜底;codex `session_index.jsonl` 的
+   `thread_name` 覆盖启发式。`MESSAGE_PARSER_VERSION` 升 3,一次性全量
+   重扫顺带刷新全部标题。本机实测:782 session / 687 有标题(88%),
+   18 个 codex 官方线程名生效。
+5. **is_meta 过滤**（research 文档 P1 #6）：claude `isMeta` 注入
+   （structured-output-enforce 等）与 codex 系统信封（11 种标签,本机普查
+   清单,显式列举不误杀用户粘贴的 HTML）不进标题提取、消息索引与
+   transcript 视图。新信封出现时往 `CODEX_META_ENVELOPES` 追加并升
+   parser 版本。
 
 ### 第三批 —— 差异化新面
 
