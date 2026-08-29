@@ -161,16 +161,21 @@ CREATE TABLE IF NOT EXISTS session_messages (
 );
 CREATE INDEX IF NOT EXISTS idx_session_messages_session ON session_messages(session_id, seq);
 -- trigram：中文子串搜索的最短查询是 3 字符，更短的查询由 Store 回退 LIKE。
+-- 只索引用户可见文本(kind != 'tool_use'):tool_use 入参 JSON 是搜索噪音也是
+-- 体积大头(实测 915MB 索引里六成来自 156k 行工具入参)。
 CREATE VIRTUAL TABLE IF NOT EXISTS session_messages_fts USING fts5(
   text, content=session_messages, content_rowid=rowid, tokenize='trigram');
-CREATE TRIGGER IF NOT EXISTS session_messages_fts_ai AFTER INSERT ON session_messages BEGIN
+CREATE TRIGGER IF NOT EXISTS session_messages_fts_ai AFTER INSERT ON session_messages
+  WHEN new.kind != 'tool_use' BEGIN
   INSERT INTO session_messages_fts(rowid, text) VALUES (new.rowid, new.text);
 END;
-CREATE TRIGGER IF NOT EXISTS session_messages_fts_ad AFTER DELETE ON session_messages BEGIN
+CREATE TRIGGER IF NOT EXISTS session_messages_fts_ad AFTER DELETE ON session_messages
+  WHEN old.kind != 'tool_use' BEGIN
   INSERT INTO session_messages_fts(session_messages_fts, rowid, text)
   VALUES ('delete', old.rowid, old.text);
 END;
-CREATE TRIGGER IF NOT EXISTS session_messages_fts_au AFTER UPDATE ON session_messages BEGIN
+CREATE TRIGGER IF NOT EXISTS session_messages_fts_au AFTER UPDATE ON session_messages
+  WHEN old.kind != 'tool_use' BEGIN
   INSERT INTO session_messages_fts(session_messages_fts, rowid, text)
   VALUES ('delete', old.rowid, old.text);
   INSERT INTO session_messages_fts(rowid, text) VALUES (new.rowid, new.text);
@@ -381,7 +386,7 @@ export class Store {
     }
   }
 
-  constructor(private db: Database) {
+  constructor(public readonly db: Database) {
     db.exec(SCHEMA);
     try {
       db.exec('ALTER TABLE usage_records ADD COLUMN fetched_at INTEGER');
@@ -508,6 +513,41 @@ export class Store {
     // v10:Handoff 交接记录表(无 backfill,动作发生时写入)。
     if (version < 10) {
       db.exec('PRAGMA user_version = 10');
+    }
+    // v11:FTS 瘦身——只索引 kind != 'tool_use' 的行(实测 915MB 索引六成来自
+    // 工具入参噪音)。不清消息、不触发重扫:直接 DROP 旧索引释放空间,再从
+    // content 表的 text 行显式重建(external-content FTS 允许显式 rowid 直填,
+    // 触发器同款路径),最后换带条件的新触发器 + VACUUM 回收文件页。
+    if (version < 11) {
+      db.exec('DROP TRIGGER IF EXISTS session_messages_fts_ai');
+      db.exec('DROP TRIGGER IF EXISTS session_messages_fts_ad');
+      db.exec('DROP TRIGGER IF EXISTS session_messages_fts_au');
+      db.exec('DROP TABLE IF EXISTS session_messages_fts');
+      db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS session_messages_fts USING fts5(
+        text, content=session_messages, content_rowid=rowid, tokenize='trigram')`);
+      db.exec(`INSERT INTO session_messages_fts(rowid, text)
+        SELECT rowid, text FROM session_messages WHERE kind != 'tool_use' AND text IS NOT NULL`);
+      db.exec(`CREATE TRIGGER session_messages_fts_ai AFTER INSERT ON session_messages
+        WHEN new.kind != 'tool_use' BEGIN
+        INSERT INTO session_messages_fts(rowid, text) VALUES (new.rowid, new.text);
+      END`);
+      db.exec(`CREATE TRIGGER session_messages_fts_ad AFTER DELETE ON session_messages
+        WHEN old.kind != 'tool_use' BEGIN
+        INSERT INTO session_messages_fts(session_messages_fts, rowid, text)
+        VALUES ('delete', old.rowid, old.text);
+      END`);
+      db.exec(`CREATE TRIGGER session_messages_fts_au AFTER UPDATE ON session_messages
+        WHEN old.kind != 'tool_use' BEGIN
+        INSERT INTO session_messages_fts(session_messages_fts, rowid, text)
+        VALUES ('delete', old.rowid, old.text);
+        INSERT INTO session_messages_fts(rowid, text) VALUES (new.rowid, new.text);
+      END`);
+      try {
+        db.exec('VACUUM');
+      } catch {
+        /* VACUUM 失败(磁盘满/锁)不阻塞启动,空间留待下次 */
+      }
+      db.exec('PRAGMA user_version = 11');
     }
   }
 
@@ -1766,6 +1806,55 @@ export class Store {
 
   deleteSessionMessages(sessionId: string): void {
     this.db.query('DELETE FROM session_messages WHERE session_id = ?').run(sessionId);
+  }
+
+  // ── 库维护:孤儿水位清理 + 消息保留期 ─────────────────────────────
+
+  listSessionIndexStatePaths(): string[] {
+    return (this.db.query('SELECT path FROM session_index_state').all() as Array<{ path: string }>)
+      .map((row) => row.path);
+  }
+
+  deleteSessionIndexStates(paths: string[]): void {
+    this.deleteByPaths('DELETE FROM session_index_state WHERE path IN', paths);
+  }
+
+  listUsageScanFilePaths(): string[] {
+    return (this.db.query('SELECT path FROM usage_scan_files').all() as Array<{ path: string }>)
+      .map((row) => row.path);
+  }
+
+  deleteUsageScanFiles(paths: string[]): void {
+    this.deleteByPaths('DELETE FROM usage_scan_files WHERE path IN', paths);
+  }
+
+  private deleteByPaths(sql: string, paths: string[]): void {
+    // SQLite 绑定参数上限 999,分块删
+    for (let i = 0; i < paths.length; i += 500) {
+      const chunk = paths.slice(i, i + 500);
+      const placeholders = chunk.map(() => '?').join(',');
+      this.db.query(`${sql} (${placeholders})`).run(...chunk);
+    }
+  }
+
+  /**
+   * 消息保留期清理:窗口外的 session 删消息/touch/水位,目录行保留(元数据便宜,
+   * 图谱/谱系还要用)。水位必须同步删——否则 session 恢复续写时按水位追加会
+   * 以为旧行还在索引里。返回清理的 session 数。
+   */
+  pruneSessionDataBefore(cutoffMs: number): number {
+    const stale = (this.db.query(
+      'SELECT id, source_file FROM sessions WHERE updated_at < ? AND source_file IS NOT NULL',
+    ).all(cutoffMs) as Array<{ id: string; source_file: string }>);
+    if (stale.length === 0) return 0;
+    this.withTransaction(() => {
+      for (const row of stale) {
+        this.deleteSessionMessages(row.id);
+        this.deleteSessionTouches(row.id);
+      }
+      this.deleteByPaths('DELETE FROM session_index_state WHERE path IN', stale.map((r) => r.source_file));
+    });
+    return stale.length;
   }
 
   /** 级联删除：session 本体 + repo 归属 + 消息索引 + 文件 touch + commit 归因 + Launch 边(FTS 由触发器同步）。 */

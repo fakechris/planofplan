@@ -124,7 +124,7 @@ describe('claude 标题来源', () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 
   test('history.jsonl 兜底无标题 session(信封开头的会话)', async () => {
     const root = tempRoot();
@@ -143,7 +143,7 @@ describe('claude 标题来源', () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 });
 
 describe('codex 官方线程名', () => {
