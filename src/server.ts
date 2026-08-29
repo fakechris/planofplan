@@ -486,6 +486,20 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
     return c.json({ deleted: store.listTombstonedSessions() });
   });
 
+  // 最近被 agent 改动的文件(recent-edits feed):session_file_touches 的文件维度查询面
+  app.get('/api/recent-edits', (c) => {
+    const days = Math.min(90, Math.max(1, Number(c.req.query('days') ?? 7) || 7));
+    const limit = Math.min(200, Math.max(1, Number(c.req.query('limit') ?? 50) || 50));
+    const now = Date.now();
+    const userMeta = store.getSessionUserMetaMap();
+    const hiddenIds = new Set([...userMeta.entries()].filter(([, meta]) => meta.hidden).map(([id]) => id));
+    return c.json({
+      generatedAt: now,
+      days,
+      files: store.recentFileEdits(now - days * 86_400_000, limit, hiddenIds),
+    });
+  });
+
   // 用户数据层动作:星标/隐藏/删除(墓碑)/恢复。L0 源文件永远不动。
   const readBoolBody = async (c: { req: { json(): Promise<unknown> } }, field: string) => {
     let body: Record<string, unknown> | null = null;

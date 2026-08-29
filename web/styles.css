@@ -770,3 +770,18 @@ select:focus, input:focus { border-color: var(--accent-2); box-shadow: 0 0 0 2px
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
 }
+/* 文件页:recent-edits feed */
+.file-edit-list { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.file-edit-row {
+  display: flex; flex-direction: column; gap: 6px; padding: 10px 12px;
+  background: var(--surface-2); border-radius: 8px;
+}
+.file-edit-path { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.file-edit-path strong { color: var(--text); font-size: var(--text-sm); font-family: var(--font-mono, monospace); }
+.file-edit-path .muted, .file-edit-sessions .muted { color: var(--muted); font-size: var(--text-xs); }
+.file-edit-sessions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.file-edit-chip {
+  border: 1px solid var(--border); background: var(--surface); color: var(--muted);
+  font-size: var(--text-xs); padding: 2px 8px; border-radius: 999px; cursor: pointer;
+}
+.file-edit-chip:hover { color: var(--text); border-color: var(--accent-2); }
