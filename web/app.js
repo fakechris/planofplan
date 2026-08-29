@@ -904,7 +904,47 @@ let graphShowCandidates = false;
 let graphIncludeSubagents = false;
 
 // subagent 过滤在服务端(buildWorkGraph includeSubagents),切换时需带参重取
+
+async function refreshLineageReport() {
+  const box = document.getElementById('lineageReport');
+  if (!box) return;
+  try {
+    const report = await request('/api/lineage-report?days=7');
+    renderLineageReport(report);
+  } catch {
+    box.hidden = true;
+  }
+}
+
+// 谱系周报 v0:静态聚合卡片(需求 × commit × 额度)
+function renderLineageReport(report) {
+  const box = document.getElementById('lineageReport');
+  if (!box) return;
+  const t = report?.totals;
+  if (!t || t.requirements === 0) {
+    box.hidden = true;
+    return;
+  }
+  const landedPct = Math.round((t.landed / t.requirements) * 100);
+  const cost = t.estimatedCostUsd != null ? `$${t.estimatedCostUsd.toFixed(2)}` : '--';
+  const top = (report.items || []).slice(0, 6).map((item) => `
+    <div class="lineage-item">
+      <span class="lineage-landed ${item.landed ? 'ok' : 'pending'}" title="${item.landed ? `落了 ${item.commits.length} 个 commit` : '尚未落地'}">${item.landed ? '✓' : '…'}</span>
+      <span class="lineage-text">${escapeHtml((item.text || '').slice(0, 80))}</span>
+      <span class="muted">${escapeHtml(item.provider)}${item.project ? ` · ${escapeHtml(item.project)}` : ''} · ${fmtAgo(item.updatedAt, Date.now())}${item.totalTokens ? ` · ${fmtTokens(item.totalTokens)}` : ''}</span>
+    </div>`).join('');
+  box.hidden = false;
+  box.innerHTML = `
+    <div class="lineage-summary">
+      <strong>本周谱系</strong>
+      <span>${t.requirements} 个需求 · ${landedPct}% 落地(${t.commits} commit,${t.declaredCommits} 声明) · ${fmtTokens(t.totalTokens)} tokens · ${cost} 估算</span>
+    </div>
+    ${top}
+  `;
+}
+
 async function refreshGraph() {
+  void refreshLineageReport();
   if (graphIncludeSubagents) {
     try {
       const days = document.getElementById('usageDays')?.value || '30';

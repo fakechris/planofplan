@@ -785,3 +785,17 @@ select:focus, input:focus { border-color: var(--accent-2); box-shadow: 0 0 0 2px
   font-size: var(--text-xs); padding: 2px 8px; border-radius: 999px; cursor: pointer;
 }
 .file-edit-chip:hover { color: var(--text); border-color: var(--accent-2); }
+/* 谱系周报 v0:图谱页顶部静态聚合卡片 */
+.lineage-report {
+  display: flex; flex-direction: column; gap: 6px; margin: 12px 0;
+  padding: 12px 14px; background: var(--surface-2); border-radius: 10px;
+}
+.lineage-summary { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.lineage-summary strong { color: var(--text); font-size: var(--text-sm); }
+.lineage-summary span { color: var(--muted); font-size: var(--text-xs); }
+.lineage-item { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.lineage-landed { font-style: normal; font-size: var(--text-xs); width: 1.2em; text-align: center; }
+.lineage-landed.ok { color: var(--success, #2f9e63); }
+.lineage-landed.pending { color: var(--muted); }
+.lineage-text { color: var(--text); font-size: var(--text-xs); }
+.lineage-item .muted { font-size: var(--text-xs); color: var(--muted); }

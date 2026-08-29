@@ -26,6 +26,7 @@ import { launchResume } from './resume.ts';
 import { getStartupSettings, setLaunchOnStartup } from './startup.ts';
 import { startSessionWatcher } from './watcher.ts';
 import { registerMcpRoutes } from './mcp.ts';
+import { buildLineageReport } from './lineage-report.ts';
 
 // In dev (bun src/cli.ts), import.meta.dir points at src/ and ../web = repo/web.
 // In a bun build --compile binary, import.meta.dir is a virtual $bunfs/root path
@@ -484,6 +485,13 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
   // 已删除列表(恢复入口);必须先于 /api/sessions/:id 注册,否则 'deleted' 被当 id
   app.get('/api/sessions/deleted', (c) => {
     return c.json({ deleted: store.listTombstonedSessions() });
+  });
+
+  // 谱系周报 v0:需求 × commit × 额度 的静态聚合(纯 SQL 侧,不引 LLM)
+  app.get('/api/lineage-report', (c) => {
+    const days = Math.min(90, Math.max(1, Number(c.req.query('days') ?? 7) || 7));
+    const now = Date.now();
+    return c.json(buildLineageReport(store, now - days * 86_400_000, now));
   });
 
   // 最近被 agent 改动的文件(recent-edits feed):session_file_touches 的文件维度查询面
