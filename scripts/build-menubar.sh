@@ -90,6 +90,19 @@ if ! codesign --force --sign "$IDENTITY" --identifier "$IDENTIFIER" --timestamp=
 fi
 codesign --verify --deep --strict --verbose=1 "$STAGED_APP"
 
+# 替换运行中的二进制会让旧进程在换页时崩(2026-08-29 实测:替换后旧 daemon
+# segfault,KeepAlive 重启又撞上遗孤扫描子进程形成崩溃风暴)。装新包前先
+# bootout launchd daemon;plist 还在的话装完 bootstrap 回来。
+DAEMON_LABEL="local.planofplan.daemon"
+DAEMON_PLIST="$HOME/Library/LaunchAgents/$DAEMON_LABEL.plist"
+DAEMON_WAS_LOADED=0
+if launchctl print "gui/$(id -u)/$DAEMON_LABEL" >/dev/null 2>&1; then
+  DAEMON_WAS_LOADED=1
+  echo "Stopping launchd daemon before replacing the bundle…"
+  launchctl bootout "gui/$(id -u)/$DAEMON_LABEL" || true
+  sleep 1
+fi
+
 if [ -e "$INSTALL_APP" ]; then
   BACKUP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/planofplan-previous.XXXXXX")
   mv "$INSTALL_APP" "$BACKUP_ROOT/planofplan.app"
@@ -98,6 +111,11 @@ mv "$STAGED_APP" "$INSTALL_APP"
 codesign --verify --deep --strict --verbose=1 "$INSTALL_APP"
 rm -rf "$BACKUP_ROOT"
 BACKUP_ROOT=""
+
+if [ "$DAEMON_WAS_LOADED" = "1" ] && [ -e "$DAEMON_PLIST" ]; then
+  echo "Restarting launchd daemon…"
+  launchctl bootstrap "gui/$(id -u)" "$DAEMON_PLIST" || true
+fi
 
 echo "Installed $INSTALL_APP"
 echo "Commit $COMMIT_SHA"
