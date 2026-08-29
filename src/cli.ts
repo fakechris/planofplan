@@ -157,7 +157,8 @@ async function serve(): Promise<void> {
   const scheduler = new Scheduler(store, cfg);
   scheduler.start();
 
-  const server = createServer(store, scheduler, cfg);
+  // live = 非 demo:启动文件监听,session 目录有写入就自动增量索引(见 server.ts)
+  const server = createServer(store, scheduler, cfg, { live: !f.demo });
   // idleTimeout 提到 2 分钟:handoff 的 LLM 摘要合成可能超过默认 10s,
   // Bun.serve 会在 handler 无输出时掐掉请求(线上实测踩过)
   Bun.serve({ port, fetch: server.fetch, idleTimeout: 120 });

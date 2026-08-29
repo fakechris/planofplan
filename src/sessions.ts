@@ -624,6 +624,26 @@ export function discoverSessionFiles(options: SessionCollectOptions, since: numb
   }));
 }
 
+/** watcher 用:catalog 扫描涉及的全部根目录(去重)。根的推导必须与 discoverSessionFiles 保持同源。 */
+export function sessionWatchRoots(): string[] {
+  const home = homedir();
+  const claudeRoots = [
+    process.env.CLAUDE_CONFIG_DIR ? join(process.env.CLAUDE_CONFIG_DIR, 'projects') : '',
+    join(home, '.config', 'claude', 'projects'),
+    join(home, '.claude', 'projects'),
+  ].filter(Boolean);
+  const grokHome = process.env.GROK_HOME ?? join(home, '.grok');
+  return [...new Set([
+    process.env.CODEX_HOME ? join(process.env.CODEX_HOME, 'sessions') : join(home, '.codex', 'sessions'),
+    ...claudeRoots,
+    process.env.DSH_HOME ? join(process.env.DSH_HOME, 'sessions') : join(home, '.dsh', 'sessions'),
+    join(grokHome, 'sessions'),
+    process.env.KIMI_CODE_HOME ? join(process.env.KIMI_CODE_HOME, 'sessions') : join(home, '.kimi-code', 'sessions'),
+    join(home, '.factory', 'sessions'),
+    process.env.ZCODE_HOME ?? join(home, '.zcode', 'cli'),
+  ])];
+}
+
 const CATALOG_YIELD_BATCH = 8;
 
 function yieldEventLoop(): Promise<void> {

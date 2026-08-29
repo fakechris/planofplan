@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { streamSSE, type SSEStreamingApi } from 'hono/streaming';
 import { dirname, join, resolve, isAbsolute } from 'node:path';
 import { existsSync } from 'node:fs';
 import type { AppConfig } from './config.ts';
@@ -23,6 +24,7 @@ import type { PlanConfig, ProjectAgentStat, ProjectListItem, RequirementRecord }
 import { readTranscript } from './transcript.ts';
 import { launchResume } from './resume.ts';
 import { getStartupSettings, setLaunchOnStartup } from './startup.ts';
+import { startSessionWatcher } from './watcher.ts';
 
 // In dev (bun src/cli.ts), import.meta.dir points at src/ and ../web = repo/web.
 // In a bun build --compile binary, import.meta.dir is a virtual $bunfs/root path
@@ -36,8 +38,42 @@ const WEB_DIR = (() => {
   return candidates.find((dir) => existsSync(dir)) ?? candidates[0];
 })();
 
-export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig): Hono {
+export interface ServerOptions {
+  /** true 时启动文件监听,变更自动触发 session 索引(demo 模式传 false)。 */
+  live?: boolean;
+}
+
+export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig, options: ServerOptions = {}): Hono {
   const app = new Hono();
+
+  // DNS rebinding 防护(参照 agentsview):服务只绑 loopback,但攻击者可把
+  // 自己的域名解析到 127.0.0.1 让浏览器携带外域 Host 打进来。只信任本机
+  // Host;SSH 端口转发/反向代理场景用 PLANOFPLAN_ALLOWED_HOSTS 显式放行。
+  const allowedHosts = (process.env.PLANOFPLAN_ALLOWED_HOSTS ?? '')
+    .split(',')
+    .map((host) => host.trim().toLowerCase())
+    .filter(Boolean);
+  app.use('*', async (c, next) => {
+    const host = c.req.header('host');
+    if (host) {
+      const bare = host.trim().toLowerCase().replace(/:\d+$/, '').replace(/^\[|\]$/g, '');
+      const ok = bare === 'localhost' || bare === '127.0.0.1' || bare === '::1'
+        || allowedHosts.includes(bare);
+      if (!ok) return c.json({ ok: false, error: `host not allowed: ${bare}` }, 403);
+    }
+    await next();
+  });
+
+  // SSE 客户端池:/api/events 的活跃订阅者,索引状态变化时广播
+  const sseClients = new Set<SSEStreamingApi>();
+  const broadcastSSE = (event: string, data: unknown): void => {
+    const payload = JSON.stringify(data);
+    for (const stream of sseClients) {
+      void stream.writeSSE({ event, data: payload })
+        .catch(() => sseClients.delete(stream));
+    }
+  };
+
   let usageRefreshProcess: Bun.Subprocess | null = null;
   let usageRefreshStartedAt: number | null = null;
   let usageRefreshError: string | null = null;
@@ -100,6 +136,27 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
   app.get('/api/build-info', (c) => {
     return c.json(getBuildInfo());
   });
+
+  // SSE:dashboard 常驻订阅,索引开始/完成实时推送;15s ping 防中间层掐空闲连接。
+  // 必须注册在静态兜底 app.get('*') 之前。
+  app.get('/api/events', (c) => streamSSE(c, async (stream) => {
+    sseClients.add(stream);
+    stream.onAbort(() => {
+      sseClients.delete(stream);
+    });
+    try {
+      await stream.writeSSE({ event: 'hello', data: JSON.stringify({ at: Date.now() }) });
+      while (!stream.aborted) {
+        await stream.sleep(15_000);
+        if (stream.aborted) break;
+        await stream.writeSSE({ event: 'ping', data: JSON.stringify({ at: Date.now() }) });
+      }
+    } catch {
+      /* client gone */
+    } finally {
+      sseClients.delete(stream);
+    }
+  }));
 
   app.get('/api/settings', (c) => {
     return c.json(getStartupSettings());
@@ -303,8 +360,21 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     });
   });
 
-  const startSessionIndex = (days: number): void => {
-    if (sessionIndexProcess) return;
+  // session 索引触发(单飞 + trailing 重触发):页面打开与 watcher flush 走同一道闸,
+  // 保证同一时刻只有一个扫描子进程;扫描期间到来的触发记为 pending,结束后补跑一轮。
+  let sessionIndexStartedAt: number | null = null;
+  let sessionIndexPending = false;
+  const sessionIndexLast: { at: number | null; source: string | null; changedFiles: number | null } = {
+    at: null,
+    source: null,
+    changedFiles: null,
+  };
+  const startSessionIndex = (days: number, source = 'page'): void => {
+    if (sessionIndexProcess) {
+      sessionIndexPending = true;
+      return;
+    }
+    sessionIndexStartedAt = Date.now();
     sessionIndexProcess = Bun.spawn([
       process.execPath,
       join(import.meta.dir, 'cli.ts'),
@@ -313,8 +383,17 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
       '--days',
       String(days),
     ], { stdout: 'ignore', stderr: 'ignore' });
+    broadcastSSE('index', { state: 'running', source, startedAt: sessionIndexStartedAt });
     void sessionIndexProcess.exited.finally(() => {
       sessionIndexProcess = null;
+      sessionIndexStartedAt = null;
+      sessionIndexLast.at = Date.now();
+      sessionIndexLast.source = source;
+      broadcastSSE('sessions-indexed', { at: sessionIndexLast.at, source });
+      if (sessionIndexPending) {
+        sessionIndexPending = false;
+        startSessionIndex(days, source);
+      }
     });
   };
 
@@ -381,6 +460,13 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     return c.json({
       ...list,
       indexStatus: sessionIndexProcess ? 'running' : 'idle',
+      indexDetail: {
+        state: sessionIndexProcess ? 'running' : 'idle',
+        startedAt: sessionIndexStartedAt,
+        lastIndexedAt: sessionIndexLast.at,
+        lastSource: sessionIndexLast.source,
+        changedFiles: sessionIndexLast.changedFiles,
+      },
     });
   });
 
@@ -1180,6 +1266,19 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig)
     }
     return c.text('not found', 404);
   });
+
+  // 文件监听(参照 obelisk ADR-0009 的形态):根目录 recursive watch + 静默窗
+  // 防抖 + 有界批。flush 不重造扫描——spawn 同一个 sessions --refresh 子进程,
+  // 行级水位保证未变文件近零成本;与页面触发的单飞闸门互斥。
+  if (options.live) {
+    const watcher = startSessionWatcher((paths) => {
+      sessionIndexLast.changedFiles = paths.length;
+      startSessionIndex(30, 'watch');
+    });
+    if (watcher.roots.length > 0) {
+      console.log(`[watcher] watching ${watcher.roots.length} session roots for live indexing`);
+    }
+  }
 
   return app;
 }
