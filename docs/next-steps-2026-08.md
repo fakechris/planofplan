@@ -79,10 +79,16 @@ obelisk = agent 记忆检索（CodeAct 查询面，已以插件进 DSH）；Wake
    SQLITE_BUSY 直接带崩 daemon——补 `PRAGMA busy_timeout=5000` +
    调度器入口吞错（`safeRefresh`）。
 
-### 第四批 —— 机制与制度（见缝插针）
+### 第四批 —— 机制与制度（✅ 已落地，2026-08-29）
 
-7. 价格表快照化（差距 F；注意成本只是估算层，不过度投入）。
-8. 格式溯源文件（差距 H）：动某家 parser 时补该家证据条目。
+7. **价格表快照化**（差距 F）：`planofplan pricing refresh` 拉 LiteLLM
+   per-token 价折 USD/MTok 落 `~/.planofplan/pricing-snapshot.json`
+   （实测 2539 模型）。回退链:快照(精确/归一化) → 家族正则 → null 不
+   虚构价格。测试隔离:bunfig `[test] preload` 把 PLANOFPPLAN_HOME 指到
+   每进程临时目录。整数微美分迁移明确不做(估算层不过度投入)。
+8. **格式溯源文件**（差距 H）：[`docs/session-format-sources.md`](
+   session-format-sources.md),七家 provider 各一条证据(源目录/行格式/
+   已验证日期/坑),动 parser 必更;README 架构节有指针。
 
 ## 3. 明确不做（本轮）
 

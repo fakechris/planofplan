@@ -234,6 +234,8 @@ web/              静态前端（无构建，vanilla JS + CSS）
 
 adapter 接口见 `src/types.ts`。MiniMax 的端点/解析规格出处：CodexBar `docs/minimax.md` + `MiniMaxUsageFetcher.swift`、JinHanAI/coding-plan-monitor（实测实现）。
 
+各 agent 本地 session 格式的证据与坑（动 parser 前必读、动 parser 时必更）：[`docs/session-format-sources.md`](docs/session-format-sources.md)。
+
 ## 覆盖矩阵与验证状态（2026-08-21）
 
 | plan | adapter | 真机验证 | 备注 |
