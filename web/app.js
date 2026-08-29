@@ -346,7 +346,7 @@ function renderSessions(list) {
   if (foot) {
     foot.textContent = indexing
       ? '正在索引本机对话目录… 不用盯着扫。编好后会出现在左边。'
-      : `${indexedLabel} · 本机只读 ~/.claude / ~/.codex / ~/.grok / ~/.dsh 等目录 · daemon 启动时自动更新，不用定时手扫 · Token 数字请看 Token 页`;
+      : `${indexedLabel} · 已监听本机目录，新对话自动出现 · 本机只读 ~/.claude / ~/.codex / ~/.grok / ~/.dsh 等目录 · Token 数字请看 Token 页`;
   }
   if (!list || list.sessions.length === 0) {
     listEl.innerHTML = `
@@ -2954,6 +2954,52 @@ document.getElementById('saveLlmBtn')?.addEventListener('click', async () => {
 window.addEventListener('hashchange', () => applyRoute());
 // 冷启动走路由器:支持 #tab/id 深链直接打开实体
 applyRoute();
+
+// ── SSE 实时刷新 ────────────────────────────────────────────────────
+// daemon 侧 watcher 监听本机 session 目录,索引完成广播 sessions-indexed。
+// 这里节流 5s 触发一次全量 render():连续扫描(活跃 session 持续写入)不会
+// 把界面刷得抖动,30s 的兜底轮询仍在(render 的 setInterval 不动)。
+let lastEventRenderAt = 0;
+let eventRenderTimer = null;
+
+function refreshFromLiveEvent() {
+  const now = Date.now();
+  if (now - lastEventRenderAt >= 5000) {
+    lastEventRenderAt = now;
+    void render();
+    return;
+  }
+  if (eventRenderTimer != null) return;
+  eventRenderTimer = setTimeout(() => {
+    eventRenderTimer = null;
+    lastEventRenderAt = Date.now();
+    void render();
+  }, 5000 - (now - lastEventRenderAt));
+}
+
+function initLiveEvents() {
+  if (!('EventSource' in window)) return;
+  let es;
+  try {
+    es = new EventSource('/api/events');
+  } catch {
+    return; // 无 SSE 就退回轮询,功能不缺
+  }
+  es.addEventListener('sessions-indexed', () => refreshFromLiveEvent());
+  es.addEventListener('index', (event) => {
+    // 索引开始时立刻同步 footer 状态,不等下一次 render
+    try {
+      const detail = JSON.parse(event.data || '{}');
+      if (detail.state === 'running' && latestSessions) {
+        latestSessions = { ...latestSessions, indexStatus: 'running' };
+        renderSessions(latestSessions);
+        maybePollSessionIndex(latestSessions);
+      }
+    } catch { /* malformed payload */ }
+  });
+}
+
+initLiveEvents();
 
 function maybePollSessionIndex(list) {
   if (list?.indexStatus !== 'running') return;
