@@ -155,3 +155,14 @@ describe('mcp tools', () => {
     expect(res.status).toBe(403);
   });
 });
+
+describe('mcp session_search 自指防护', () => {
+  test('exclude 排除指定 session 的元数据与 FTS 命中', async () => {
+    const server = app();
+    const withSelf = await callTool(server, 'session_search', { q: '幂等化改造' });
+    expect(withSelf).toContain('claude:s1');
+    const excluded = await callTool(server, 'session_search', { q: '幂等化改造', exclude: 'claude:s1' });
+    expect(excluded).not.toContain('claude:s1');
+    expect(excluded).toContain('No sessions match');
+  });
+});

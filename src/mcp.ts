@@ -116,15 +116,20 @@ function toolUsageSummary(store: Store, args: { days?: unknown; provider?: unkno
   return lines.join('\n');
 }
 
-function toolSessionSearch(store: Store, args: { q?: unknown; days?: unknown; limit?: unknown }): string {
+function toolSessionSearch(store: Store, args: { q?: unknown; days?: unknown; limit?: unknown; exclude?: unknown }): string {
   const q = typeof args.q === 'string' ? args.q.trim() : '';
   if (!q) throw new ToolArgError('q is required (search text)');
   const days = Math.min(365, Math.max(1, Math.floor(Number(args.days ?? 30)) || 30));
   const limit = Math.min(30, Math.max(1, Math.floor(Number(args.limit ?? 10)) || 10));
+  // 自指防护(obelisk invocation-identity 思路):agent 搜历史会把自己正在进行的
+  // 会话当证据。exclude 传调用者自己的 session id,元数据与 FTS 命中两侧都排除。
+  const exclude = typeof args.exclude === 'string' && args.exclude.trim() ? args.exclude.trim() : null;
   const now = Date.now();
   const since = now - days * DAY_MS;
-  const rows = store.listSessionRows().filter((row) => row.updatedAt >= since && row.updatedAt < now);
-  const hits = store.searchSessionMessages(q);
+  const rows = store.listSessionRows()
+    .filter((row) => row.updatedAt >= since && row.updatedAt < now)
+    .filter((row) => row.id !== exclude);
+  const hits = store.searchSessionMessages(q).filter((hit) => hit.sessionId !== exclude);
   const hitBySession = new Map(hits.map((hit) => [hit.sessionId, hit]));
   const matched = searchSessions(rows, q);
   const have = new Set(matched.map((row) => row.id));
@@ -257,13 +262,14 @@ const TOOLS: ToolDef[] = [
   },
   {
     name: 'session_search',
-    description: '跨本机全部 coding agent 会话搜索:标题/项目等元数据 ∪ 消息正文全文(FTS,中文需 ≥3 字符)。用户问"之前哪个对话聊过 X"时用它。',
+    description: '跨本机全部 coding agent 会话搜索:标题/项目等元数据 ∪ 消息正文全文(FTS,中文需 ≥3 字符)。用户问"之前哪个对话聊过 X"时用它。你是 coding agent 时建议在 arguments 里带上 exclude=你自己的 session id,避免把当前会话误当历史证据。',
     inputSchema: {
       type: 'object',
       properties: {
         q: { type: 'string', description: '搜索文本' },
         days: { type: 'number', description: '回看天数,默认 30' },
         limit: { type: 'number', description: '返回条数上限,默认 10,最大 30' },
+        exclude: { type: 'string', description: '要排除的 session id(通常是调用者自己的,如 claude:<uuid>)' },
       },
       required: ['q'],
       additionalProperties: false,

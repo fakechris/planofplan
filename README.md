@@ -87,6 +87,7 @@ daemon 在 `POST http://localhost:<port>/mcp` 提供只读 MCP（streamable HTTP
 - `plan_quota_status` 各订阅的配额窗口与重置倒计时
 - `usage_summary` 本地日志的 token 用量/成本估算（按天/provider/模型）
 - `session_search` 跨全部 agent 会话的元数据 ∪ 消息正文 FTS 搜索
+  （`exclude` 参数可排除调用者自己的 session id——agent 搜历史时不把当前会话误当证据）
 - `repo_lineage` 一个仓库最近的会话→需求→commit 谱系
 - `requirement_status` 最近抽取的需求及其 commit 落地状态
 
