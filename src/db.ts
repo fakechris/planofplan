@@ -1833,6 +1833,55 @@ export class Store {
       .map((row) => row.path);
   }
 
+  /**
+   * 最近被 agent 改动的文件(recent-edits feed):按 file_path 聚合 touch,
+   * 附最近碰过它的 session(最多 perFile 个)。hiddenIds 由调用方注入
+   * (用户隐藏的 session 不进 feed);已删 session 的 touch 已随级联消失。
+   */
+  recentFileEdits(sinceMs: number, limit: number, hiddenIds: Set<string>, perFile = 4): Array<{
+    path: string; lastTs: number | null; sessionCount: number;
+    sessions: Array<{ id: string; provider: string; title: string | null }>;
+  }> {
+    const groups = (this.db.query(
+      `SELECT file_path AS path, MAX(ts) AS lastTs, COUNT(DISTINCT session_id) AS n
+       FROM session_file_touches WHERE ts >= ?
+       GROUP BY file_path ORDER BY lastTs DESC LIMIT ?`,
+    ).all(sinceMs, limit) as Array<{ path: string; lastTs: number | null; n: number }>);
+    if (groups.length === 0) return [];
+    const paths = groups.map((g) => g.path);
+    const touchRows: Array<{ file_path: string; session_id: string }> = [];
+    for (let i = 0; i < paths.length; i += 100) {
+      const chunk = paths.slice(i, i + 100);
+      touchRows.push(...(this.db.query(
+        `SELECT DISTINCT file_path, session_id FROM session_file_touches
+         WHERE file_path IN (${chunk.map(() => '?').join(',')})`,
+      ).all(...chunk) as Array<{ file_path: string; session_id: string }>));
+    }
+    const byPath = new Map<string, string[]>();
+    for (const row of touchRows) {
+      if (hiddenIds.has(row.session_id)) continue;
+      const list = byPath.get(row.file_path) ?? [];
+      list.push(row.session_id);
+      byPath.set(row.file_path, list);
+    }
+    const metaById = new Map(this.listSessionRows().map((row) => [row.id, row]));
+    // 只剩隐藏 session 的文件不出现在 feed 里(尊重用户隐藏意图)
+    return groups
+      .flatMap((group) => {
+        const sessionIds = (byPath.get(group.path) ?? []).slice(0, perFile);
+        if (sessionIds.length === 0) return [];
+        return [{
+          path: group.path,
+          lastTs: group.lastTs,
+          sessionCount: group.n,
+          sessions: sessionIds
+            .map((id) => metaById.get(id))
+            .filter((row): row is NonNullable<typeof row> => row != null)
+            .map((row) => ({ id: row.id, provider: row.provider, title: row.title })),
+        }];
+      });
+  }
+
   deleteUsageScanFiles(paths: string[]): void {
     this.deleteByPaths('DELETE FROM usage_scan_files WHERE path IN', paths);
   }

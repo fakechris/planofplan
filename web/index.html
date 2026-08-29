@@ -18,6 +18,7 @@
     <nav class="tabs" role="tablist">
       <button type="button" role="tab" data-tab="plans" aria-selected="true">额度</button>
       <button type="button" role="tab" data-tab="sessions" aria-selected="false">对话</button>
+      <button type="button" role="tab" data-tab="files" aria-selected="false">文件</button>
       <button type="button" role="tab" data-tab="projects" aria-selected="false">项目</button>
       <button type="button" role="tab" data-tab="requirements" aria-selected="false">需求</button>
       <button type="button" role="tab" data-tab="planfiles" aria-selected="false">计划</button>
@@ -52,6 +53,17 @@
     <main id="grid" class="grid"></main>
   </section>
 
+  <section id="panel-files" class="tab-panel" data-panel="files" hidden>
+    <section class="hero">
+      <div>
+        <p class="eyebrow">RECENT EDITS</p>
+        <h1>文件</h1>
+        <p class="hero-copy">最近被 agent 改动的文件——哪个文件在被反复改、出自哪条对话。点击会话跳回对话页。</p>
+      </div>
+    </section>
+    <p class="session-foot" id="fileEditsFoot"></p>
+    <div id="fileEdits" class="file-edit-list"></div>
+  </section>
   <section id="panel-sessions" class="tab-panel" data-panel="sessions" hidden>
     <section class="hero">
       <div>

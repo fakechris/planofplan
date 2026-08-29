@@ -1376,6 +1376,62 @@ let openRequirementId = null;
 let latestPlans = null;
 let openPlanId = null;
 
+
+// ── 文件页:最近被 agent 改动的文件(recent-edits feed) ──────────────
+let latestFileEdits = null;
+
+async function refreshFileEdits() {
+  const box = document.getElementById('fileEdits');
+  if (!box) return;
+  try {
+    latestFileEdits = await request('/api/recent-edits?days=7&limit=80');
+    renderFileEdits(latestFileEdits);
+  } catch {
+    box.innerHTML = '<div class="usage-empty"><strong>文件流加载失败</strong><span>daemon 可能正在重启。</span></div>';
+  }
+}
+
+function renderFileEdits(data) {
+  const box = document.getElementById('fileEdits');
+  const foot = document.getElementById('fileEditsFoot');
+  if (!box) return;
+  const files = data?.files || [];
+  if (foot) foot.textContent = files.length
+    ? `最近 7 天 · ${files.length} 个文件 · 数据来自对话里的文件 touch,不是 git diff`
+    : '最近 7 天没有文件改动记录。跑几轮带编辑工具的对话就有数据。';
+  if (files.length === 0) {
+    box.innerHTML = '<div class="usage-empty"><strong>还没有文件改动</strong><span>文件流来自 session 的 tool_use 入参解析。</span></div>';
+    return;
+  }
+  box.innerHTML = files.map((file) => {
+    const dir = (file.path || '').split('/');
+    const name = dir.pop() || file.path;
+    const dirLabel = dir.join('/');
+    const chips = (file.sessions || []).map((session) => `
+      <button type="button" class="file-edit-chip" data-session="${escapeHtml(session.id)}"
+        title="${escapeHtml(session.title || session.id)}">
+        ${escapeHtml(session.provider)} · ${escapeHtml((session.title || session.id).slice(0, 40))}
+      </button>`).join('');
+    const more = file.sessionCount > (file.sessions || []).length
+      ? `<span class="muted">+${file.sessionCount - file.sessions.length} 条</span>`
+      : '';
+    return `
+      <div class="file-edit-row">
+        <div class="file-edit-path">
+          <strong>${escapeHtml(name)}</strong>
+          <span class="muted">${escapeHtml(dirLabel)}</span>
+          <span class="muted">· ${fmtAgo(file.lastTs ?? data.generatedAt, Date.now())}</span>
+        </div>
+        <div class="file-edit-sessions">${chips}${more}</div>
+      </div>`;
+  }).join('');
+  box.querySelectorAll('[data-session]').forEach((chip) => {
+    chip.addEventListener('click', () => {
+      location.hash = `sessions/${chip.getAttribute('data-session')}`;
+    });
+  });
+}
+
 async function refreshProjects() {
   const listEl = document.getElementById('projectList');
   if (!listEl) return;
@@ -2867,7 +2923,7 @@ function applyRoute() {
 }
 
 function showTab(name) {
-  if (!['plans', 'sessions', 'projects', 'requirements', 'planfiles', 'graph', 'usage', 'settings'].includes(name)) name = 'plans';
+  if (!['plans', 'sessions', 'files', 'projects', 'requirements', 'planfiles', 'graph', 'usage', 'settings'].includes(name)) name = 'plans';
   const hash = `#${name}`;
   // 深链(#tab/id)不回写成裸 #tab,避免路由器丢 id 死循环
   if (location.hash !== hash && !location.hash.startsWith(`${hash}/`)) location.hash = hash;
@@ -2878,6 +2934,7 @@ function showTab(name) {
     panel.hidden = panel.getAttribute('data-panel') !== name;
   });
   if (name === 'graph') void refreshGraph();
+  if (name === 'files') void refreshFileEdits();
   if (name === 'projects') void refreshProjects();
   if (name === 'requirements') void refreshRequirements();
   if (name === 'planfiles') void refreshPlans();
