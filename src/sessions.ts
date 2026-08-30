@@ -736,7 +736,8 @@ function yieldEventLoop(): Promise<void> {
 // (可搜、不进需求抽取与标题),需求物化在下一轮 collect 自动自愈。
 // v5:commit witness 提取(git commit 的 tool_result sha 目击)——全量重扫
 // 把历史存量的目击证据一次性挖出来(回溯红利是这层的核心价值)。
-export const MESSAGE_PARSER_VERSION = 5;
+// v6:witness 命令识别修多行 -m 与包装词,重扫补齐 v5 漏掉的目击。
+export const MESSAGE_PARSER_VERSION = 6;
 const MSG_BATCH = 400;
 
 interface StreamedLine {
