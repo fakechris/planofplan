@@ -15,7 +15,7 @@ import { buildUsageReport, collectUsageReport } from './usage.ts';
 import { buildSessionList, collectSessionCatalog, searchSessions } from './sessions.ts';
 import { refreshPricingSnapshot, pricingSnapshotStatus } from './pricing.ts';
 import { installCommitHook, uninstallCommitHook, prepareCommitMsgPath } from './hook.ts';
-import { existsSync } from 'node:fs';
+import { existsSync, statSync, renameSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { sessionProject } from './repos.ts';
 
@@ -233,6 +233,19 @@ async function serve(): Promise<void> {
 
   const scheduler = new Scheduler(store, cfg);
   scheduler.start();
+
+  // serve.log 轮转(重启时):子进程 stderr 已 inherit,日志会持续增长。
+  // 超 5MB 挪一代(launchd 的 fd 跟随 inode,旧内容继续写 .old 直到下次重启,
+  // 换代即清)。够用且零依赖——按 696K/月的增速,数月触发一次。
+  try {
+    const logPath = join(ensureHome(), 'serve.log');
+    if (existsSync(logPath) && statSync(logPath).size > 5 * 1024 * 1024) {
+      rmSync(`${logPath}.old`, { force: true });
+      renameSync(logPath, `${logPath}.old`);
+    }
+  } catch {
+    /* 轮转失败不影响启动 */
+  }
 
   // live = 非 demo:启动文件监听,session 目录有写入就自动增量索引(见 server.ts)
   const server = createServer(store, scheduler, cfg, { live: !f.demo });

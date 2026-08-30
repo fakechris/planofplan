@@ -51,7 +51,7 @@ export interface SessionCollectOptions {
   kimiRoot?: string;
   grokRoot?: string;
   dshRoot?: string;
-  /** 消息/touch/水位保留天数(目录行永久保留);0 = 关闭清理。默认取 PLANOFPLAN_MESSAGE_RETENTION_DAYS 或 90。 */
+  /** 消息/touch/水位保留天数(目录行永久保留);0 = 关闭清理。默认取 PLANOFPLAN_MESSAGE_RETENTION_DAYS 或 60。 */
   messageRetentionDays?: number;
 }
 
@@ -1074,7 +1074,7 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
     const deadScans = scanPaths.filter((path) => !existsSync(path));
     if (deadScans.length > 0) store.deleteUsageScanFiles(deadScans);
     const retentionDays = options.messageRetentionDays
-      ?? Number(process.env.PLANOFPLAN_MESSAGE_RETENTION_DAYS ?? 90);
+      ?? Number(process.env.PLANOFPLAN_MESSAGE_RETENTION_DAYS ?? 60);
     if (Number.isFinite(retentionDays) && retentionDays > 0) {
       store.pruneSessionDataBefore(Date.now() - retentionDays * DAY_MS);
     }

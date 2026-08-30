@@ -91,6 +91,8 @@ daemon 在 `POST http://localhost:<port>/mcp` 提供只读 MCP（streamable HTTP
 - `repo_lineage` 一个仓库最近的会话→需求→commit 谱系
 - `requirement_status` 最近抽取的需求及其 commit 落地状态
 
+给 agent 的工具使用指南(何时用哪个工具、自指防护惯例):[`docs/skills/planofplan/SKILL.md`](docs/skills/planofplan/SKILL.md)。
+
 接入 Claude Code：
 
 ```bash
