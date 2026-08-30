@@ -864,7 +864,7 @@ function commitsBlockHtml(commits) {
   const rows = [...commits].sort((a, b) => (b.ts || 0) - (a.ts || 0));
   const rowHtml = (commit) => {
     // ● 高置信(trailer 声明 / 文件交集),○ 纯时间窗 candidate
-    const strong = commit.kind === 'declared' || commit.fileOverlap;
+    const strong = commit.kind !== 'candidate' || commit.fileOverlap;
     // 本地未推送的 commit 渲染远端链接必然 404:pushed === false 时只显示纯文本 sha
     const url = commit.pushed === false ? null : commitUrl(commit.repo, commit.sha);
     const sha = escapeHtml(commit.sha.slice(0, 8));
@@ -937,7 +937,7 @@ function renderLineageReport(report) {
   box.innerHTML = `
     <div class="lineage-summary">
       <strong>本周谱系</strong>
-      <span>${t.requirements} 个需求 · ${landedPct}% 落地(${t.commits} commit,${t.declaredCommits} 声明) · ${fmtTokens(t.totalTokens)} tokens · ${cost} 估算</span>
+      <span>${t.requirements} 个需求 · ${landedPct}% 落地(${t.commits} commit,${t.declaredCommits} 声明,${t.witnessedCommits ?? 0} 目击) · ${fmtTokens(t.totalTokens)} tokens · ${cost} 估算</span>
     </div>
     ${top}
   `;
@@ -1022,7 +1022,7 @@ function renderGraph(list) {
   });
 
   // 节点数量保护:>800 时强制只画高置信 commit
-  const hiConf = (c) => c.evidence === 'declared' || c.node.fileOverlap;
+  const hiConf = (c) => c.evidence === 'declared' || c.evidence === 'observed' || c.node.fileOverlap;
   const countFor = (candidates) => laneEntries.reduce((n, [, sessions]) => (
     n + sessions.length * 2 + sessions.reduce((m, s) => {
       const all = commitsBySession.get(s.id) || [];
@@ -1127,7 +1127,7 @@ function renderGraph(list) {
     const to = pos.get(e.to);
     if (!from || !to) continue; // 被过滤/折叠的端点不画
     const edgeId = `e:${e.from}→${e.to}`;
-    const weak = e.kind === 'landed-in' && e.evidenceKind !== 'declared' && !to.fileOverlap;
+    const weak = e.kind === 'landed-in' && e.evidenceKind === 'candidate' && !to.fileOverlap;
     const path = document.createElementNS(SVG_NS, 'path');
     const x1 = from.x + from.w;
     const x2 = to.x;
@@ -1568,7 +1568,7 @@ function projectDetailHtml(detail) {
   `).join('');
 
   const commitsHtml = (detail.commits || []).map((commit) => {
-    const strong = commit.kind === 'declared' || commit.fileOverlap;
+    const strong = commit.kind !== 'candidate' || commit.fileOverlap;
     const url = commit.pushed === false ? null : commitUrl(commit.repo, commit.sha);
     const sha = escapeHtml(commit.sha.slice(0, 8));
     const shaHtml = url
@@ -1763,8 +1763,8 @@ function requirementDetailHtml(detail) {
     </div>
   `).join('');
   const commitsHtml = (detail.commits || []).map((commit) => `
-    <div class="attr-row${commit.kind === 'declared' ? '' : ' attr-dim'}">
-      <span class="attr-dot${commit.kind === 'declared' ? ' attr-dot-strong' : ''}">${commit.kind === 'declared' ? '●' : '○'}</span>
+    <div class="attr-row${commit.kind !== 'candidate' ? '' : ' attr-dim'}">
+      <span class="attr-dot${commit.kind !== 'candidate' ? ' attr-dot-strong' : ''}">${commit.kind !== 'candidate' ? '●' : '○'}</span>
       <span class="attr-sha">${escapeHtml((commit.sha || '').slice(0, 8))}</span>
       <span class="attr-summary">${escapeHtml(commit.summary || '(no subject)')}</span>
       <span class="attr-meta">${commit.pushed === false ? '未推送' : ''}</span>
@@ -2093,8 +2093,8 @@ function planDetailHtml(detail) {
     </button>
   `).join('');
   const planCommitsHtml = (detail.commits || []).slice(0, 10).map((commit) => `
-    <div class="attr-row${commit.kind === 'declared' ? '' : ' attr-dim'}">
-      <span class="attr-dot${commit.kind === 'declared' ? ' attr-dot-strong' : ''}">${commit.kind === 'declared' ? '●' : '○'}</span>
+    <div class="attr-row${commit.kind !== 'candidate' ? '' : ' attr-dim'}">
+      <span class="attr-dot${commit.kind !== 'candidate' ? ' attr-dot-strong' : ''}">${commit.kind !== 'candidate' ? '●' : '○'}</span>
       <span class="attr-sha">${escapeHtml((commit.sha || '').slice(0, 8))}</span>
       <span class="attr-summary">${escapeHtml(commit.summary || '(no subject)')}</span>
       <span class="attr-meta">${commit.pushed === false ? '未推送' : ''}</span>

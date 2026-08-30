@@ -30,6 +30,7 @@ export interface LineageReport {
     landed: number;
     commits: number;
     declaredCommits: number;
+    witnessedCommits: number;
     totalTokens: number;
     estimatedCostUsd: number | null;
   };
@@ -103,6 +104,7 @@ export function buildLineageReport(store: Store, since: number, until: number): 
       landed: items.filter((item) => item.landed).length,
       commits: items.reduce((sum, item) => sum + item.commits.length, 0),
       declaredCommits: items.reduce((sum, item) => sum + item.declaredCommits, 0),
+      witnessedCommits: items.reduce((sum, item) => sum + item.commits.filter((commit) => commit.kind === 'witnessed').length, 0),
       totalTokens,
       estimatedCostUsd: costItems.length > 0
         ? costItems.reduce((sum, item) => sum + (item.estimatedCostUsd ?? 0), 0)

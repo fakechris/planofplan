@@ -227,6 +227,15 @@ CREATE TABLE IF NOT EXISTS session_commits (
   PRIMARY KEY (session_id, sha)
 );
 CREATE INDEX IF NOT EXISTS idx_session_commits_sha ON session_commits(sha);
+-- commit witness:transcript 里 git commit 输出的 sha 目击(tool_use↔tool_result
+-- 配对,L1 派生可重建)。归因时与 git log 按 sha 前缀合并成 witnessed 分级。
+CREATE TABLE IF NOT EXISTS session_commit_witnesses (
+  session_id TEXT NOT NULL,
+  sha TEXT NOT NULL,
+  ts INTEGER,
+  PRIMARY KEY (session_id, sha)
+);
+CREATE INDEX IF NOT EXISTS idx_scw_sha ON session_commit_witnesses(sha);
 CREATE INDEX IF NOT EXISTS idx_session_commits_repo ON session_commits(repo, ts);
 -- 一等项目实体:身份 = git remote URL(无 remote 退化为 root path)。
 -- 从 session_repos 物化(collectSessionCatalog 末尾增量 upsert + v5 迁移 backfill)。
@@ -1833,6 +1842,20 @@ export class Store {
       .map((row) => row.path);
   }
 
+  upsertSessionCommitWitnesses(rows: Array<{ sessionId: string; sha: string; ts: number | null }>): void {
+    if (rows.length === 0) return;
+    const stmt = this.db.query(
+      `INSERT OR IGNORE INTO session_commit_witnesses (session_id, sha, ts) VALUES (?, ?, ?)`,
+    );
+    for (const row of rows) stmt.run(row.sessionId, row.sha, row.ts);
+  }
+
+  listCommitWitnesses(): Array<{ sessionId: string; sha: string; ts: number | null }> {
+    return this.db.query(
+      'SELECT session_id AS sessionId, sha, ts FROM session_commit_witnesses',
+    ).all() as Array<{ sessionId: string; sha: string; ts: number | null }>;
+  }
+
   /**
    * 最近被 agent 改动的文件(recent-edits feed):按 file_path 聚合 touch,
    * 附最近碰过它的 session(最多 perFile 个)。hiddenIds 由调用方注入
@@ -1909,6 +1932,7 @@ export class Store {
       for (const row of stale) {
         this.deleteSessionMessages(row.id);
         this.deleteSessionTouches(row.id);
+        this.db.query('DELETE FROM session_commit_witnesses WHERE session_id = ?').run(row.id);
       }
       this.deleteByPaths('DELETE FROM session_index_state WHERE path IN', stale.map((r) => r.source_file));
     });
@@ -1921,6 +1945,7 @@ export class Store {
       this.db.query('DELETE FROM session_messages WHERE session_id = ?').run(id);
       this.db.query('DELETE FROM session_file_touches WHERE session_id = ?').run(id);
       this.db.query('DELETE FROM session_commits WHERE session_id = ?').run(id);
+      this.db.query('DELETE FROM session_commit_witnesses WHERE session_id = ?').run(id);
       this.db.query('DELETE FROM session_links WHERE from_session = ? OR to_session = ?').run(id, id);
       this.db.query('DELETE FROM requirement_repos WHERE requirement_id IN (SELECT id FROM requirements WHERE session_id = ?)').run(id);
       this.db.query('DELETE FROM requirements WHERE session_id = ?').run(id);
@@ -2465,7 +2490,7 @@ export class Store {
         sessionId: row.session_id,
         repo: row.repo,
         sha: row.sha,
-        kind: row.kind === 'declared' ? 'declared' : 'candidate',
+        kind: row.kind === 'declared' || row.kind === 'witnessed' ? row.kind : 'candidate',
         ts: row.ts,
         summary: row.summary ?? '',
         fileOverlap: !!row.file_overlap,
@@ -2766,7 +2791,7 @@ function sessionCommitFromRow(row: {
     sessionId: row.session_id,
     repo: row.repo,
     sha: row.sha,
-    kind: row.kind === 'declared' ? 'declared' : 'candidate',
+    kind: row.kind === 'declared' || row.kind === 'witnessed' ? row.kind : 'candidate',
     ts: row.ts,
     summary: row.summary ?? '',
     fileOverlap: row.file_overlap === 1,

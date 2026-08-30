@@ -30,6 +30,7 @@ import {
   type GitRunner,
 } from './session-repos.ts';
 import type { SessionCommit, SessionRecord, SessionRepo } from './types.ts';
+import { witnessMatchesSha } from './commit-witness.ts';
 
 const COMMIT_LOG_MAX = 300;
 const CANDIDATE_PER_COMMIT_MAX = 5;
@@ -113,6 +114,8 @@ function relPathOf(filePath: string, root: string): string | null {
 export interface AttributeRepoOptions {
   repo: { url: string; root: string; name: string };
   sessions: SessionRecord[];
+  /** session → 目击 sha 集合(可选);提供时启用 witnessed 分级。 */
+  witnessesBySession?: Map<string, Set<string>>;
   /** sessionId → 该 session 在此 repo 里碰过的 repo 相对路径集合 */
   touchesBySession: Map<string, Set<string>>;
   /**
@@ -184,6 +187,33 @@ export function attributeRepoCommits(options: AttributeRepoOptions): SessionComm
       }
       continue;
     }
+    // witnessed:transcript 目击(session 的 git commit tool_result 里有该 sha
+    // 前缀)。确定性证据,优先于时间窗推断;同一 commit 同一 session 只取最高档。
+    if (options.witnessesBySession) {
+      const witnessed = sessions.filter((session) => {
+        const set = options.witnessesBySession!.get(session.id);
+        if (!set) return false;
+        for (const sha of set) {
+          if (witnessMatchesSha(sha, commit.sha)) return true;
+        }
+        return false;
+      });
+      if (witnessed.length > 0) {
+        for (const session of witnessed) {
+          out.push({
+            sessionId: session.id,
+            repo: repo.url,
+            sha: commit.sha,
+            kind: 'witnessed',
+            ts: commit.committedAt,
+            summary: commit.subject,
+            fileOverlap: overlapOf(session),
+            pushed: pushedOf(commit.sha),
+          });
+        }
+        continue;
+      }
+    }
     // candidate:时间窗重叠;stash 类提交不进 candidate;有 touch 数据的
     // session 必须有文件交集;文件交集提高置信度,排序优先并截断上限
     if (STASH_SUBJECT_RE.test(commit.subject)) continue;
@@ -252,6 +282,13 @@ export async function collectSessionCommits(
   store.deleteSessionCommitsBefore(since);
 
   const touchedSessionIds = store.listTouchedSessionIds();
+  // transcript 目击(全表量级小,一次读入):session → sha 集合
+  const witnessesBySession = new Map<string, Set<string>>();
+  for (const w of store.listCommitWitnesses()) {
+    const set = witnessesBySession.get(w.sessionId) ?? new Set<string>();
+    set.add(w.sha);
+    witnessesBySession.set(w.sessionId, set);
+  }
   const all: SessionCommit[] = [];
   let processed = 0;
   for (const { repo, sessions: repoSessions } of byRepo.values()) {
@@ -279,7 +316,7 @@ export async function collectSessionCommits(
       remoteShas = null;
     }
     try {
-      all.push(...attributeRepoCommits({ repo, sessions: repoSessions, touchesBySession, touchedSessionIds, remoteShas, git }));
+      all.push(...attributeRepoCommits({ repo, sessions: repoSessions, touchesBySession, touchedSessionIds, remoteShas, witnessesBySession, git }));
     } catch {
       /* 单 repo 归因失败不拖垮整趟扫描 */
     }

@@ -224,7 +224,7 @@ export function buildWorkGraph(
       from: commit.sessionId,
       to: nodeId,
       kind: 'landed-in',
-      evidenceKind: commit.kind === 'declared' ? 'declared' : 'candidate',
+      evidenceKind: commit.kind === 'declared' ? 'declared' : commit.kind === 'witnessed' ? 'observed' : 'candidate',
     });
     const projectId = projectIdOfRepo({ url: commit.repo });
     if (projects.has(projectId)) {

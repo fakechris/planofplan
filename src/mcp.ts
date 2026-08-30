@@ -223,8 +223,9 @@ function toolRequirementStatus(store: Store, args: { days?: unknown; limit?: unk
     const text = requirements.get(session.id)?.text ?? '';
     const sessionCommits = commits.get(session.id) ?? [];
     const declared = sessionCommits.filter((c) => c.kind === 'declared').length;
+    const witnessed = sessionCommits.filter((c) => c.kind === 'witnessed').length;
     const commitNote = sessionCommits.length > 0
-      ? ` · landed ${sessionCommits.length} commit(s), ${declared} declared`
+      ? ` · landed ${sessionCommits.length} commit(s), ${declared} declared, ${witnessed} witnessed`
       : ' · no commits yet';
     lines.push(`- ${date} [${session.provider}] ${text}${commitNote}`);
   }
@@ -278,7 +279,7 @@ const TOOLS: ToolDef[] = [
   },
   {
     name: 'repo_lineage',
-    description: '查一个 git 仓库最近的"谱系":哪些 agent 会话碰过它、各自的需求是什么、落了哪些 commit(declared=会话声明/candidate=时间窗推断)。用户问"这个 repo 最近做了什么""X 需求有没有落成 commit"时用它。',
+    description: '查一个 git 仓库最近的"谱系":哪些 agent 会话碰过它、各自的需求是什么、落了哪些 commit(declared=trailer 声明/witnessed=transcript 目击/candidate=时间窗推断)。用户问"这个 repo 最近做了什么""X 需求有没有落成 commit"时用它。',
     inputSchema: {
       type: 'object',
       properties: {
