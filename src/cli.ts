@@ -150,7 +150,7 @@ function formatTokens(value: number): string {
 }
 
 // ── hook ────────────────────────────────────────────────────────────
-function hookCmd(): void {
+async function hookCmd(): Promise<void> {
   const sub = argv[1];
   const repoFlag = argv.indexOf('--repo');
   const repo = repoFlag >= 0 ? resolve(argv[repoFlag + 1] ?? '.') : process.cwd();
@@ -490,7 +490,7 @@ switch (cmd) {
     await pricingCmd();
     break;
   case 'hook':
-    hookCmd();
+    await hookCmd();
     break;
   case 'status':
     status();
