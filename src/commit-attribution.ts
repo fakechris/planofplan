@@ -240,6 +240,50 @@ export function attributeRepoCommits(options: AttributeRepoOptions): SessionComm
       });
     }
   }
+  // witness 直查:git log -n 300 会把窗口外/超量的老 commit 截掉,这些
+  // commit 的目击 sha 在上面的循环里永远等不到。对每个未被 log 命中的
+  // 目击 sha 单独 git show 验证归属(脱离时间窗与条数上限),每次一个
+  // 有界调用;失败跳过不拖垮整趟。
+  if (options.witnessesBySession) {
+    const overlapFor = (session: SessionRecord): boolean => {
+      const touched = touchesBySession.get(session.id);
+      return touched != null && touched.size > 0;
+    };
+    const seenShas = new Set<string>();
+    for (const row of out) seenShas.add(row.sha);
+    for (const session of sessions) {
+      const set = options.witnessesBySession.get(session.id);
+      if (!set) continue;
+      for (const prefix of set) {
+        if (!witnessMatchesSha(prefix, prefix)) continue; // 自身长度合法性
+        if ([...seenShas].some((sha) => sha.startsWith(prefix))) continue; // log 已覆盖
+        let meta: { sha: string; committedAt: number; subject: string } | null = null;
+        try {
+          const raw = git(['-C', repo.root, 'show', '-s', '--format=%H%n%cI%n%s', prefix]);
+          const [sha, iso, subject] = raw.trim().split('\n');
+          const committedAt = Date.parse(iso ?? '');
+          if (sha && /^[0-9a-f]{40}$/i.test(sha) && Number.isFinite(committedAt)) {
+            meta = { sha, committedAt, subject: subject ?? '' };
+          }
+        } catch {
+          continue; // sha 不在本 repo / git 失败:跳过
+        }
+        if (meta) {
+          seenShas.add(meta.sha);
+          out.push({
+            sessionId: session.id,
+            repo: repo.url,
+            sha: meta.sha,
+            kind: 'witnessed',
+            ts: meta.committedAt,
+            summary: meta.subject,
+            fileOverlap: overlapFor(session),
+            pushed: pushedOf(meta.sha),
+          });
+        }
+      }
+    }
+  }
   return out;
 }
 

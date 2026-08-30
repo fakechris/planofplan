@@ -255,3 +255,31 @@ describe('zcode witness(同 part 输入输出)', () => {
     }
   });
 });
+
+describe('witness 直查(log 截断外的 sha)', () => {
+  test('log 没给出的 commit,show 验证后仍落 witnessed', async () => {
+    const store = openMemoryDb();
+    const now = Date.now();
+    store.upsertSessions([{
+      id: 'claude:w2', nativeId: 'w2', provider: 'claude', cwd: '/repo', title: 'w2', sourceFile: '/tmp/w2.jsonl',
+      startedAt: now - 7200_000, updatedAt: now - 1000, inputTokens: 0, outputTokens: 0,
+      totalTokens: 0, estimatedCostUsd: null, seenAt: now, gitRoot: '/repo',
+    }]);
+    store.replaceSessionRepos('claude:w2', [{ sessionId: 'claude:w2', role: 'work', url: 'https://x/repo.git', root: '/repo', name: 'repo', evidenceKind: 'observed' }]);
+    store.upsertSessionCommitWitnesses([{ sessionId: 'claude:w2', sha: 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef', ts: now }]);
+    const inLog = 'aaaa1111222233334444555566667777888899a0';
+    const iso = new Date(now - 60_000).toISOString();
+    const fakeGit = (args: string[]): string => {
+      if (args.includes('show')) {
+        return `deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n${iso}\nfeat: outside log cap`;
+      }
+      return `${inLog}\x00${iso}\x00feat: in log\x00\x00`; // log 只给一条,不含 deadbeef
+    };
+    await collectSessionCommits(store, { git: fakeGit });
+    const rows = store.listSessionCommits();
+    expect(rows.find((r) => r.sha === inLog)?.kind).toBe('candidate');
+    const outside = rows.find((r) => r.sha.startsWith('deadbeef'));
+    expect(outside?.kind).toBe('witnessed');
+    expect(outside?.summary).toBe('feat: outside log cap');
+  });
+});
