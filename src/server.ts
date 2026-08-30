@@ -40,6 +40,18 @@ const WEB_DIR = (() => {
   return candidates.find((dir) => existsSync(dir)) ?? candidates[0];
 })();
 
+
+/**
+ * 构造扫描子进程参数。解释模式(execPath=bun)需要显式脚本路径;编译二进制
+ * 的 process.argv 自带 $bunfs 入口占位,再传路径会把路径当命令,子进程直接
+ * 打印 help 退出——2026-08-29 生产实测踩过:spawn 扫描全空转,归因/实时
+ * 索引静默失效。stderr 一律 inherit:子进程本该安静,有输出即异常。
+ */
+function childProcessArgs(cliArgs: string[]): string[] {
+  const compiled = import.meta.dir.startsWith('$bunfs');
+  return [process.execPath, ...(compiled ? [] : [join(import.meta.dir, 'cli.ts')]), ...cliArgs];
+}
+
 export interface ServerOptions {
   /** true 时启动文件监听,变更自动触发 session 索引(demo 模式传 false)。 */
   live?: boolean;
@@ -90,16 +102,9 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
     if (usageRefreshProcess) return;
     usageRefreshError = null;
     usageRefreshStartedAt = Date.now();
-    const scanProcess = Bun.spawn([
-      process.execPath,
-      join(import.meta.dir, 'cli.ts'),
-      'tokens',
-      '--days',
-      String(days),
-      ...(includeOfficial ? [] : ['--no-official']),
-    ], {
+    const scanProcess = Bun.spawn(childProcessArgs(['tokens', '--days', String(days), ...(includeOfficial ? [] : ['--no-official'])]), {
       stdout: 'ignore',
-      stderr: 'ignore',
+      stderr: 'inherit',
     });
     usageRefreshProcess = scanProcess;
     void scanProcess.exited
@@ -377,14 +382,7 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
       return;
     }
     sessionIndexStartedAt = Date.now();
-    sessionIndexProcess = Bun.spawn([
-      process.execPath,
-      join(import.meta.dir, 'cli.ts'),
-      'sessions',
-      '--refresh',
-      '--days',
-      String(days),
-    ], { stdout: 'ignore', stderr: 'inherit' });
+    sessionIndexProcess = Bun.spawn(childProcessArgs(['sessions', '--refresh', '--days', String(days)]), { stdout: 'ignore', stderr: 'inherit' });
     broadcastSSE('index', { state: 'running', source, startedAt: sessionIndexStartedAt });
     void sessionIndexProcess.exited.finally(() => {
       sessionIndexProcess = null;
