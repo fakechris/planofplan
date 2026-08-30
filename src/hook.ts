@@ -24,7 +24,7 @@ case "$2" in message|commit|"") ;; *) exit 0 ;; esac
 grep -qi '^Harness-Session:' "$1" 2>/dev/null && exit 0
 CWD=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 [ -n "$CWD" ] || exit 0
-SESSION=$(curl -sf -m 2 -G -H 'Host: localhost:${port}' \\
+SESSION=$(curl -sf -m 3 -G -H 'Host: localhost:${port}' \\
   --data-urlencode "cwd=$CWD" "http://127.0.0.1:${port}/api/sessions/current" 2>/dev/null \\
   | sed -n 's/.*"sessionId":"\\([^"]*\\)".*/\\1/p' | head -1)
 [ -n "$SESSION" ] || exit 0

@@ -173,7 +173,7 @@ async function hookCmd(): Promise<void> {
   const probe = async (): Promise<number> => {
     for (const p of candidates) {
       try {
-        const res = await fetch(`http://127.0.0.1:${p}/api/build-info`, { signal: AbortSignal.timeout(800) });
+        const res = await fetch(`http://127.0.0.1:${p}/api/build-info`, { signal: AbortSignal.timeout(3_000) });
         if (res.ok) return p;
       } catch { /* try next */ }
     }
