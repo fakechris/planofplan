@@ -104,6 +104,22 @@ claude mcp add --transport http planofplan http://localhost:9288/mcp
 url = "http://localhost:9288/mcp"
 ```
 
+## commit trailer 声明通道（declared 归因）
+
+commit 归因的 `declared` 分级靠 commit message 里的 `Harness-Session: <session-id>`
+trailer，但没有任何 harness 会自己写它——通道一度形同虚设。现在可以装一个
+`prepare-commit-msg` 钩子把它建起来：
+
+```bash
+cd <某个 repo>
+planofplan hook install          # 卸载:planofplan hook uninstall
+```
+
+之后该 repo 里 agent 的 `git commit` 会自动向 daemon 查询当前活跃 session
+（6 小时内、cwd/gitRoot 匹配）并盖上 trailer，归因侧零改动即产出 declared
+级证据。daemon 不在/查不到 session 时静默跳过，绝不阻塞提交；merge/squash
+模式不盖章；已有别人的 prepare-commit-msg 时拒绝安装。
+
 ## macOS menubar app
 
 构建并安装到唯一运行位置 `/Applications/planofplan.app`：
