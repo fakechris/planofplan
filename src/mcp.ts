@@ -5,6 +5,7 @@ import { buildOverview } from './core.ts';
 import { buildUsageReport } from './usage.ts';
 import { searchSessions } from './sessions.ts';
 import { getBuildInfo } from './build-info.ts';
+import { buildLineageReport } from './lineage-report.ts';
 import type { SessionCommit, SessionRecord, UsageRecord } from './types.ts';
 
 // ── 只读 MCP server(streamable HTTP 子集) ───────────────────────────
@@ -291,6 +292,64 @@ const TOOLS: ToolDef[] = [
       additionalProperties: false,
     },
     run: (store, _cfg, args) => toolRepoLineage(store, args),
+  },
+  {
+    name: 'recent_edits',
+    description: '最近被 agent 改动的文件流:哪个文件在被反复改、出自哪条对话。用户问"最近 agent 都在改什么文件""X 文件是哪个会话改的"时用它。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        days: { type: 'number', description: '回看天数,默认 7,最大 90' },
+        limit: { type: 'number', description: '返回条数上限,默认 50,最大 200' },
+      },
+      additionalProperties: false,
+    },
+    run: (store, _cfg, args) => {
+      const days = Math.min(90, Math.max(1, Math.floor(Number(args.days ?? 7)) || 7));
+      const limit = Math.min(200, Math.max(1, Math.floor(Number(args.limit ?? 50)) || 50));
+      const userMeta = store.getSessionUserMetaMap();
+      const hiddenIds = new Set([...userMeta.entries()].filter(([, meta]) => meta.hidden).map(([id]) => id));
+      const files = store.recentFileEdits(Date.now() - days * DAY_MS, limit, hiddenIds);
+      if (files.length === 0) return `最近 ${days} 天没有文件改动记录。`;
+      const lines = [`最近 ${days} 天被 agent 改动的文件(前 ${files.length}):`];
+      for (const file of files) {
+        const names = file.sessions.map((s) => `${s.provider}:${(s.title ?? s.id).slice(0, 24)}`).join(' / ');
+        lines.push(`- ${file.path}(${file.sessionCount} 个会话)← ${names}`);
+      }
+      return lines.join('\n');
+    },
+  },
+  {
+    name: 'lineage_report',
+    description: '谱系周报:窗口内需求 × commit × token 消耗的静态汇总(declared=trailer 声明/witnessed=transcript 目击/candidate=时间窗推断)。用户问"这周做了什么、落了多少、各烧多少"时用它。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        days: { type: 'number', description: '回看天数,默认 7,最大 90' },
+        limit: { type: 'number', description: '条目上限,默认 15' },
+      },
+      additionalProperties: false,
+    },
+    run: (store, _cfg, args) => {
+      const days = Math.min(90, Math.max(1, Math.floor(Number(args.days ?? 7)) || 7));
+      const limit = Math.min(60, Math.max(1, Math.floor(Number(args.limit ?? 15)) || 15));
+      const now = Date.now();
+      const report = buildLineageReport(store, now - days * DAY_MS, now);
+      const t = report.totals;
+      const landedPct = t.requirements > 0 ? Math.round((t.landed / t.requirements) * 100) : 0;
+      const lines = [
+        `谱系周报(近 ${days} 天):${t.requirements} 个需求 · ${landedPct}% 落地`,
+        `commits: ${t.commits}(声明 ${t.declaredCommits} / 目击 ${t.witnessedCommits} / 其余时间窗推断)`,
+        `tokens: ${fmtCount(t.totalTokens)}${t.estimatedCostUsd != null ? ` · 估算 $${t.estimatedCostUsd.toFixed(2)}` : ''}`,
+        '',
+      ];
+      for (const item of report.items.slice(0, limit)) {
+        const mark = item.landed ? `[✓${item.commits.length}]` : '[…]';
+        const cost = item.estimatedCostUsd != null ? ` · $${item.estimatedCostUsd.toFixed(2)}` : '';
+        lines.push(`- ${mark} ${item.text.slice(0, 60)}(${item.provider}${item.project ? ` · ${item.project}` : ''}${cost})`);
+      }
+      return lines.join('\n');
+    },
   },
   {
     name: 'requirement_status',

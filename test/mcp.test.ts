@@ -50,6 +50,10 @@ function app() {
     source: 'local', confidence: 'measured', fetchedAt: undefined,
   };
   store.upsertUsageRecords([record]);
+  store.upsertSessionTouches([{
+    id: 'tw1', sessionId, provider: 'claude', filePath: '/repo/web/login.tsx',
+    toolName: 'Edit', op: 'edit', ts: NOW - 30_000, ordinal: 1,
+  }]);
   return createServer(store, scheduler as never, { port: 9291, plans: DEFAULT_PLANS });
 }
 
@@ -88,7 +92,8 @@ describe('mcp handshake', () => {
     const body = await rpc(app(), 'tools/list', {});
     const tools = ((body.result as { tools?: Array<{ name: string; inputSchema: unknown }> }).tools) ?? [];
     expect(tools.map((t) => t.name).sort()).toEqual([
-      'plan_quota_status', 'repo_lineage', 'requirement_status', 'session_search', 'usage_summary',
+      'lineage_report', 'plan_quota_status', 'recent_edits', 'repo_lineage',
+      'requirement_status', 'session_search', 'usage_summary',
     ]);
     for (const tool of tools) expect(tool.inputSchema).toBeDefined();
   });
@@ -164,5 +169,19 @@ describe('mcp session_search 自指防护', () => {
     const excluded = await callTool(server, 'session_search', { q: '幂等化改造', exclude: 'claude:s1' });
     expect(excluded).not.toContain('claude:s1');
     expect(excluded).toContain('No sessions match');
+  });
+});
+
+describe('mcp 新工具', () => {
+  test('recent_edits 返回文件流', async () => {
+    const text = await callTool(app(), 'recent_edits', { days: 7 });
+    expect(text).toContain('/repo/web/login.tsx');
+  });
+
+  test('lineage_report 返回汇总与条目', async () => {
+    const text = await callTool(app(), 'lineage_report', { days: 7 });
+    expect(text).toContain('谱系周报');
+    expect(text).toContain('把部署脚本改成幂等的');
+    expect(text).toContain('声明');
   });
 });

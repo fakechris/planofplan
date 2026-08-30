@@ -95,6 +95,22 @@ export function buildLineageReport(store: Store, since: number, until: number): 
   }
   const totalTokens = [...uniqueSessions.values()].reduce((sum, item) => sum + item.totalTokens, 0);
   const costItems = [...uniqueSessions.values()].filter((item) => item.estimatedCostUsd != null);
+  // commits 计数同口径去重:同 session 多需求会重复携带同一批 commit,
+  // totals 只按唯一 (session, sha) 计
+  const uniqueCommitKeys = new Set<string>();
+  let uniqueCommits = 0;
+  let uniqueDeclared = 0;
+  let uniqueWitnessed = 0;
+  for (const item of items) {
+    for (const commit of item.commits) {
+      const key = `${item.sessionId}:${commit.sha}`;
+      if (uniqueCommitKeys.has(key)) continue;
+      uniqueCommitKeys.add(key);
+      uniqueCommits += 1;
+      if (commit.kind === 'declared') uniqueDeclared += 1;
+      else if (commit.kind === 'witnessed') uniqueWitnessed += 1;
+    }
+  }
   return {
     generatedAt: now,
     since,
@@ -102,9 +118,9 @@ export function buildLineageReport(store: Store, since: number, until: number): 
     totals: {
       requirements: items.length,
       landed: items.filter((item) => item.landed).length,
-      commits: items.reduce((sum, item) => sum + item.commits.length, 0),
-      declaredCommits: items.reduce((sum, item) => sum + item.declaredCommits, 0),
-      witnessedCommits: items.reduce((sum, item) => sum + item.commits.filter((commit) => commit.kind === 'witnessed').length, 0),
+      commits: uniqueCommits,
+      declaredCommits: uniqueDeclared,
+      witnessedCommits: uniqueWitnessed,
       totalTokens,
       estimatedCostUsd: costItems.length > 0
         ? costItems.reduce((sum, item) => sum + (item.estimatedCostUsd ?? 0), 0)
