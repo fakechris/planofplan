@@ -1,4 +1,5 @@
 import type { SessionCommit } from './types.ts';
+import { Database } from 'bun:sqlite';
 
 // ── commit witness:transcript 目击式归因 ────────────────────────────
 // 三家参考项目都没有这个层:agentsview 只做 repo×email×时间窗总量聚合,
@@ -51,6 +52,13 @@ export function isGitCommitCommand(command: string): boolean {
     if (tokens[i] === 'commit') return true;
   }
   return false;
+}
+
+/** 最小化反转义:cmd 从 JS/JSON 字符串里抠出来时带着 \" \\n 等转义。 */
+function unescapeJsonish(raw: string): string {
+  return raw.replace(/\\(["\\nrt])/g, (_, c: string) => (
+    c === 'n' ? '\n' : c === 'r' ? '\r' : c === 't' ? '\t' : c
+  ));
 }
 
 function shaFromOutput(text: string): string | null {
@@ -118,6 +126,25 @@ export function commitWitnessesFromRecord(
       ? record.payload as Record<string, unknown>
       : null;
     if (!payload) return out;
+    // custom_tool_call(exec 工具):input 是 JS 代码,cmd 藏在
+    // tools.exec_command({"cmd":"..."}) 的字符串里(2026-08 本机实证主形态)
+    if (payload.type === 'custom_tool_call' && typeof payload.call_id === 'string') {
+      const input = typeof payload.input === 'string' ? payload.input : '';
+      const cmdMatch = /["']cmd["']\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(input);
+      if (cmdMatch) {
+        const command = unescapeJsonish(cmdMatch[1]!);
+        if (isGitCommitCommand(command)) pairing.set(payload.call_id, true);
+      }
+      return out;
+    }
+    if (payload.type === 'custom_tool_call_output' && typeof payload.call_id === 'string' && pairing.get(payload.call_id)) {
+      pairing.delete(payload.call_id);
+      // output 是字符串化的分块文本(单引号伪 JSON),直接在原文上找 sha
+      const raw = typeof payload.output === 'string' ? payload.output : JSON.stringify(payload.output ?? '');
+      const sha = shaFromOutput(raw);
+      if (sha) out.push({ sessionId, sha, ts });
+      return out;
+    }
     if (payload.type === 'function_call' && typeof payload.call_id === 'string') {
       // codex shell 的 arguments 是 JSON 字符串;command 可能是字符串或数组
       let command = '';
@@ -163,4 +190,46 @@ export function commitKindLabel(kind: SessionCommit['kind']): string {
   if (kind === 'declared') return '声明';
   if (kind === 'witnessed') return '目击';
   return '推断';
+}
+
+/**
+ * zcode 目击:tool part 的 state.input.command 与 state.output 同 part 存放
+ * (无配对问题);output 过大时 zcode 换成 persisted-output 指针 + 2KB 预览,
+ * 预览含 sha 即可命中,截断的接受部分覆盖(钩子兜底)。
+ */
+export function commitWitnessesFromZcodeDb(path: string, nativeId: string, sessionId: string): CommitWitness[] {
+  const out: CommitWitness[] = [];
+  try {
+    const db = new Database(path, { readonly: true });
+    try {
+      const rows = db.query(
+        `SELECT p.data AS part, m.time_created AS created
+         FROM part p JOIN message m ON m.id = p.message_id
+         WHERE p.session_id = ? AND json_extract(p.data, '$.type') = 'tool'`,
+      ).all(nativeId) as Array<{ part: string; created: number | null }>;
+      for (const row of rows) {
+        try {
+          const part = JSON.parse(row.part) as {
+            callID?: unknown; tool?: unknown;
+            state?: { input?: { command?: unknown }; output?: unknown; time?: unknown } | null;
+          };
+          const command = typeof part.state?.input?.command === 'string' ? part.state!.input!.command! : '';
+          if (!command || !isGitCommitCommand(command)) continue;
+          const raw = typeof part.state?.output === 'string' ? part.state.output : '';
+          const sha = shaFromOutput(raw);
+          if (sha) {
+            const ts = typeof part.state?.time === 'number' ? part.state.time : row.created;
+            out.push({ sessionId, sha, ts });
+          }
+        } catch {
+          /* 单条 part 解析失败跳过 */
+        }
+      }
+    } finally {
+      db.close();
+    }
+  } catch {
+    /* zcode db 不可读:跳过 */
+  }
+  return out;
 }
