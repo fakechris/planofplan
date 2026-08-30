@@ -167,9 +167,22 @@ function hookCmd(): void {
     return;
   }
   const cfg = loadConfig();
-  const r = installCommitHook(repo, cfg.port || 9291);
+  // daemon 实际端口可能与 config 不一致(launchd --port 覆盖):按候选序探测
+  // 哪个端口活着就用哪个,全部不通则按 config 装(daemon 之后起来也能用)
+  const candidates = [...new Set([cfg.port || 9291, 9291, 9288])];
+  const probe = async (): Promise<number> => {
+    for (const p of candidates) {
+      try {
+        const res = await fetch(`http://127.0.0.1:${p}/api/build-info`, { signal: AbortSignal.timeout(800) });
+        if (res.ok) return p;
+      } catch { /* try next */ }
+    }
+    return candidates[0]!;
+  };
+  const port = await probe();
+  const r = installCommitHook(repo, port);
   if (r.status === 'installed') {
-    console.log(`已安装 ${r.path}(端口 ${cfg.port || 9291})`);
+    console.log(`已安装 ${r.path}(端口 ${port})`);
     console.log('本仓库 agent 的 git commit 将自动带 Harness-Session trailer,declared 归因通道生效。');
   } else if (r.status === 'already') {
     console.log(`已是最新:${r.path}`);
