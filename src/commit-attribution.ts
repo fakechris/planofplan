@@ -262,8 +262,11 @@ export async function collectSessionCommits(
   const since = options.since ?? Date.now() - 30 * 86_400_000;
   const until = options.until ?? Date.now();
 
+  // until 是扫描开始时刻的快照;扫描期间仍在活跃的 session(恰恰是最可能
+  // 在提交的)updatedAt 会越过它——按宽限期放行,否则 trailer/witness 每次
+  // 都和活跃 session 擦肩而过(实测 declared 反复得而复失的根因)
   const sessions = store.listSessionRows().filter((session) => (
-    session.updatedAt >= since && session.updatedAt < until
+    session.updatedAt >= since && session.updatedAt < until + SESSION_GRACE_MS
   ));
   const byRepo = new Map<string, { repo: SessionRepo; sessions: SessionRecord[] }>();
   for (const session of sessions) {

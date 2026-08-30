@@ -181,3 +181,26 @@ describe('扫描集成:fixture 文件 → witness 落库', () => {
     }
   }, 25_000);
 });
+
+describe('归因窗口的活跃 session', () => {
+  test('updatedAt 越过 until 快照(扫描期间活跃)的 session 仍参与归因', async () => {
+    const store = openMemoryDb();
+    const now = Date.now();
+    const sid = 'claude:live';
+    store.upsertSessions([{
+      id: sid, nativeId: 'live', provider: 'claude', cwd: '/repo', title: 'live', sourceFile: '/tmp/live.jsonl',
+      startedAt: now - 3_600_000, updatedAt: now + 5_000, inputTokens: 0, outputTokens: 0,
+      totalTokens: 0, estimatedCostUsd: null, seenAt: now, gitRoot: '/repo',
+    }]);
+    store.replaceSessionRepos(sid, [{ sessionId: sid, role: 'work', url: 'https://x/repo.git', root: '/repo', name: 'repo', evidenceKind: 'observed' }]);
+    const sha = 'cccccccccccccccccccccccccccccccccccccccc';
+    const iso = new Date(now).toISOString();
+    await collectSessionCommits(store, {
+      since: now - 86_400_000,
+      until: now, // 扫描开始时刻:session 已越过它 5 秒
+      git: () => `${sha}\x00${iso}\x00feat: live\x00Harness-Session: ${sid}\x00`,
+    });
+    const rows = store.listSessionCommits();
+    expect(rows.find((r) => r.sha === sha)?.kind).toBe('declared');
+  });
+});
