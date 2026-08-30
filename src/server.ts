@@ -384,7 +384,7 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
       '--refresh',
       '--days',
       String(days),
-    ], { stdout: 'ignore', stderr: 'ignore' });
+    ], { stdout: 'ignore', stderr: 'inherit' });
     broadcastSSE('index', { state: 'running', source, startedAt: sessionIndexStartedAt });
     void sessionIndexProcess.exited.finally(() => {
       sessionIndexProcess = null;
