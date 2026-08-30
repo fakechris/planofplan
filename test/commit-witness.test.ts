@@ -24,6 +24,8 @@ describe('isGitCommitCommand', () => {
   test('认得各种形态,拒绝浏览型命令', () => {
     expect(isGitCommitCommand('git commit -m "x"')).toBe(true);
     expect(isGitCommitCommand('git -C /repo commit -am "x"')).toBe(true);
+    expect(isGitCommitCommand('git add a.ts && git commit -m "feat: x\n\n多行消息\n含 && 与 | 符号"')).toBe(true);
+    expect(isGitCommitCommand('rtk proxy git add a && rtk proxy git commit -m x')).toBe(true);
     expect(isGitCommitCommand('cd /a && git commit -m y')).toBe(true);
     expect(isGitCommitCommand('git commit')).toBe(true);
     expect(isGitCommitCommand('git log --oneline')).toBe(false);
