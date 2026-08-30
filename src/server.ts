@@ -487,6 +487,40 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
     return c.json({ deleted: store.listTombstonedSessions() });
   });
 
+  // commit trailer 钩子的查询面:当前 repo 最近活跃的 session(6h 内)。
+  // 同样必须先于 /api/sessions/:id 注册。
+  app.get('/api/sessions/current', (c) => {
+    const cwd = c.req.query('cwd')?.trim() ?? '';
+    if (!cwd.startsWith('/')) return c.json({ ok: false, error: 'cwd 必须是绝对路径' }, 400);
+    const now = Date.now();
+    const maxAge = 6 * 3_600_000;
+    // macOS 路径规范化:pwd/git 可能给 /private/var/...,session cwd 记的是
+    // /var/...(或反过来)——比较前去掉 /private 前缀,否则符号路径永远配不上
+    const norm = (p: string): string => p.replace(/^\/private(?=\/)/, '');
+    const match = (session: { cwd: string | null; gitRoot?: string | null }): boolean => {
+      const scwd = session.cwd ? norm(session.cwd) : null;
+      const root = session.gitRoot ? norm(session.gitRoot) : null;
+      const here = norm(cwd);
+      if (scwd === here) return true;
+      // 提交发生在 session 所属 repo 内(含子目录)
+      if (root && (here === root || here.startsWith(`${root}/`))) return true;
+      // session 跑在提交目录的子目录里(worktree/monorepo 场景)
+      if (scwd && scwd.startsWith(`${here}/`)) return true;
+      return false;
+    };
+    const rows = store.listSessionRows()
+      .filter((row) => now - row.updatedAt < maxAge)
+      .filter((row) => (row.origin ?? 'user') === 'user')
+      .filter(match)
+      .sort((a, b) => b.updatedAt - a.updatedAt);
+    const session = rows[0];
+    if (!session) return c.json({ ok: true, session: null });
+    return c.json({
+      ok: true,
+      session: { sessionId: session.id, provider: session.provider, title: session.title, updatedAt: session.updatedAt },
+    });
+  });
+
   // 谱系周报 v0:需求 × commit × 额度 的静态聚合(纯 SQL 侧,不引 LLM)
   app.get('/api/lineage-report', (c) => {
     const days = Math.min(90, Math.max(1, Number(c.req.query('days') ?? 7) || 7));

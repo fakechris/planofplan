@@ -14,6 +14,9 @@ import type { QuotaWindow } from './types.ts';
 import { buildUsageReport, collectUsageReport } from './usage.ts';
 import { buildSessionList, collectSessionCatalog, searchSessions } from './sessions.ts';
 import { refreshPricingSnapshot, pricingSnapshotStatus } from './pricing.ts';
+import { installCommitHook, uninstallCommitHook, prepareCommitMsgPath } from './hook.ts';
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { sessionProject } from './repos.ts';
 
 const argv = process.argv.slice(2);
@@ -40,6 +43,7 @@ function help(): void {
   planofplan tokens [--json] [--days N] [--provider sl] token usage & spend 报表
   planofplan sessions [--json] [--days N] [--provider sl] [--search q] [--refresh] 本地 session 目录
   planofplan pricing refresh                拉取 LiteLLM 模型价格快照(离线时用内置家族表估算)
+  planofplan hook install [--repo 路径]     装 commit trailer 钩子(agent 提交自动声明 session)
   planofplan pricing status                 显示价格快照状态
   planofplan status                         各 plan 调度/凭据/最近抓取状态
   planofplan refresh [slug]                 手动刷新一个/全部 plan
@@ -143,6 +147,36 @@ function formatTokens(value: number): string {
   if (value < 1_000_000) return `${grouped(value / 1_000, value >= 10_000 ? 0 : 1)}K`;
   if (value < 1_000_000_000) return `${grouped(value / 1_000_000, value >= 10_000_000 ? 1 : 2)}M`;
   return `${grouped(value / 1_000_000_000, 2)}B`;
+}
+
+// ── hook ────────────────────────────────────────────────────────────
+function hookCmd(): void {
+  const sub = argv[1];
+  const repoFlag = argv.indexOf('--repo');
+  const repo = repoFlag >= 0 ? resolve(argv[repoFlag + 1] ?? '.') : process.cwd();
+  if (sub === 'uninstall') {
+    const r = uninstallCommitHook(repo);
+    console.log(r.ok ? `已卸载(${r.status})` : `跳过:${r.reason}`);
+    if (!r.ok) process.exitCode = 1;
+    return;
+  }
+  if (sub !== 'install') {
+    const p = prepareCommitMsgPath(repo);
+    console.log('用法: planofplan hook install [--repo 路径] | planofplan hook uninstall [--repo 路径]');
+    console.log(`当前仓库钩子: ${p}${existsSync(p) ? '(已安装)' : '(未安装)'}`);
+    return;
+  }
+  const cfg = loadConfig();
+  const r = installCommitHook(repo, cfg.port || 9291);
+  if (r.status === 'installed') {
+    console.log(`已安装 ${r.path}(端口 ${cfg.port || 9291})`);
+    console.log('本仓库 agent 的 git commit 将自动带 Harness-Session trailer,declared 归因通道生效。');
+  } else if (r.status === 'already') {
+    console.log(`已是最新:${r.path}`);
+  } else {
+    console.error(`${r.status}:${r.reason}`);
+    process.exitCode = 1;
+  }
 }
 
 // ── pricing ────────────────────────────────────────────────────────
@@ -441,6 +475,9 @@ switch (cmd) {
     break;
   case 'pricing':
     await pricingCmd();
+    break;
+  case 'hook':
+    hookCmd();
     break;
   case 'status':
     status();
