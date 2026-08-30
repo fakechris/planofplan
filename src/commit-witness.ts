@@ -28,7 +28,7 @@ const COMMIT_OUTPUT_RE = /\[[^\s\]]+ (?:(?:\(root-commit\)|\(amend\)) )?([0-9a-f
 const GIT_VALUE_FLAGS = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '-S', '--gpg-sign']);
 
 /** shell 包装词:codex 的 command 数组 join 后形如 "bash -lc git commit -m x"。 */
-const SHELL_WRAPPER_RE = /^(?:(?:bash|sh|zsh|dash|ksh|env|exec|sudo|command|nohup|xargs)(?:\s+|$)|[-+][a-z]*c[a-z]*\s+)/;
+const SHELL_WRAPPER_RE = /^(?:(?:bash|sh|zsh|dash|ksh|env|exec|sudo|command|nohup|xargs|rtk|proxy)(?:\s+|$)|[-+][a-z]*c[a-z]*\s+)/;
 
 export function isGitCommitCommand(command: string): boolean {
   if (!command.includes('commit')) return false;
@@ -38,10 +38,11 @@ export function isGitCommitCommand(command: string): boolean {
     for (let i = 0; i < 4 && SHELL_WRAPPER_RE.test(segment); i += 1) {
       segment = segment.replace(SHELL_WRAPPER_RE, '');
     }
-    const m = /^git\s+(.*)$/.exec(segment);
-    if (!m) continue;
+    // 注意不做行尾锚定:-m 的多行消息会让 ^git...$ 直接失配(实测踩过)
+    if (!/^git\s/.test(segment)) continue;
+    const args = segment.replace(/^git\s+/, '');
     // 跳过全局 flag(带值的一并跳值),第一个子命令 token 是 commit 才算
-    const tokens = m[1]!.trim().split(/\s+/);
+    const tokens = args.trim().split(/\s+/);
     let i = 0;
     while (i < tokens.length && tokens[i]!.startsWith('-')) {
       if (GIT_VALUE_FLAGS.has(tokens[i]!) || tokens[i]!.startsWith('--') && !tokens[i]!.includes('=')) i += 2;
