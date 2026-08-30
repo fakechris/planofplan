@@ -84,8 +84,16 @@ export function buildLineageReport(store: Store, since: number, until: number): 
   }
   items.sort((a, b) => b.updatedAt - a.updatedAt);
 
-  const totalTokens = items.reduce((sum, item) => sum + item.totalTokens, 0);
-  const costItems = items.filter((item) => item.estimatedCostUsd != null);
+  // 用量按 session 去重:一个 session 常有多个需求,逐条累加会把同一份
+  // 消耗计 N 次(实测膨胀 ~10x)。item 级仍展示该 session 的消耗(需求间
+  // 会重复出现,语义是"所在会话消耗"),totals 只按唯一 session 计。
+  const uniqueSessions = new Map<string, LineageReportItem>();
+  for (const item of items) {
+    const existing = uniqueSessions.get(item.sessionId);
+    if (!existing || item.updatedAt > existing.updatedAt) uniqueSessions.set(item.sessionId, item);
+  }
+  const totalTokens = [...uniqueSessions.values()].reduce((sum, item) => sum + item.totalTokens, 0);
+  const costItems = [...uniqueSessions.values()].filter((item) => item.estimatedCostUsd != null);
   return {
     generatedAt: now,
     since,

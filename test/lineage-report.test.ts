@@ -67,3 +67,23 @@ describe('谱系周报 v0', () => {
     expect(body.totals.requirements).toBe(2);
   });
 });
+
+describe('周报用量去重', () => {
+  test('同 session 多需求:totals 只计一次,item 各自展示所在会话消耗', () => {
+    const store = seed();
+    // 给 claude:a 追加第二个需求 → 同 session 两需求(保留 b 的需求)
+    store.replaceAllRequirements([
+      { id: 'req:claude:a:1', sessionId: 'claude:a', seq: 1, text: '把谱系周报的静态聚合做出来', originLevel: 'user_explicit', ts: NOW - 7200_000, repos: [] },
+      { id: 'req:claude:a:2', sessionId: 'claude:a', seq: 5, text: '补上回归测试', originLevel: 'user_explicit', ts: NOW - 3000, repos: [] },
+      { id: 'req:claude:b:1', sessionId: 'claude:b', seq: 1, text: '顺便把导出也做了', originLevel: 'user_explicit', ts: NOW - 3600_000, repos: [] },
+    ]);
+    const report = buildLineageReport(store, NOW - 7 * 86_400_000, NOW + 1000);
+    expect(report.totals.requirements).toBe(3);
+    // usage 只属于 claude:a(1500 tokens/$0.02):totals 不得按需求数翻倍
+    expect(report.totals.totalTokens).toBe(1500);
+    expect(report.totals.estimatedCostUsd).toBeCloseTo(0.02);
+    const aItems = report.items.filter((item) => item.sessionId === 'claude:a');
+    expect(aItems).toHaveLength(2);
+    expect(aItems[0].totalTokens).toBe(1500); // item 级保持会话消耗
+  });
+});
