@@ -334,8 +334,8 @@ export interface SessionCommit {
   /** repo url,与 session_repos.url 对齐。 */
   repo: string;
   sha: string;
-  /** declared = Harness-Session trailer 显式声明;candidate = 时间窗匹配。 */
-  kind: 'declared' | 'candidate';
+  /** declared = trailer 声明;witnessed = transcript 目击 git commit 输出 sha;candidate = 时间窗推断。 */
+  kind: 'declared' | 'witnessed' | 'candidate';
   ts: number | null;
   summary: string;
   /** commit 触碰文件与 session_file_touches 有交集(candidate 里的强信号)。 */

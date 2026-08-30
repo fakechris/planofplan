@@ -24,6 +24,7 @@ import { repoRefOf, sessionProjectNames } from './repos.ts';
 import { attachRepos, extractSessionRepos, TOUCH_BYTES } from './session-repos.ts';
 import { messagesFromRecord, messagesFromZcodeDb, isClaudeMetaRecord, isClaudeCompactSummary, isCodexMetaUserText } from './transcript.ts';
 import { touchesFromRecord } from './file-touches.ts';
+import { commitWitnessesFromRecord, type WitnessPairing } from './commit-witness.ts';
 import { collectSessionCommits } from './commit-attribution.ts';
 import {
   applyHerdrOrigin,
@@ -733,7 +734,9 @@ function yieldEventLoop(): Promise<void> {
 // (ai-title / history.jsonl / session_index.jsonl),全量重扫顺带刷新全部标题。
 // v4:claude isCompactSummary 续跑摘要重分类为 kind='summary'/role='system'
 // (可搜、不进需求抽取与标题),需求物化在下一轮 collect 自动自愈。
-export const MESSAGE_PARSER_VERSION = 4;
+// v5:commit witness 提取(git commit 的 tool_result sha 目击)——全量重扫
+// 把历史存量的目击证据一次性挖出来(回溯红利是这层的核心价值)。
+export const MESSAGE_PARSER_VERSION = 5;
 const MSG_BATCH = 400;
 
 interface StreamedLine {
@@ -891,6 +894,8 @@ function indexSessionFileMessages(
   // claude 的 ai-title 记录位置不固定(可深至数千行),头部解析常漏;
   // 消息索引的全量/续扫流式读必然路过它,顺手捕获最后一条
   let aiTitle: string | null = null;
+  // commit witness 的配对状态(文件级):tool_use 与 tool_result 可能跨批次
+  const witnessPairing: WitnessPairing = new Map();
   // 整个文件的消息/touch 写入包在一个事务里:WAL 下每次 COMMIT 都是一次 fsync,
   // 按批提交会把活跃 session 的续扫拖慢一个数量级
   store.withTransaction(() => {
@@ -906,9 +911,14 @@ function indexSessionFileMessages(
       const touches = lines.flatMap(({ record, line }) => (
         touchesFromRecord(session.provider, session.id, record, line, session.cwd)
       ));
+      // 同趟顺手产出 commit 目击:git commit 的 tool_result 里印着 sha
+      const witnesses = lines.flatMap(({ record }) => (
+        commitWitnessesFromRecord(session.provider, session.id, record, witnessPairing)
+      ));
       try {
         store.upsertSessionMessages(messages);
         store.upsertSessionTouches(touches);
+        store.upsertSessionCommitWitnesses(witnesses);
       } catch {
         /* 单批写入失败不拖垮整趟目录扫描 */
       }

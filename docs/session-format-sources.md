@@ -100,6 +100,15 @@
 
 ---
 
+## commit witness 证据（2026-08-30 新增）
+
+- `git commit` 的 tool_result 首行格式 `[<branch> <sha>] <subject>`（root-commit
+  为 `[<branch> (root-commit) <sha>]`）——目击提取按 tool_use↔tool_result
+  配对制（claude 按 id、codex 按 call_id），只认 commit 命令的输出，`git log`
+  浏览输出的 sha 一概不算（防假阳性）。命令识别按 shell 分段 + 剥包装词
+  （`bash -lc` 等）后要求首子命令为 `commit`。dsh/factory 不落盘工具输出，
+  是 witness 的盲区（由 trailer 钩子兜底）。
+
 ## 维护规则（重申）
 
 1. 改某家 parser → 同一次变更更新本文件对应条目 + 「已验证」日期。
