@@ -24,7 +24,7 @@ import { repoRefOf, sessionProjectNames } from './repos.ts';
 import { attachRepos, extractSessionRepos, TOUCH_BYTES } from './session-repos.ts';
 import { messagesFromRecord, messagesFromZcodeDb, isClaudeMetaRecord, isClaudeCompactSummary, isCodexMetaUserText } from './transcript.ts';
 import { touchesFromRecord } from './file-touches.ts';
-import { commitWitnessesFromRecord, type WitnessPairing } from './commit-witness.ts';
+import { commitWitnessesFromRecord, commitWitnessesFromZcodeDb, type WitnessPairing } from './commit-witness.ts';
 import { collectSessionCommits } from './commit-attribution.ts';
 import {
   applyHerdrOrigin,
@@ -737,7 +737,8 @@ function yieldEventLoop(): Promise<void> {
 // v5:commit witness 提取(git commit 的 tool_result sha 目击)——全量重扫
 // 把历史存量的目击证据一次性挖出来(回溯红利是这层的核心价值)。
 // v6:witness 命令识别修多行 -m 与包装词,重扫补齐 v5 漏掉的目击。
-export const MESSAGE_PARSER_VERSION = 6;
+// v7:witness 覆盖 codex custom_tool_call(exec)形态;zcode 走独立路径随扫随提。
+export const MESSAGE_PARSER_VERSION = 7;
 const MSG_BATCH = 400;
 
 interface StreamedLine {
@@ -1011,6 +1012,7 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
         // zcode 正文在其自有 sqlite:part id 稳定,upsert 幂等,维持"总是重扫"
         try {
           store.upsertSessionMessages(messagesFromZcodeDb(file.path, row.nativeId, row.id));
+          store.upsertSessionCommitWitnesses(commitWitnessesFromZcodeDb(file.path, row.nativeId, row.id));
         } catch {
           /* 单个 session 的消息抽取失败不拖垮目录 */
         }

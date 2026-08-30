@@ -204,3 +204,54 @@ describe('归因窗口的活跃 session', () => {
     expect(rows.find((r) => r.sha === sha)?.kind).toBe('declared');
   });
 });
+
+describe('codex custom_tool_call(exec)形态', () => {
+  test('JS 串里的 cmd 提取 + 字符串化分块输出取 sha', () => {
+    const p = pairing();
+    commitWitnessesFromRecord('codex', 'codex:s2', {
+      type: 'response_item', timestamp: '2026-08-30T09:00:00.000Z',
+      payload: {
+        type: 'custom_tool_call', call_id: 'call_c1', name: 'exec',
+        input: 'const r = await tools.exec_command({"cmd":"cd /repo && git commit -m \\"feat: exec 形态\\""})',
+      },
+    }, p);
+    expect(p.get('call_c1')).toBe(true);
+    const result = commitWitnessesFromRecord('codex', 'codex:s2', {
+      type: 'response_item',
+      payload: {
+        type: 'custom_tool_call_output', call_id: 'call_c1',
+        output: "[{'type': 'input_text', 'text': 'Script completed\\nOutput:\\n'}, {'type': 'input_text', 'text': '[main 1a2b3c4d5e] feat: exec 形态\\n 2 files changed'}]",
+      },
+    }, p);
+    expect(result[0]?.sha).toBe('1a2b3c4d5e');
+  });
+});
+
+describe('zcode witness(同 part 输入输出)', () => {
+  test('state.input.command 是 git commit 且 output 含 sha → 目击', () => {
+    const { Database } = require('bun:sqlite');
+    const dir = mkdtempSync(join(tmpdir(), 'pop-zcode-w-'));
+    try {
+      const dbPath = join(dir, 'db.sqlite');
+      const db = new Database(dbPath);
+      db.exec(`CREATE TABLE message (id TEXT PRIMARY KEY, data TEXT, time_created INTEGER);
+               CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, sequence INTEGER, data TEXT, time_created INTEGER);`);
+      db.query("INSERT INTO message VALUES ('m1', '{\"role\":\"assistant\"}', 100)").run();
+      db.query(`INSERT INTO part VALUES ('p1', 'm1', 'sess_x', 1, ?, 100)`).run(JSON.stringify({
+        type: 'tool', callID: 'call_z1', tool: 'Bash',
+        state: {
+          status: 'completed',
+          input: { command: 'git add a.ts && git commit -m "feat: zcode"' },
+          output: '[main 9f8e7d6c5b] feat: zcode\n 1 file changed',
+          time: 1788090000000,
+        },
+      }));
+      db.close();
+      const { commitWitnessesFromZcodeDb } = require('../src/commit-witness.ts');
+      const witnesses = commitWitnessesFromZcodeDb(dbPath, 'sess_x', 'zcode:sess_x');
+      expect(witnesses).toEqual([{ sessionId: 'zcode:sess_x', sha: '9f8e7d6c5b', ts: 1788090000000 }]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
