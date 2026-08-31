@@ -52,13 +52,15 @@ describe('需求 LLM 精炼层', () => {
     expect(first?.text).toContain('docs/api.md'); // 展示用精炼
   });
 
-  test('空结果标记已尝试,不重试', async () => {
+  test('空结果按可重试处理(不标记),后续轮次还能再试', async () => {
     const store = seed();
-    await refineRequirements(store, CFG, { env: { PLANOFPLAN_REQUIREMENT_LLM: '1' }, fetchImpl: fakeFetch('') });
-    expect(store.listRequirements()[0]?.refinedText).toBeNull();
-    expect(store.listRequirements()[0]?.refinedAt).not.toBeNull();
-    const r2 = await refineRequirements(store, CFG, { env: { PLANOFPLAN_REQUIREMENT_LLM: '1' }, fetchImpl: fakeFetch('x') });
-    expect(r2.attempted).toBe(0); // 不再重试
+    const env = { PLANOFPLAN_REQUIREMENT_LLM: '1', MINIMAX_API_KEY: 'test-key' };
+    const r1 = await refineRequirements(store, CFG, { env, fetchImpl: fakeFetch('') });
+    expect(r1.refined).toBe(0);
+    expect(store.listRequirements()[0]?.refinedAt).toBeNull();
+    const r2 = await refineRequirements(store, CFG, { env, fetchImpl: fakeFetch('第二轮成功') });
+    expect(r2.attempted).toBe(1);
+    expect(store.listRequirements()[0]?.refinedText).toBe('第二轮成功');
   });
 
   test('env 未开启时不做事', async () => {
