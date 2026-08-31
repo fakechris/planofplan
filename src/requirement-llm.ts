@@ -21,10 +21,15 @@ const REFINEMENT_SYSTEM = `你从 coding agent 会话的用户消息里提炼"�
 - 如果这些消息只是闲聊、寒暄、确认或无法提炼出比原文更清晰的陈述,只输出一个空行。
 - 不虚构任何原文中没有的信息。`;
 
-/** 单条需求的输入:该 session 的用户消息(截断、限量,聚焦开头)。 */
-function buildUserPrompt(texts: string[]): string {
-  const clipped = texts.slice(0, 8).map((t) => t.replace(/\s+/g, ' ').slice(0, 300));
-  return `会话的用户消息(按时间序):\n${clipped.map((t) => `- ${t}`).join('\n')}\n\n请输出这一句需求陈述(或空行):`;
+/**
+ * 单条需求的输入:需求 seq 附近的用户消息窗口(前 2 后 3)——喂整个会话
+ * 会让同 session 的所有需求收敛成同一句会话级摘要(首日实测踩过),
+ * 窗口让每条需求保有自己的语境。messages 的 seq 与需求 seq 同轴。
+ */
+function buildUserPrompt(texts: string[], seq: number): string {
+  const start = Math.max(0, seq - 3);
+  const window = texts.slice(start, start + 6).map((t) => t.replace(/\s+/g, ' ').slice(0, 300));
+  return `会话中这一段(第 ${seq} 条用户消息附近)的用户消息(按时间序):\n${window.map((t) => `- ${t}`).join('\n')}\n\n请输出该时间点用户提出的需求的一句话陈述(或空行):`;
 }
 
 export interface RefineResult {
@@ -70,7 +75,7 @@ export async function refineRequirements(
         cfg,
         env,
         system: REFINEMENT_SYSTEM,
-        user: buildUserPrompt(texts),
+        user: buildUserPrompt(texts, candidate.seq),
         fetchImpl: options.fetchImpl as never,
         timeoutMs: options.timeoutMs ?? 20_000,
       });
