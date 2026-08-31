@@ -82,8 +82,9 @@ export async function refineRequirements(
       const raw = (result.content ?? '').trim();
       // 输出守卫:模型偶发元评论("The user is asking…"/"用户想要…")或复述任务,
       // 一律按"无精炼"落库保持原话——比展示一句废话好
-      const metaCommentary = /^(the user|user is|用户|作为|好的|let me|我)/i.test(raw)
-        || /requirement statement|需求陈述|extract/i.test(raw.slice(0, 60));
+      // 只杀明确的元评论;"我/用户"开头的正常陈述不能误伤(实测踩过)
+      const metaCommentary = /^(the user|user is|let me|作为 ai|作为模型)/i.test(raw)
+        || /requirement statement|extract a requirement/i.test(raw.slice(0, 80));
       const refinedText = !metaCommentary && raw.length <= 120 ? raw : '';
       store.setRequirementRefined(candidate.id, refinedText || null);
       if (refinedText) refined += 1;
