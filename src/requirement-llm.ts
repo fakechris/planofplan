@@ -79,6 +79,10 @@ export async function refineRequirements(
         fetchImpl: options.fetchImpl as never,
         timeoutMs: options.timeoutMs ?? 20_000,
       });
+      // 错误语义区分:"返回空内容"=模型拒答,按已尝试落库保持原话;
+      // 网络/超时/5xx=临时失败,不标记(下轮重试)。混在一起会让
+      // provider 的间歇空响应把候选永久消耗掉(实测踩过)。
+      if (result.error && !result.error.includes('空内容')) continue;
       const raw = (result.content ?? '').trim();
       // 输出守卫:模型偶发元评论("The user is asking…"/"用户想要…")或复述任务,
       // 一律按"无精炼"落库保持原话——比展示一句废话好
