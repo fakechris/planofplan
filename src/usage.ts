@@ -15,6 +15,7 @@ import type {
 import { fetchOfficialUsage } from './official-usage.ts';
 import { collectSessionCatalog } from './sessions.ts';
 import { modelPriceFor } from './pricing.ts';
+import { extractAntigravityUsage, antigravityConversationId } from './antigravity-usage.ts';
 
 const DAY_MS = 86_400_000;
 
@@ -42,6 +43,7 @@ export interface CollectUsageOptions extends UsageScanOptions {
   kimiRoot?: string;
   grokRoot?: string;
   dshRoot?: string;
+  antigravityRoot?: string;
 }
 
 function finiteNumber(value: unknown): number {
@@ -281,6 +283,26 @@ function jsonlFiles(root: string, since: number): string[] {
 
 function inRange(timestamp: number, since: number, until: number): boolean {
   return timestamp >= since && timestamp < until;
+}
+
+/** Antigravity 会话库:conversations/ 一层的 *.db(SQLite)。 */
+function dbFiles(root: string, since: number): string[] {
+  if (!existsSync(root)) return [];
+  try {
+    if (statSync(root).isFile()) return [root];
+    return readdirSync(root)
+      .filter((name) => name.endsWith('.db'))
+      .map((name) => join(root, name))
+      .filter((path) => {
+        try {
+          return statSync(path).mtimeMs >= since - 2 * 86_400_000;
+        } catch {
+          return false;
+        }
+      });
+  } catch {
+    return [];
+  }
 }
 
 function filesForRoot(root: string, since: number, suffix = '.jsonl'): string[] {
@@ -1077,6 +1099,16 @@ function localScanFiles(options: CollectUsageOptions, since: number): LocalScanF
       ),
     },
     {
+      provider: 'antigravity',
+      // 2026-08-31 实证:新版 IDE 的会话库;旧版只有加密 .pb 会被这里自然跳过
+      files: dbFiles(
+        options.antigravityRoot
+          ?? process.env.ANTIGRAVITY_HOME
+          ?? join(homedir(), '.gemini', 'antigravity', 'conversations'),
+        since,
+      ),
+    },
+    {
       provider: 'grok-cli',
       files: filesForRoot(
         grokLogFile(options.grokRoot ?? process.env.GROK_HOME ?? join(homedir(), '.grok')),
@@ -1108,6 +1140,38 @@ function localScanFiles(options: CollectUsageOptions, since: number): LocalScanF
   }));
 }
 
+/** gen_metadata → usage 记录;时间戳用 .db mtime 近似(会话粒度日分桶)。 */
+function scanAntigravityDb(path: string, since: number, until: number): UsageRecord[] {
+  const rows = extractAntigravityUsage(path);
+  if (rows.length === 0) return [];
+  let mtime = Date.now();
+  try {
+    mtime = statSync(path).mtimeMs;
+  } catch {
+    /* 用当前时刻兜底 */
+  }
+  if (mtime < since || mtime > until) return [];
+  const conv = antigravityConversationId(path);
+  return rows
+    .filter((row) => row.inputTokens + row.outputTokens + row.cacheReadTokens > 0)
+    .map((row) => record(
+      `local:antigravity:${conv}:${row.idx}`,
+      'antigravity',
+      row.model,
+      mtime,
+      {
+        inputTokens: row.inputTokens,
+        cachedInputTokens: row.cacheReadTokens,
+        cacheCreationInputTokens: 0,
+        outputTokens: row.outputTokens,
+        reasoningOutputTokens: 0,
+        totalTokens: row.inputTokens + row.cacheReadTokens + row.outputTokens,
+      },
+      'local',
+      'measured',
+    ));
+}
+
 function scanLocalFile(
   file: LocalScanFile,
   since: number,
@@ -1120,6 +1184,8 @@ function scanLocalFile(
       return scanClaudeLogs(file.path, since, until, file.project ?? null);
     case 'zcode':
       return scanZcodeLogs(file.path, since, until);
+    case 'antigravity':
+      return scanAntigravityDb(file.path, since, until);
     case 'kimi-cli':
       return scanKimiCliLogs(file.path, since, until);
     case 'grok-cli':

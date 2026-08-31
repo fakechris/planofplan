@@ -43,7 +43,7 @@ planofplan auth clear <slug>             清掉手动 key
 
 `tokens` / `/api/usage` 是独立于 quota 百分比的 Usage & Spend 报表：
 
-- 默认只读本地 provider 日志：Codex `~/.codex/sessions`、Claude
+- 默认只读本地 provider 日志：Antigravity `~/.gemini/antigravity/conversations/*.db`（gen_metadata protobuf）、Codex `~/.codex/sessions`、Claude
   `~/.claude/projects`、ZCode `~/.zcode/cli/rollout`、Kimi CLI
   `~/.kimi-code/sessions`、Grok CLI `~/.grok/logs/unified.jsonl`、DSH
   `~/.dsh/sessions`。Codex 使用累计 token 的非负增量，Claude 使用
