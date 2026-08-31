@@ -79,3 +79,17 @@ describe('config 开关路径', () => {
     expect(store.listRequirements()[0]?.refinedText).toBe('config 路径精炼');
   });
 });
+
+describe('输出守卫', () => {
+  test('元评论输出按无精炼落库,原话保持', async () => {
+    const store = seed();
+    await refineRequirements(store, CFG, {
+      env: { PLANOFPLAN_REQUIREMENT_LLM: '1', MINIMAX_API_KEY: 'k' },
+      fetchImpl: fakeFetch('The user is asking me to extract a requirement statement from these messages'),
+    });
+    const req = store.listRequirements()[0]!;
+    expect(req.refinedText).toBeNull();
+    expect(req.refinedAt).not.toBeNull();
+    expect(store.firstRequirementBySession().get('claude:r1')?.text).toBe('稍晚 ，再核对 一下这个东西吧');
+  });
+});

@@ -29,7 +29,7 @@ const REFINEMENT_SYSTEM = `你从 coding agent 会话的用户消息里提炼"�
 function buildUserPrompt(texts: string[], seq: number): string {
   const start = Math.max(0, seq - 3);
   const window = texts.slice(start, start + 6).map((t) => t.replace(/\s+/g, ' ').slice(0, 300));
-  return `会话中这一段(第 ${seq} 条用户消息附近)的用户消息(按时间序):\n${window.map((t) => `- ${t}`).join('\n')}\n\n请输出该时间点用户提出的需求的一句话陈述(或空行):`;
+  return `会话中这一段(第 ${seq} 条用户消息附近)的用户消息(按时间序):\n${window.map((t) => `- ${t}`).join('\n')}\n\n请直接输出这一句需求陈述本身(不要任何解释、前缀或引号);无法提炼则只输出一个空行:`;
 }
 
 export interface RefineResult {
@@ -79,7 +79,12 @@ export async function refineRequirements(
         fetchImpl: options.fetchImpl as never,
         timeoutMs: options.timeoutMs ?? 20_000,
       });
-      const refinedText = (result.content ?? '').trim().slice(0, 120);
+      const raw = (result.content ?? '').trim();
+      // 输出守卫:模型偶发元评论("The user is asking…"/"用户想要…")或复述任务,
+      // 一律按"无精炼"落库保持原话——比展示一句废话好
+      const metaCommentary = /^(the user|user is|用户|作为|好的|let me|我)/i.test(raw)
+        || /requirement statement|需求陈述|extract/i.test(raw.slice(0, 60));
+      const refinedText = !metaCommentary && raw.length <= 120 ? raw : '';
       store.setRequirementRefined(candidate.id, refinedText || null);
       if (refinedText) refined += 1;
     } catch {
