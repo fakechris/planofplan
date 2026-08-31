@@ -106,6 +106,21 @@ claude mcp add --transport http planofplan http://localhost:9288/mcp
 url = "http://localhost:9288/mcp"
 ```
 
+## 需求 LLM 精炼层（可选）
+
+图谱/需求页默认展示 session 的第一条用户消息（原话）。开启精炼后，每轮索引
+会用已配置的 LLM（`config.json` 的 `llm` 段）把多轮用户消息提炼成一句需求陈述，
+展示侧优先精炼、原话永不被覆盖（`requirements.refined_text` 留档），无法提炼时
+保持原话。增量、每轮限量、失败不标记可重试。
+
+```json
+// ~/.planofplan/config.json
+{ "llm": { "provider": "minimax", "model": "MiniMax-M3", "refine": true } }
+```
+
+或环境变量 `PLANOFPLAN_REQUIREMENT_LLM=1`。参照系：agentsview recall 的严格
+锚定蒸馏 + obelisk memories 的"合成缓存不替代原始证据"。
+
 ## commit trailer 声明通道（declared 归因）
 
 commit 归因的 `declared` 分级靠 commit message 里的 `Harness-Session: <session-id>`

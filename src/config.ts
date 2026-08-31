@@ -14,6 +14,8 @@ export interface AppConfig {
 /** LLM 选择:provider = 已配置凭据的 provider;model 自由填;baseUrl 可覆写端点。 */
 export interface LlmConfig {
   provider?: string;
+  /** 需求 LLM 精炼层开关(config.json 路径;env PLANOFPLAN_REQUIREMENT_LLM=1 同效)。 */
+  refine?: boolean;
   model?: string;
   baseUrl?: string;
 }

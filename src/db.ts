@@ -558,6 +558,21 @@ export class Store {
       }
       db.exec('PRAGMA user_version = 11');
     }
+    // v12:需求 LLM 精炼层——refined_text 是可选的合成缓存,原话 text 永不覆盖
+    //(obelisk memories 纪律);refined_at 兼作"已尝试"标记,空结果不重试。
+    if (version < 12) {
+      try {
+        db.exec('ALTER TABLE requirements ADD COLUMN refined_text TEXT');
+      } catch {
+        // 已有列
+      }
+      try {
+        db.exec('ALTER TABLE requirements ADD COLUMN refined_at INTEGER');
+      } catch {
+        // 已有列
+      }
+      db.exec('PRAGMA user_version = 12');
+    }
   }
 
   getUserVersion(): number {
@@ -2097,12 +2112,29 @@ export class Store {
     });
   }
 
+  /** 精炼层候选:未尝试过、窗口内 session 的需求,每轮限量。 */
+  requirementsAwaitingRefinement(limit: number, sinceMs: number): Array<{ id: string; sessionId: string; text: string }> {
+    return (this.db.query(
+      `SELECT r.id, r.session_id, r.text FROM requirements r
+       JOIN sessions s ON s.id = r.session_id
+       WHERE r.refined_at IS NULL AND s.updated_at >= ?
+       ORDER BY s.updated_at DESC LIMIT ?`,
+    ).all(sinceMs, limit) as Array<{ id: string; session_id: string; text: string }>)
+      .map((row) => ({ id: row.id, sessionId: row.session_id, text: row.text }));
+  }
+
+  /** 精炼回写:text 为 null 表示"尝试过但无更优陈述",同样标记不重试。 */
+  setRequirementRefined(id: string, text: string | null): void {
+    this.db.query('UPDATE requirements SET refined_text = ?, refined_at = ? WHERE id = ?')
+      .run(text, Date.now(), id);
+  }
+
   listRequirements(): RequirementRecord[] {
     const rows = this.db.query(
-      `SELECT r.id, r.session_id, r.seq, r.text, r.origin_level, r.ts
+      `SELECT r.id, r.session_id, r.seq, r.text, r.origin_level, r.ts, r.refined_text, r.refined_at
        FROM requirements r
        ORDER BY r.session_id, r.seq`,
-    ).all() as Array<{ id: string; session_id: string; seq: number; text: string; origin_level: string; ts: number | null }>;
+    ).all() as Array<{ id: string; session_id: string; seq: number; text: string; origin_level: string; ts: number | null; refined_text: string | null; refined_at: number | null }>;
     if (rows.length === 0) return [];
     const repoRows = this.db.query('SELECT requirement_id, url FROM requirement_repos').all() as Array<{
       requirement_id: string;
@@ -2122,6 +2154,8 @@ export class Store {
       originLevel: row.origin_level === 'user_explicit' ? 'user_explicit' : 'system_inferred',
       ts: row.ts,
       repos: repos.get(row.id) ?? [],
+      refinedText: row.refined_text,
+      refinedAt: row.refined_at,
     }));
   }
 
@@ -2154,7 +2188,12 @@ export class Store {
   firstRequirementBySession(): Map<string, RequirementRecord> {
     const map = new Map<string, RequirementRecord>();
     for (const row of this.listRequirements()) {
-      if (!map.has(row.sessionId)) map.set(row.sessionId, row);
+      if (!map.has(row.sessionId)) {
+        // 展示偏好:有精炼用精炼,无则原话(原话永不丢失,refinedText 留档)
+        map.set(row.sessionId, row.refinedText
+          ? { ...row, text: row.refinedText }
+          : row);
+      }
     }
     return map;
   }

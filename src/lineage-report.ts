@@ -69,7 +69,7 @@ export function buildLineageReport(store: Store, since: number, until: number): 
     const usage = usageByNative.get(`${session.provider}|${session.nativeId}`);
     items.push({
       requirementId: requirement.id,
-      text: requirement.text,
+      text: requirement.refinedText ?? requirement.text,
       originLevel: requirement.originLevel,
       sessionId: requirement.sessionId,
       provider: session.provider,
