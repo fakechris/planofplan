@@ -41,6 +41,7 @@ import { refineRequirements } from './requirement-llm.ts';
 import { loadConfig } from './config.ts';
 import { materializePlanFiles, materializeProgressNotes, materializeTodoSnapshots } from './plans.ts';
 import type { SessionCommit, SessionIndexState, SessionList, SessionRecord, SessionRepo } from './types.ts';
+import { extractAntigravitySession, antigravityTranscriptPath } from './antigravity-session.ts';
 
 /** Subset of usage collect options — kept here to avoid a usage.ts cycle. */
 export interface SessionCollectOptions {
@@ -53,6 +54,7 @@ export interface SessionCollectOptions {
   kimiRoot?: string;
   grokRoot?: string;
   dshRoot?: string;
+  antigravityRoot?: string;
   /** 消息/touch/水位保留天数(目录行永久保留);0 = 关闭清理。默认取 PLANOFPLAN_MESSAGE_RETENTION_DAYS 或 60。 */
   messageRetentionDays?: number;
 }
@@ -80,7 +82,7 @@ const USAGE_PROVIDER_ALIAS: Record<string, string> = {
   'kimi-cli': 'kimi',
 };
 
-export const CATALOG_PROVIDERS = ['claude', 'codex', 'grok', 'dsh', 'kimi', 'zcode', 'factory'] as const;
+export const CATALOG_PROVIDERS = ['claude', 'codex', 'grok', 'dsh', 'kimi', 'zcode', 'factory', 'antigravity'] as const;
 export type CatalogProvider = (typeof CATALOG_PROVIDERS)[number];
 
 export function sessionKey(provider: string, nativeId: string): string {
@@ -560,6 +562,11 @@ export function extractSessionFile(provider: string, path: string, mtimeMs: numb
 
 export function extractSessionRecords(provider: string, path: string, mtimeMs: number): SessionRecord[] {
   if (provider === 'zcode') return extractZcodeDb(path, mtimeMs);
+  if (provider === 'antigravity') {
+    const transcript = antigravityTranscriptPath(path, dirname(path));
+    const row = extractAntigravitySession(path, transcript, mtimeMs);
+    return row ? [row] : [];
+  }
   const row = extractSessionFile(provider, path, mtimeMs);
   return row ? [row] : [];
 }
@@ -627,6 +634,14 @@ export function discoverSessionFiles(options: SessionCollectOptions, since: numb
         const root = options.zcodeRoot ?? process.env.ZCODE_HOME ?? join(home, '.zcode', 'cli');
         return [join(root, 'db', 'db.sqlite'), join(root, 'db.sqlite')].filter((path) => existsSync(path));
       })(),
+    },
+    {
+      provider: 'antigravity',
+      files: walkFiles(
+        options.antigravityRoot ?? process.env.ANTIGRAVITY_HOME ?? join(home, '.gemini', 'antigravity', 'conversations'),
+        since,
+        (name) => UUID_RE.test(name.replace(/\.db$/i, '')),
+      ),
     },
   ];
   return groups.flatMap(({ provider, files }) => files.flatMap((path) => {
@@ -757,6 +772,10 @@ function isCompressedLog(path: string): boolean {
 
 /** 消息索引实际读的路径:kimi/grok 的目录文件重定向到正文日志。 */
 function messageReadPath(provider: string, path: string): string {
+  if (provider === 'antigravity' && path.endsWith('.db')) {
+    const transcript = antigravityTranscriptPath(path, dirname(path));
+    if (existsSync(transcript)) return transcript;
+  }
   if (provider === 'grok' && path.endsWith('summary.json')) {
     const chat = join(dirname(path), 'chat_history.jsonl');
     if (existsSync(chat)) return chat;
