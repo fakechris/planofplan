@@ -2113,14 +2113,14 @@ export class Store {
   }
 
   /** 精炼层候选:未尝试过、窗口内 session 的需求,每轮限量。 */
-  requirementsAwaitingRefinement(limit: number, sinceMs: number): Array<{ id: string; sessionId: string; text: string }> {
+  requirementsAwaitingRefinement(limit: number, sinceMs: number): Array<{ id: string; sessionId: string; seq: number; text: string }> {
     return (this.db.query(
-      `SELECT r.id, r.session_id, r.text FROM requirements r
+      `SELECT r.id, r.session_id, r.seq, r.text FROM requirements r
        JOIN sessions s ON s.id = r.session_id
        WHERE r.refined_at IS NULL AND s.updated_at >= ?
        ORDER BY s.updated_at DESC LIMIT ?`,
-    ).all(sinceMs, limit) as Array<{ id: string; session_id: string; text: string }>)
-      .map((row) => ({ id: row.id, sessionId: row.session_id, text: row.text }));
+    ).all(sinceMs, limit) as Array<{ id: string; session_id: string; seq: number; text: string }>)
+      .map((row) => ({ id: row.id, sessionId: row.session_id, seq: row.seq, text: row.text }));
   }
 
   /** 精炼回写:text 为 null 表示"尝试过但无更优陈述",同样标记不重试。 */
