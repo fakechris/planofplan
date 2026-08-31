@@ -3002,11 +3002,12 @@ let latestSettings = null;
 async function refreshSettings() {
   if (!document.getElementById('settingsPlanList')) return;
   try {
-    const [config, llm] = await Promise.all([
+    const [config, llm, overview] = await Promise.all([
       request('/api/config'),
       request('/api/llm/config'),
+      request('/api/overview').catch(() => null),
     ]);
-    latestSettings = { config, llm };
+    latestSettings = { config, llm, overview };
   } catch {
     latestSettings = null;
   }
@@ -3021,16 +3022,35 @@ function renderSettings() {
     listEl.innerHTML = '<div class="muted">配置读取失败</div>';
     return;
   }
-  const { config, llm } = latestSettings;
-  const rows = (config.plans || []).map((plan) => `
+  const { config, llm, overview } = latestSettings;
+  // 运行时状态合入:authStatus 是「检测/抓取后」的真值,credRef 只是配置态
+  const runtimeBySlug = new Map((overview?.plans || []).map((row) => [row.slug, row]));
+  const rows = (config.plans || []).map((plan) => {
+    const rt = runtimeBySlug.get(plan.slug);
+    const auth = rt?.authStatus ?? 'unknown';
+    void llm;
+    const credBadge = plan.credRef
+      ? '<i class="settings-cred settings-cred-set">✓ 专属凭据</i>'
+      : auth === 'auto' || auth === 'manual'
+        ? `<i class="settings-cred settings-cred-set" title="${escapeHtml(rt?.credentialHint || '自动检测已找到凭据')}">✓ 自动检测</i>`
+        : auth === 'missing'
+          ? '<i class="settings-cred settings-cred-bad">✗ 无凭据</i>'
+          : auth === 'invalid'
+            ? '<i class="settings-cred settings-cred-bad">⚠ 凭据失效</i>'
+            : '<i class="settings-cred" title="尚未抓取验证">? 未验证</i>';
+    const fetchBadge = rt?.lastError
+      ? `<i class="settings-cred settings-cred-bad" title="${escapeHtml(String(rt.lastError).slice(0, 120))}">✗ 抓取失败</i>`
+      : rt?.lastFetchedAt
+        ? `<i class="settings-cred settings-cred-set" title="${fmtTime(rt.lastFetchedAt, true)}">✓ ${fmtAgo(rt.lastFetchedAt, Date.now())}抓取</i>`
+        : '<i class="settings-cred">未抓取</i>';
+    return `
     <div class="attr-row settings-plan-row" data-plan-slug="${escapeHtml(plan.slug)}">
       <span class="attr-path">${escapeHtml(plan.name)} <span class="muted">${escapeHtml(plan.slug)}</span></span>
       <span class="settings-plan-badges">
         <i class="settings-adapter">${escapeHtml(plan.adapter)}</i>
-        ${plan.credRef
-          ? '<i class="settings-cred settings-cred-set">✓ 专属凭据</i>'
-          : '<i class="settings-cred">自动检测</i>'}
-        ${plan.enabled ? '' : '<i class="settings-cred settings-cred-off">已停用</i>'}
+        ${plan.enabled ? '<i class="settings-cred settings-cred-on">● 启用</i>' : '<i class="settings-cred settings-cred-off">○ 已停用</i>'}
+        ${credBadge}
+        ${fetchBadge}
       </span>
       <span class="settings-plan-actions">
         <button type="button" class="secondary-btn" data-auth-plan="${escapeHtml(plan.slug)}">${plan.credRef ? '换 key' : '配 key'}</button>
@@ -3038,7 +3058,8 @@ function renderSettings() {
         <button type="button" class="secondary-btn" data-del-plan="${escapeHtml(plan.slug)}">删除</button>
       </span>
     </div>
-  `).join('');
+  `;
+  }).join('');
   listEl.innerHTML = rows || '<div class="muted">还没有 plan</div>';
   // 凭据配置:额度页同款 dialog(password 输入 + 保存 / 回自动),不再用 prompt
   listEl.querySelectorAll('[data-auth-plan]').forEach((btn) => {

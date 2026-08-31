@@ -799,3 +799,6 @@ select:focus, input:focus { border-color: var(--accent-2); box-shadow: 0 0 0 2px
 .lineage-landed.pending { color: var(--muted); }
 .lineage-text { color: var(--text); font-size: var(--text-xs); }
 .lineage-item .muted { font-size: var(--text-xs); color: var(--muted); }
+/* settings plan 行的状态芯片:启用/凭据/抓取三组 */
+.settings-cred-on { color: var(--success, #2f9e63); }
+.settings-cred-bad { color: var(--danger, #e5484d); }
