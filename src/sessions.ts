@@ -37,6 +37,8 @@ import {
 } from './session-origin.ts';
 import { claudeParentOfPath, materializeSessionLinks } from './session-links.ts';
 import { materializeRequirements } from './requirements.ts';
+import { refineRequirements } from './requirement-llm.ts';
+import { loadConfig } from './config.ts';
 import { materializePlanFiles, materializeProgressNotes, materializeTodoSnapshots } from './plans.ts';
 import type { SessionCommit, SessionIndexState, SessionList, SessionRecord, SessionRepo } from './types.ts';
 
@@ -1131,6 +1133,13 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
   // 全量重导,确定性 id,幂等
   try {
     materializeRequirements(store);
+    // 需求 LLM 精炼(显式 opt-in + 已配置 LLM 才生效;每轮限量,best-effort)
+    try {
+      const llmCfg = loadConfig().llm ?? { provider: null as never, model: null as never };
+      await refineRequirements(store, llmCfg);
+    } catch {
+      /* refinement is best-effort */
+    }
   } catch {
     /* requirement materialization is best-effort */
   }

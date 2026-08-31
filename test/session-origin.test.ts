@@ -196,7 +196,7 @@ describe('backfillSessionOrigins', () => {
   test('getUserVersion/setUserVersion 语义(重复 ALTER 容错)', () => {
     // openMemoryDb 走新 SCHEMA + 全部迁移;真实老库迁移由 v1→…→v11 链覆盖
     const store = openMemoryDb();
-    expect(store.getUserVersion()).toBe(11);
+    expect(store.getUserVersion()).toBe(12);
     expect(() => store.setUserVersion(4)).not.toThrow();
     expect(store.getUserVersion()).toBe(4);
   });

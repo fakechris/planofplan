@@ -292,6 +292,10 @@ export interface RequirementRecord {
   ts: number | null;
   /** span 归因到的 repo url(§1.5:证据窗口内实际碰的 repo)。 */
   repos: string[];
+  /** LLM 精炼的需求陈述(可选;原话 text 永不被覆盖——合成缓存不替代原始证据)。 */
+  refinedText?: string | null;
+  /** 精炼尝试时间(空结果也标记,避免反复重试)。 */
+  refinedAt?: number | null;
 }
 
 /** session_index_state 表行：消息级索引的行级续扫水位。 */
