@@ -10,6 +10,7 @@ import type { SessionMessageRow, SessionRecord, SessionTranscript, TranscriptTur
 import { textOf } from './sessions.ts';
 import { sourcePathFor } from './session-repos.ts';
 import { resumeFor } from './resume.ts';
+import { messagesFromAntigravityRecord } from './antigravity-session.ts';
 
 const MAX_BYTES = 2 * 1024 * 1024;
 const MAX_TURNS = 160;
@@ -545,6 +546,8 @@ export function messagesFromRecord(
       return messagesFromFactoryRecord(sessionId, record, seq);
     case 'kimi':
       return messagesFromKimiRecord(sessionId, record, seq);
+    case 'antigravity':
+      return messagesFromAntigravityRecord(sessionId, record, seq);
     default:
       return [];
   }

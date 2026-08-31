@@ -9,3 +9,8 @@ import { join } from 'node:path';
 if (!process.env.PLANOFPPLAN_HOME) {
   process.env.PLANOFPPLAN_HOME = mkdtempSync(join(tmpdir(), 'planofplan-test-home-'));
 }
+// provider 根隔离:不显式传 root 的发现路径不许碰真实 home(antigravity
+// 实测踩过——本机有数据导致测试多扫一个文件)。指向不存在的临时路径。
+if (!process.env.ANTIGRAVITY_HOME) {
+  process.env.ANTIGRAVITY_HOME = join(tmpdir(), 'planofplan-test-none-');
+}

@@ -122,7 +122,14 @@
   550/550）。本机实测：18 行/会话，gemini-3.7-flash，cache 主导。
 - **时间戳近似**：gen_metadata 无逐条时间戳，记录时间用 `.db` mtime
   （会话粒度日分桶够用；要精确需 join steps/消息时间线，后续再说）。
-- session catalog 入口：brain 的明文 transcript.jsonl（后续接入）。
+- **session catalog（2026-08-31 已接入）**：发现 = conversations/*.db；
+  git 身份从 trajectory_metadata_blob 的字节串直取（file:// URI = cwd、
+  https://*.git = remote——proto 字段序不保证，手读字段号会错位）；
+  正文 = brain/<uuid>/.system_generated/logs/transcript.jsonl（明文事件流：
+  USER_INPUT 剥 <USER_REQUEST> 信封、PLANNER_RESPONSE 的 content +
+  tool_calls、CHECKPOINT/SYSTEM_MESSAGE 跳过；无消息 uuid，step_index 做
+  稳定身份）。tool_calls 的 args 是结构化参数（含 CommandLine 字段）——
+  witness 通道后续可从 CommandLine 挖，v1 未接（钩子兜底）。
 
 ## 维护规则（重申）
 
