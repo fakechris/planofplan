@@ -109,17 +109,20 @@
   （`bash -lc` 等）后要求首子命令为 `commit`。dsh/factory 不落盘工具输出，
   是 witness 的盲区（由 trailer 钩子兜底）。
 
-## antigravity（调研后暂缓，2026-08-30）
+## antigravity（2026-08-31 新版实证，usage 已接入）
 
-- 本机布局：`~/.gemini/antigravity/conversations/*.pb`（IDE 变体，20 个会话，
-  最后更新 2026-08-01）+ `~/Library/Application Support/Antigravity/`。
-- **usage 不可得的原因**：token 用量在加密的 .pb 会话内（Keychain 有
-  `Antigravity Safe Storage`/`Antigravity Key`，Chromium 式 AES）；agentsview
-  读的 per-session `conversations/<uuid>.db`（gen_metadata 表）与本机
-  `.trajectory.json` sidecar 在此版本均不存在，其 .pb 解密路径上游自己也
-  标注为易碎面。无可靠本地 ledger → 按 factory 先例不伪造 usage。
-- 若将来需要：提取 Keychain key + 移植 agentsview 的 crypto/proto（MIT 可参照），
-  或等 Antigravity 落盘明文 ledger 后再接。
+- 新版 IDE 布局：`~/.gemini/antigravity/conversations/<uuid>.db`（SQLite：
+  trajectory_meta/steps/gen_metadata/executor_metadata/…）+ `brain/<uuid>/
+  .system_generated/logs/transcript.jsonl`（明文）。旧版只有加密 `.pb`
+  （Keychain Chromium AES），按无 ledger 跳过。
+- **usage**：`gen_metadata.data` 是 protobuf blob——`field 1 chat_model{
+  field 4 usage{1=model 枚举[1000,5000), 2=input(未缓存), 3=output(含思考),
+  4=cache_write(弃用), 5=cache_read(可选)} 19=response_model 21=display_name}`。
+  字段号与校验（量级上限防 decoy）参照 agentsview（其对 sidecar 交叉验证
+  550/550）。本机实测：18 行/会话，gemini-3.7-flash，cache 主导。
+- **时间戳近似**：gen_metadata 无逐条时间戳，记录时间用 `.db` mtime
+  （会话粒度日分桶够用；要精确需 join steps/消息时间线，后续再说）。
+- session catalog 入口：brain 的明文 transcript.jsonl（后续接入）。
 
 ## 维护规则（重申）
 
