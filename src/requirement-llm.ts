@@ -79,11 +79,12 @@ export async function refineRequirements(
         fetchImpl: options.fetchImpl as never,
         timeoutMs: options.timeoutMs ?? 20_000,
       });
-      // 错误语义区分:"返回空内容"=模型拒答,按已尝试落库保持原话;
-      // 网络/超时/5xx=临时失败,不标记(下轮重试)。混在一起会让
-      // provider 的间歇空响应把候选永久消耗掉(实测踩过)。
-      if (result.error && !result.error.includes('空内容')) continue;
-      const raw = (result.content ?? '').trim();
+      // 空/错都按可重试处理,不标记——provider 对该 prompt 的服从率是
+      // 运行时属性(MiniMax-M3 实测间歇空响应),标记会把候选永久消耗,
+      // 未来换更稳的 provider 也补不回来。真·拒答(闲聊)每轮重试 8 条,
+      // 成本有界可接受。只有"成功返回且守卫通过/明确为空句"才落库标记。
+      if (result.error || !(result.content ?? '').trim()) continue;
+      const raw = result.content!.trim();
       // 输出守卫:模型偶发元评论("The user is asking…"/"用户想要…")或复述任务,
       // 一律按"无精炼"落库保持原话——比展示一句废话好
       // 只杀明确的元评论;"我/用户"开头的正常陈述不能误伤(实测踩过)
