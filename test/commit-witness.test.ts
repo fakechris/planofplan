@@ -19,6 +19,7 @@ const SESSION_ID = `claude:${UUID}`;
 function pairing(): WitnessPairing {
   return new Map();
 }
+// WitnessPairing 现为 Map<string, number>(antigravity 计数槽)
 
 describe('isGitCommitCommand', () => {
   test('认得各种形态,拒绝浏览型命令', () => {
@@ -44,7 +45,7 @@ describe('claude 目击提取(配对制)', () => {
       message: { content: [{ type: 'tool_use', id: 'toolu_1', name: 'Bash', input: { command: 'git commit -m "feat: x"' } }] },
     }, p);
     expect(use).toEqual([]);
-    expect(p.get('toolu_1')).toBe(true);
+    expect(p.get('toolu_1')).toBe(1);
     const result = commitWitnessesFromRecord('claude', SESSION_ID, {
       type: 'user', uuid: 'u1', timestamp: '2026-08-29T10:00:01.000Z',
       message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: '[main a1b2c3d4e] feat: x\n 2 files changed' }] },
@@ -70,7 +71,7 @@ describe('claude 目击提取(配对制)', () => {
 
   test('root-commit 输出形态也能取到 sha', () => {
     const p = pairing();
-    p.set('toolu_2', true);
+    p.set('toolu_2', 1);
     const result = commitWitnessesFromRecord('claude', SESSION_ID, {
       type: 'user',
       message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_2', content: '[main (root-commit) 99aabbccdd] init' }] },
@@ -89,7 +90,7 @@ describe('codex 目击提取', () => {
         arguments: JSON.stringify({ command: ['bash', '-lc', 'git commit -m "y"'] }),
       },
     }, p);
-    expect(p.get('call_1')).toBe(true);
+    expect(p.get('call_1')).toBe(1);
     const result = commitWitnessesFromRecord('codex', 'codex:s1', {
       type: 'response_item',
       payload: { type: 'function_call_output', call_id: 'call_1', output: JSON.stringify({ output: '[main fedcba98765] y' }) },
@@ -215,7 +216,7 @@ describe('codex custom_tool_call(exec)形态', () => {
         input: 'const r = await tools.exec_command({"cmd":"cd /repo && git commit -m \\"feat: exec 形态\\""})',
       },
     }, p);
-    expect(p.get('call_c1')).toBe(true);
+    expect(p.get('call_c1')).toBe(1);
     const result = commitWitnessesFromRecord('codex', 'codex:s2', {
       type: 'response_item',
       payload: {
@@ -281,5 +282,34 @@ describe('witness 直查(log 截断外的 sha)', () => {
     const outside = rows.find((r) => r.sha.startsWith('deadbeef'));
     expect(outside?.kind).toBe('witnessed');
     expect(outside?.summary).toBe('feat: outside log cap');
+  });
+});
+
+describe('antigravity witness(CommandLine 配对 GENERIC 输出)', () => {
+  test('PLANNER 的 git commit 命令 + 紧随 GENERIC 的输出 sha → 目击;JSON 引号剥离', () => {
+    const p = pairing();
+    commitWitnessesFromRecord('antigravity', 'antigravity:s1', {
+      type: 'PLANNER_RESPONSE', source: 'MODEL', step_index: 10, created_at: '2026-08-31T04:00:00.000Z',
+      tool_calls: [{ name: 'run_shell', args: { CommandLine: '"git add a.ts && git commit -m \\"feat: agy\\""' } }],
+    }, p);
+    expect(p.get('antigravity:pending')).toBe(1);
+    const result = commitWitnessesFromRecord('antigravity', 'antigravity:s1', {
+      type: 'GENERIC', source: 'MODEL', step_index: 11, created_at: '2026-08-31T04:00:01.000Z',
+      content: 'Created At: 2026-08-31T04:00:01Z\n\nThe command exited with code 0.\nOutput:\n[main 4d5e6f7a8] feat: agy\n 2 files changed',
+    }, p);
+    expect(result).toEqual([{ sessionId: 'antigravity:s1', sha: '4d5e6f7a8', ts: Date.parse('2026-08-31T04:00:01.000Z') }]);
+    expect(p.get('antigravity:pending')).toBe(0);
+  });
+
+  test('git log 的命令不登记;输出无 pending 不消费', () => {
+    const p = pairing();
+    commitWitnessesFromRecord('antigravity', 'antigravity:s1', {
+      type: 'PLANNER_RESPONSE', source: 'MODEL', tool_calls: [{ name: 'run_shell', args: { CommandLine: '"git log --oneline"' } }],
+    }, p);
+    expect(p.get('antigravity:pending')).toBeUndefined();
+    const result = commitWitnessesFromRecord('antigravity', 'antigravity:s1', {
+      type: 'GENERIC', source: 'MODEL', content: 'Output:\n[main 4d5e6f7a8] something',
+    }, p);
+    expect(result).toEqual([]);
   });
 });
