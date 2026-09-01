@@ -60,34 +60,67 @@ describe('normalizeCodex', () => {
     expect(extras.map((w) => w.label)).toEqual(['Extra1', 'Extra2']);
   });
 
-  test('2026-08 新嵌套形态:prolite 顶层=周,5h 在 additional 的 rate_limit 里', () => {
-    // 真实响应缩影:chatgpt.com/backend-api/wham/usage,plan_type=prolite
+  test('2026-08 真实 API 响应:additional_rate_limits 挂在根对象', () => {
+    // 真实响应:chatgpt.com/backend-api/wham/usage
     const windows = normalizeCodex({
       plan_type: 'prolite',
       rate_limit: {
-        primary_window: { used_percent: 0, limit_window_seconds: 604800, reset_at: 1788275961 },
+        primary_window: { used_percent: 0, limit_window_seconds: 604800, reset_at: 1788856298 },
         secondary_window: null,
-        additional_rate_limits: [
-          {
-            limit_name: 'GPT-5.3-Codex-Spark',
-            metered_feature: 'codex_bengalfox',
-            rate_limit: {
-              primary_window: { used_percent: 42, limit_window_seconds: 18000, reset_at: 1787689161 },
-              secondary_window: { used_percent: 7, limit_window_seconds: 604800, reset_at: 1788275961 },
-            },
-          },
-        ],
       },
+      additional_rate_limits: [
+        {
+          limit_name: 'GPT-5.3-Codex-Spark',
+          metered_feature: 'codex_bengalfox',
+          rate_limit: {
+            primary_window: { used_percent: 0, limit_window_seconds: 18000, reset_at: 1788269498 },
+            secondary_window: { used_percent: 0, limit_window_seconds: 604800, reset_at: 1788856298 },
+          },
+        },
+      ],
       credits: { has_credits: false },
     });
-    // 顶层周限额 + Spark 5h + Spark 周
     expect(windows.map((w) => `${w.label}:${w.percentage}`)).toEqual([
       '周限额:0',
-      'Spark·5h限额:42',
-      'Spark·周限额:7',
+      'Spark·5h限额:0',
+      'Spark·周限额:0',
     ]);
-    const spark5h = windows[1]!;
-    expect(spark5h.resetAt).toBe(1787689161 * 1000);
+  });
+
+  test('本地 rollout 收割:按 window_minutes 正确识别 5h 与周限额，不把周限额误判为 5h', async () => {
+    const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join: j } = await import('node:path');
+    const root = mkdtempSync(j(tmpdir(), 'planofplan-codex-local-weekly-'));
+    try {
+      const day = j(root, 'sessions', '2026', '08', '28');
+      mkdirSync(day, { recursive: true });
+      const now = Date.now();
+      // prolite rollout: primary 是 window_minutes=10080(周限额)
+      const line = JSON.stringify({
+        timestamp: new Date(now - 60_000).toISOString(),
+        payload: {
+          rate_limits: {
+            limit_id: 'codex',
+            limit_name: null,
+            primary: { used_percent: 15, window_minutes: 10080, resets_at: Math.floor(now / 1000) + 500_000 },
+            secondary: null,
+          },
+        },
+      });
+      writeFileSync(j(day, 'rollout-weekly.jsonl'), line);
+      const windows = harvestLocalRateLimits(root, now);
+      expect(windows).toHaveLength(1);
+      expect(windows[0]).toMatchObject({
+        window: 'local_weekly',
+        label: '周限额',
+        percentage: 15,
+      });
+      rmSync(root, { recursive: true, force: true });
+    } catch (error) {
+      rmSync(root, { recursive: true, force: true });
+      throw error;
+    }
   });
 
   test('本地 rollout 收割:解析最后一条 rate_limits,过期窗口丢弃', async () => {

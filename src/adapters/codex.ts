@@ -65,8 +65,9 @@ interface UsagePayload {
   rate_limit?: {
     primary_window?: WindowPayload;
     secondary_window?: WindowPayload;
-    additional_rate_limits?: Array<{ used_percent?: number; reset_at?: number }>;
+    additional_rate_limits?: unknown[];
   };
+  additional_rate_limits?: unknown[];
   credits?: {
     has_credits?: boolean;
     unlimited?: boolean;
@@ -81,8 +82,8 @@ function num(v: unknown): number | null {
 
 interface LocalRateLimitRecord {
   limitName: string | null;
-  primary: { usedPercent: number; resetsAt: number } | null;
-  secondary: { usedPercent: number; resetsAt: number } | null;
+  primary: { usedPercent: number; resetsAt: number; windowMinutes: number | null } | null;
+  secondary: { usedPercent: number; resetsAt: number; windowMinutes: number | null } | null;
   atMs: number;
 }
 
@@ -129,20 +130,36 @@ function collectRolloutFiles(root: string): string[] {
   return out.sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, 12).map((row) => row.path);
 }
 
-function parseRateLimitsPayload(node: unknown): LocalRateLimitRecord | null {
+function parseRateLimitsPayload(node: unknown, atMs = 0): LocalRateLimitRecord | null {
   if (!node || typeof node !== 'object') return null;
   const doc = node as {
     limit_name?: unknown;
     primary?: unknown;
     secondary?: unknown;
   };
-  const win = (raw: unknown): { usedPercent: number; resetsAt: number } | null => {
+  const win = (raw: unknown): { usedPercent: number; resetsAt: number; windowMinutes: number | null } | null => {
     if (!raw || typeof raw !== 'object') return null;
-    const w = raw as { used_percent?: unknown; resets_at?: unknown };
+    const w = raw as {
+      used_percent?: unknown;
+      resets_at?: unknown;
+      resets_in_seconds?: unknown;
+      window_minutes?: unknown;
+    };
     const usedPercent = num(w.used_percent);
-    const resetsAt = num(w.resets_at);
     if (usedPercent == null) return null;
-    return { usedPercent, resetsAt: resetsAt != null ? resetsAt * 1000 : 0 };
+    const resetsAt = num(w.resets_at);
+    const resetsInSec = num(w.resets_in_seconds);
+    const windowMinutes = num(w.window_minutes);
+    const calculatedResetsAt = resetsAt != null
+      ? resetsAt * 1000
+      : resetsInSec != null && atMs > 0
+        ? atMs + resetsInSec * 1000
+        : 0;
+    return {
+      usedPercent,
+      resetsAt: calculatedResetsAt,
+      windowMinutes,
+    };
   };
   const primary = win(doc.primary);
   const secondary = win(doc.secondary);
@@ -153,7 +170,7 @@ function parseRateLimitsPayload(node: unknown): LocalRateLimitRecord | null {
       : null,
     primary,
     secondary,
-    atMs: 0,
+    atMs,
   };
 }
 
@@ -174,22 +191,33 @@ export function harvestLocalRateLimits(root = codexHome(), now = Date.now()): Qu
         const payload = doc.payload && typeof doc.payload === 'object'
           ? (doc.payload as { rate_limits?: unknown }).rate_limits ?? doc.payload
           : doc.rate_limits;
-        const parsed = parseRateLimitsPayload(payload);
+        const ts = typeof doc.timestamp === 'string' ? Date.parse(doc.timestamp) : NaN;
+        const atMs = Number.isFinite(ts) ? ts : statSync(file).mtimeMs;
+        const parsed = parseRateLimitsPayload(payload, atMs);
         if (parsed) {
-          const ts = typeof doc.timestamp === 'string' ? Date.parse(doc.timestamp) : NaN;
-          record = { ...parsed, atMs: Number.isFinite(ts) ? ts : statSync(file).mtimeMs };
+          record = parsed;
         }
       } catch { /* 截断行跳过 */ }
     }
     if (!record) continue;
     const windows: QuotaWindow[] = [];
-    const push = (w: { usedPercent: number; resetsAt: number } | null, fiveHour: boolean, name: string | null): void => {
+    const push = (
+      w: { usedPercent: number; resetsAt: number; windowMinutes: number | null } | null,
+      defaultFiveHour: boolean,
+      name: string | null,
+    ): void => {
       if (!w) return;
       // 窗口已过期(重置时刻在过去超过 1h)说明快照陈旧,不采用
       if (w.resetsAt > 0 && w.resetsAt < now - 3_600_000) return;
+      const isFiveHour = w.windowMinutes != null
+        ? w.windowMinutes <= 6 * 60
+        : defaultFiveHour;
+      // 5h 窗口若快照时间距离现在已超过 5 小时且 resetsAt <= now，说明已进入新窗口周期，快照作废
+      if (isFiveHour && record!.atMs > 0 && now - record!.atMs > 5 * 3600 * 1000 && w.resetsAt <= now) return;
+
       windows.push({
-        window: `local_${fiveHour ? '5h' : 'weekly'}`,
-        label: name ? `${name}·${fiveHour ? '5h' : '周'}限额` : (fiveHour ? '5小时限额' : '周限额'),
+        window: `local_${isFiveHour ? '5h' : 'weekly'}`,
+        label: name ? `${name}·${isFiveHour ? '5h' : '周'}限额` : (isFiveHour ? '5小时限额' : '周限额'),
         used: null,
         total: null,
         unit: 'percent',
@@ -248,8 +276,13 @@ export function normalizeCodex(raw: unknown): QuotaWindow[] {
   // 2) 2026-08 新嵌套 {limit_name: "GPT-5.3-Codex-Spark", rate_limit:
   //    {primary_window(5h), secondary_window(周)}}——prolite 套餐的 5h
   //    限额搬到了这里(顶层 primary 变成周限额),不解析它 5h 窗口就丢了
+  // 注意:wham/usage 响应中 additional_rate_limits 可以挂在根节点或 root.rate_limit 下
+  const rawAdditional = (Array.isArray(root.additional_rate_limits) ? root.additional_rate_limits : [])
+    .concat(Array.isArray(root.rate_limit?.additional_rate_limits) ? root.rate_limit.additional_rate_limits : []);
+  const additionalLimits = Array.from(new Set(rawAdditional));
+
   let extraIdx = 0;
-  for (const extra of root.rate_limit?.additional_rate_limits ?? []) {
+  for (const extra of additionalLimits) {
     if (!extra || typeof extra !== 'object') continue;
     const entry = extra as {
       used_percent?: number; reset_at?: number; limit_window_seconds?: number;
@@ -275,7 +308,7 @@ export function normalizeCodex(raw: unknown): QuotaWindow[] {
         extraIdx += 1;
         windows.push({
           window: `extra_${isFiveHour ? '5h' : 'weekly'}`,
-          label: shortName ? `${shortName}·${isFiveHour ? '5h' : '周'}限额` : `Extra${extraIdx}`,
+          label: shortName ? `${shortName}·${isFiveHour ? '5h' : '周'}限额` : (isFiveHour ? '5小时限额' : '周限额'),
           used: null,
           total: null,
           unit: 'percent',
