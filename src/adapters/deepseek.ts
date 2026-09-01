@@ -135,11 +135,15 @@ export const deepseekAdapter: PlanAdapter = {
     if (!res.ok) {
       throw new AdapterError('api', `DeepSeek API 错误(HTTP ${res.status})`);
     }
+    // 先取 text 再 parse:失败时把响应体前缀带进错误信息——瞬时非 JSON
+    // 多为代理/拦截页注入(实测 200+HTML),有前缀才能区分真因
     let json: unknown;
+    const body = await res.text();
     try {
-      json = await res.json();
+      json = JSON.parse(body);
     } catch {
-      throw new AdapterError('parse', 'DeepSeek 余额响应不是合法 JSON');
+      const preview = body.replace(/\s+/g, ' ').slice(0, 80);
+      throw new AdapterError('parse', `DeepSeek 余额响应不是合法 JSON:${preview || '(空响应)'}`);
     }
     const { window } = normalizeDeepseekBalance(json);
     return [window];

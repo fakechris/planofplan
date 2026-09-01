@@ -12,8 +12,8 @@ describe('plan configuration', () => {
 
   test('旧版 legacy/current GLM 配置归一化为一个 plan', () => {
     const plans = normalizePlanSet([
-      { ...DEFAULT_PLANS[1]!, slug: 'glm_legacy', name: 'GLM legacy' },
-      { ...DEFAULT_PLANS[1]!, slug: 'glm_current', name: 'GLM current' },
+      { ...DEFAULT_PLANS.find((p) => p.slug === 'glm')!, slug: 'glm_legacy', name: 'GLM legacy' },
+      { ...DEFAULT_PLANS.find((p) => p.slug === 'glm')!, slug: 'glm_current', name: 'GLM current' },
     ]);
     const glm = plans.filter((plan) => plan.adapter === 'glm');
     expect(glm).toHaveLength(1);

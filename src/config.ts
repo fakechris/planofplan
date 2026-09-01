@@ -22,6 +22,16 @@ export interface LlmConfig {
 
 const DEFAULT_PLANS: PlanConfig[] = [
   {
+    slug: 'antigravity',
+    name: 'Antigravity CLI',
+    adapter: 'agy',
+    enabled: true,
+    pollIntervalSec: 300,
+    credRef: null,
+    extra: {},
+  },
+
+  {
     slug: 'minimax',
     name: 'MiniMax legacy',
     adapter: 'minimax',

@@ -19,8 +19,15 @@ export interface CommitWitness {
   ts: number | null;
 }
 
-/** tool_use/call id → true(是 git commit 调用)。跨行、跨批次持续,文件级生命周期。 */
-export type WitnessPairing = Map<string, boolean>;
+/**
+ * 配对状态:claude/codex 存 call id → 1(pending);antigravity 无 call id,
+ * 用计数槽(一个 PLANNER 可带多个 commit 命令,后续 GENERIC 按序消费)。
+ * 跨行、跨批次持续,文件级生命周期。>0 即 pending,与真值判断兼容。
+ */
+export type WitnessPairing = Map<string, number>;
+
+/** antigravity 无 call id:单计数槽跨行配对。 */
+const AGY_PENDING = 'antigravity:pending';
 
 /** git commit 输出首行:`[main a1b2c3d] subject`;root-commit:`[main (root-commit) a1b2c3d]`。 */
 const COMMIT_OUTPUT_RE = /\[[^\s\]]+ (?:(?:\(root-commit\)|\(amend\)) )?([0-9a-f]{7,40})\]/;
@@ -109,7 +116,7 @@ export function commitWitnessesFromRecord(
       if (item.type === 'tool_use' && typeof item.id === 'string') {
         const input = item.input && typeof item.input === 'object' ? item.input as Record<string, unknown> : {};
         const command = typeof input.command === 'string' ? input.command : '';
-        if (command && isGitCommitCommand(command)) pairing.set(item.id, true);
+        if (command && isGitCommitCommand(command)) pairing.set(item.id, 1);
         continue;
       }
       if (item.type === 'tool_result' && typeof item.tool_use_id === 'string' && pairing.get(item.tool_use_id)) {
@@ -133,7 +140,7 @@ export function commitWitnessesFromRecord(
       const cmdMatch = /["']cmd["']\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(input);
       if (cmdMatch) {
         const command = unescapeJsonish(cmdMatch[1]!);
-        if (isGitCommitCommand(command)) pairing.set(payload.call_id, true);
+        if (isGitCommitCommand(command)) pairing.set(payload.call_id, 1);
       }
       return out;
     }
@@ -158,7 +165,7 @@ export function commitWitnessesFromRecord(
           command = payload.arguments;
         }
       }
-      if (command && isGitCommitCommand(command)) pairing.set(payload.call_id, true);
+      if (command && isGitCommitCommand(command)) pairing.set(payload.call_id, 1);
       return out;
     }
     if (payload.type === 'function_call_output' && typeof payload.call_id === 'string' && pairing.get(payload.call_id)) {
@@ -177,7 +184,50 @@ export function commitWitnessesFromRecord(
     }
     return out;
   }
+  if (provider === 'antigravity') {
+    // 输入:PLANNER_RESPONSE.tool_calls[].args.CommandLine(值带 JSON 引号包裹)
+    if (record.type === 'PLANNER_RESPONSE' && Array.isArray(record.tool_calls)) {
+      for (const call of record.tool_calls) {
+        if (!call || typeof call !== 'object') continue;
+        const args = (call as { args?: unknown }).args;
+        const command = unquoteCommandLine(
+          args && typeof args === 'object' ? (args as { CommandLine?: unknown }).CommandLine : undefined,
+        );
+        if (command && isGitCommitCommand(command)) {
+          pairing.set(AGY_PENDING, (pairing.get(AGY_PENDING) ?? 0) + 1);
+        }
+      }
+      return out;
+    }
+    // 输出:紧随的 GENERIC/MODEL("The command exited with code N.\nOutput:\n…")
+    if (record.type === 'GENERIC' && record.source === 'MODEL' && typeof record.content === 'string') {
+      const pending = pairing.get(AGY_PENDING) ?? 0;
+      if (pending > 0) {
+        pairing.set(AGY_PENDING, pending - 1);
+        const sha = shaFromOutput(record.content);
+        // antigravity 的时间字段是 created_at(recordTimestamp 只认 timestamp)
+        const ts2 = typeof record.created_at === 'string' ? Date.parse(record.created_at) : NaN;
+        if (sha) out.push({ sessionId, sha, ts: Number.isFinite(ts2) ? ts2 : ts });
+      }
+    }
+    return out;
+  }
   return out;
+}
+
+/** antigravity 的 CommandLine 值形如 "\"git commit -m x\""(JSON 字符串再包引号)。 */
+function unquoteCommandLine(value: unknown): string {
+  if (typeof value !== 'string' || !value.trim()) return '';
+  const trimmed = value.trim();
+  if (trimmed.startsWith('"') && trimmed.endsWith('"') && trimmed.length >= 2) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      return typeof parsed === 'string' ? parsed : trimmed;
+    } catch {
+      return trimmed.slice(1, -1).replace(/\"/g, '"');
+    }
+  }
+  return trimmed;
 }
 
 /** witness 与真实 commit 的匹配:前缀对齐(目击拿到的是 7+ 位缩写)。 */

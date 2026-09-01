@@ -8,6 +8,7 @@ import { cursorAdapter } from './cursor.ts';
 import { claudeAdapter } from './claude.ts';
 import { factoryAdapter } from './factory.ts';
 import { deepseekAdapter } from './deepseek.ts';
+import { agyAdapter } from './agy.ts';
 
 export const registry: Record<string, PlanAdapter> = {
   minimax: minimaxAdapter,
@@ -19,6 +20,7 @@ export const registry: Record<string, PlanAdapter> = {
   claude: claudeAdapter,
   factory: factoryAdapter,
   deepseek: deepseekAdapter,
+  agy: agyAdapter,
 };
 
 export function getAdapter(slug: string): PlanAdapter | null {
