@@ -63,10 +63,25 @@ function findAgyBinary(): string | null {
 
 /** 异步执行命令并取 stdout;超时杀进程。 */
 async function execAsync(bin: string, args: string[], timeoutMs: number): Promise<string> {
+  // daemon 的 launchd PATH 只有 /usr/bin:/bin — agy 需要更完整的环境
+  // 启动子进程(language server 等)。补齐常见路径 + 继承 HOME。
+  const home = process.env.HOME ?? '';
+  const env = {
+    ...process.env,
+    HOME: home,
+    PATH: [
+      `${home}/.local/bin`,
+      `${home}/.bun/bin`,
+      '/opt/homebrew/bin',
+      '/usr/local/bin',
+      process.env.PATH ?? '',
+    ].filter(Boolean).join(':'),
+  };
   const proc = Bun.spawn([bin, ...args], {
     stdout: 'pipe',
     stderr: 'pipe',
     stdin: 'ignore',
+    env,
   });
   const timer = setTimeout(() => proc.kill(), timeoutMs);
   try {
