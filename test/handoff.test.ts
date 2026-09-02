@@ -37,7 +37,7 @@ function msg(partial: Partial<SessionMessageRow> & Pick<SessionMessageRow, 'id' 
 const LINK = 'http://localhost:9291/#sessions/x';
 
 /** 一个带全量证据的源:需求 + 计划文件 + touch + todo + 尾总结 + commit。 */
-function seededStore(root: string) {
+async function seededStore(root: string) {
   const store = openMemoryDb();
   const t0 = Date.now() - 60_000;
   store.upsertSessions([session({ id: 'claude:h1', provider: 'claude', nativeId: 'h1', cwd: root, updatedAt: t0 + 5000 })]);
@@ -59,7 +59,7 @@ function seededStore(root: string) {
   materializeRequirements(store);
   materializeTodoSnapshots(store);
   materializeProgressNotes(store);
-  materializePlanFiles(store);
+  await materializePlanFiles(store);
   return store;
 }
 
@@ -88,11 +88,11 @@ Phase 2 — in_progress
 `;
 
 describe('buildHandoffPackage', () => {
-  test('session 源:目标/计划快照/Todo/尾总结/commit/deep link 全进包', () => {
+  test('session 源:目标/计划快照/Todo/尾总结/commit/deep link 全进包', async () => {
     const root = mkdtempSync(join(tmpdir(), 'planofplan-handoff-'));
     try {
       writeFileSync(join(root, 'task_plan.md'), TASK_PLAN);
-      const store = seededStore(root);
+      const store = await seededStore(root);
       const pkg = buildHandoffPackage(store, 'session', 'claude:h1', LINK);
       expect(pkg).not.toBeNull();
       expect(pkg!.markdown).toContain('# Handoff:把设置页重构成分组列表');
@@ -110,11 +110,11 @@ describe('buildHandoffPackage', () => {
     }
   });
 
-  test('requirement / planfile 源也可生成;未知源 404 语义(null)', () => {
+  test('requirement / planfile 源也可生成;未知源 404 语义(null)', async () => {
     const root = mkdtempSync(join(tmpdir(), 'planofplan-handoff2-'));
     try {
       writeFileSync(join(root, 'task_plan.md'), TASK_PLAN);
-      const store = seededStore(root);
+      const store = await seededStore(root);
       const reqPkg = buildHandoffPackage(store, 'requirement', 'req:claude:h1:1', 'http://localhost:9291/#requirements/req:claude:h1:1');
       expect(reqPkg).not.toBeNull();
       expect(reqPkg!.markdown).toContain('设置页重构成分组列表');
@@ -132,11 +132,11 @@ describe('buildHandoffPackage', () => {
 });
 
 describe('deliverHandoff', () => {
-  test('file 模式:导出 + handoffs 记录;agent 模式:注入式 launcher 被调用', () => {
+  test('file 模式:导出 + handoffs 记录;agent 模式:注入式 launcher 被调用', async () => {
     const root = mkdtempSync(join(tmpdir(), 'planofplan-handoff3-'));
     try {
       writeFileSync(join(root, 'task_plan.md'), TASK_PLAN);
-      const store = seededStore(root);
+      const store = await seededStore(root);
       const pkg = buildHandoffPackage(store, 'session', 'claude:h1', LINK)!;
 
       const outDir = mkdtempSync(join(tmpdir(), 'planofplan-handoff-out-'));
@@ -176,7 +176,7 @@ describe('handoff 端点', () => {
     const root = mkdtempSync(join(tmpdir(), 'planofplan-handoff-api-'));
     try {
       writeFileSync(join(root, 'task_plan.md'), TASK_PLAN);
-      const store = seededStore(root);
+      const store = await seededStore(root);
       const server = createServer(store, scheduler as never, { port: 9291, plans: DEFAULT_PLANS });
 
       const preview = await server.request('http://localhost/api/handoff/session/claude:h1');
