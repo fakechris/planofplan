@@ -34,8 +34,11 @@ function parseQuotaLine(line: string): QuotaWindow | null {
   const resetAt = resetIso ? Date.parse(resetIso) : NaN;
   const isWeekly = type.includes('Weekly');
   const modelLabel = group.includes('Gemini') ? 'Gemini' : group.includes('Claude') ? 'Claude/GPT' : group;
+  // window 必须全局唯一:latestByPlan 的 SQL 按 window 分区去重,
+  // 两组模型共用 'weekly' 会互相覆盖(实测踩过:Gemini 窗口被 Claude 覆盖)
+  const windowSlug = group.includes('Gemini') ? 'gemini' : group.includes('Claude') ? 'claude_gpt' : 'other';
   return {
-    window: isWeekly ? 'weekly' : 'rolling_5h',
+    window: `${windowSlug}_${isWeekly ? 'weekly' : 'rolling_5h'}`,
     label: isWeekly ? `${modelLabel} Week` : `${modelLabel} 5H`,
     used: Math.round((100 - pct) * 100) / 100,
     total: 100,
