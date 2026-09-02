@@ -3,7 +3,7 @@ import { agyAdapter } from '../src/adapters/agy.ts';
 import type { AdapterContext, Credential } from '../src/types.ts';
 
 const ctx = { plan: { slug: 'antigravity', name: 'Antigravity CLI', adapter: 'agy', enabled: true, pollIntervalSec: 300, extra: {} } } as unknown as AdapterContext;
-const cred: Credential = { kind: 'bearer', value: 'local-cli', source: 'local' };
+const _cred: Credential = { kind: 'bearer', value: 'local-cli', source: 'local' }; void _cred;
 
 describe('agy adapter 配额解析', () => {
   // 私有函数,通过 fetchUsage 的输出间接验证。直接测试 TSV 行解析:
