@@ -17,7 +17,7 @@ import type { AdapterContext, Credential, PlanAdapter, QuotaWindow } from '../ty
 import { AdapterError } from '../types.ts';
 import { existsSync } from 'node:fs';
 
-const USAGE_TIMEOUT_MS = 15_000;
+const USAGE_TIMEOUT_MS = 45_000;  // 实测 agy 启动+查询 ≈18s;15s 会 kill 导致 context canceled
 
 interface AgyUsageResponse {
   status?: string;
