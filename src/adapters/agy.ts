@@ -88,11 +88,16 @@ async function execAsync(bin: string, args: string[], timeoutMs: number): Promis
   });
   const timer = setTimeout(() => proc.kill(), timeoutMs);
   try {
-    const stdout = await new Response(proc.stdout).text();
+    // 并发读 stdout/stderr:串行读在进程快速退出时会错过 pipe 数据
+    const [stdout, stderr] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text().catch(() => ''),
+    ]);
     const code = await proc.exited;
     if (code !== 0) {
-      const stderr = await new Response(proc.stderr).text().catch(() => '');
-      throw new Error(`exit ${code}: ${stderr.slice(0, 120)}`);
+      // agy 可能把错误打到 stdout(如 auth 错误输出 JSON),两个都带上
+      const diag = (stderr || stdout || '').slice(0, 160);
+      throw new Error(`exit ${code}: ${diag}`);
     }
     return stdout;
   } finally {
