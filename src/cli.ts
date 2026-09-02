@@ -255,21 +255,32 @@ async function serve(): Promise<void> {
   console.log(`planofplan 已启动: http://localhost:${port}${f.demo ? '  (demo 数据，内存库，不落盘)' : ''}`);
   if (f.demo) console.log('提示：demo 模式用内置示例数据预览界面；真实数据请配置 MINIMAX_CODING_API_KEY 后去掉 --demo 启动。');
   if (!f.demo) {
-    const since = Date.now() - 90 * 86_400_000;
-    void Promise.resolve()
-      .then(() => collectSessionCatalog(store, { since, until: Date.now() }))
-      .then((count) => console.log(`[sessions] indexed ${count} local session files`))
-      .catch((error) => console.error('[sessions] index failed:', error));
+    // 启动扫描走子进程(与 watcher spawn 路径一致):进程内的 collectSessionCatalog
+    // 含大量同步 git/zstd/readFileSync 调用,串行累计分钟级阻塞事件循环——
+    // 实测导致 daemon 启动后数分钟 API 无响应(含 /api/build-info)。
+    const scanArgs = [process.execPath];
+    if (!import.meta.dir.startsWith('$bunfs')) {
+      scanArgs.push(join(import.meta.dir, 'cli.ts'));
+    }
+    scanArgs.push('sessions', '--refresh', '--days', '90');
+    void Bun.spawn(scanArgs, { stdout: 'ignore', stderr: 'inherit' })
+      .exited
+      .then((code) => {
+        if (code === 0) console.log('[sessions] startup scan completed (subprocess)');
+        else console.error(`[sessions] startup scan exit ${code}`);
+      });
 
-    // fable badge 依赖 usage_records 里的 model 时间戳；启动时补一个
-    // 3 天轻量本地扫描（无 official API），避免 badge 显示陈旧数据。
-    void Promise.resolve()
-      .then(() => collectUsageReport(store, {
-        since: Date.now() - 3 * 86_400_000,
-        until: Date.now(),
-        includeOfficial: false,
-      }))
-      .catch((error) => console.error('[usage] startup scan failed:', error));
+    // usage 启动扫描同样走子进程(同步 zstd 解压会阻塞事件循环)
+    const usageArgs = [process.execPath];
+    if (!import.meta.dir.startsWith('$bunfs')) {
+      usageArgs.push(join(import.meta.dir, 'cli.ts'));
+    }
+    usageArgs.push('tokens', '--days', '3', '--no-official');
+    void Bun.spawn(usageArgs, { stdout: 'ignore', stderr: 'inherit' })
+      .exited
+      .then((code) => {
+        if (code !== 0) console.error(`[usage] startup scan exit ${code}`);
+      });
   }
 }
 
