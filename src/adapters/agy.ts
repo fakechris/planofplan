@@ -8,10 +8,14 @@
  * 凭据：不需要手动 key——agy 自身已通过 Google OAuth 登录，
  * detectCredentials 返回固定 credential 标识"本地 CLI 登录态"。
  * agy 不在 PATH 时报 credential 错误提示安装。
+ *
+ * ⚠️ 必须用异步 spawn(Bun.spawn + await exited):execFileSync 会阻塞
+ * Bun 事件循环,每 5 分钟的 poll 会把 daemon 卡死最长 18 秒——实测导致
+ * 全部 API 无响应(含 /api/build-info),用户 menubar 一天不更新。
  */
 import type { AdapterContext, Credential, PlanAdapter, QuotaWindow } from '../types.ts';
 import { AdapterError } from '../types.ts';
-import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 
 const USAGE_TIMEOUT_MS = 15_000;
 
@@ -33,7 +37,6 @@ function parseQuotaLine(line: string): QuotaWindow | null {
   return {
     window: isWeekly ? 'weekly' : 'rolling_5h',
     label: isWeekly ? `${modelLabel} Week` : `${modelLabel} 5H`,
-    // remaining → used = 100 - remaining(展示口径统一为已用百分比)
     used: Math.round((100 - pct) * 100) / 100,
     total: 100,
     unit: 'percent',
@@ -44,6 +47,7 @@ function parseQuotaLine(line: string): QuotaWindow | null {
   };
 }
 
+/** 异步找 agy 二进制(只查文件存在性,不 exec --version——避免阻塞)。 */
 function findAgyBinary(): string | null {
   const candidates = [
     process.env.AGY_PATH?.trim(),
@@ -52,14 +56,30 @@ function findAgyBinary(): string | null {
     '/opt/homebrew/bin/agy',
   ].filter(Boolean) as string[];
   for (const candidate of candidates) {
-    try {
-      execFileSync(candidate, ['--version'], { timeout: 3000, encoding: 'utf8', stdio: 'pipe' });
-      return candidate;
-    } catch {
-      // try next
-    }
+    if (existsSync(candidate)) return candidate;
   }
   return null;
+}
+
+/** 异步执行命令并取 stdout;超时杀进程。 */
+async function execAsync(bin: string, args: string[], timeoutMs: number): Promise<string> {
+  const proc = Bun.spawn([bin, ...args], {
+    stdout: 'pipe',
+    stderr: 'pipe',
+    stdin: 'ignore',
+  });
+  const timer = setTimeout(() => proc.kill(), timeoutMs);
+  try {
+    const stdout = await new Response(proc.stdout).text();
+    const code = await proc.exited;
+    if (code !== 0) {
+      const stderr = await new Response(proc.stderr).text().catch(() => '');
+      throw new Error(`exit ${code}: ${stderr.slice(0, 120)}`);
+    }
+    return stdout;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export const agyAdapter: PlanAdapter = {
@@ -80,11 +100,7 @@ export const agyAdapter: PlanAdapter = {
     }
     let raw: string;
     try {
-      raw = execFileSync(bin, ['-p', '/usage', '--output-format', 'json'], {
-        timeout: USAGE_TIMEOUT_MS,
-        encoding: 'utf8',
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
+      raw = await execAsync(bin, ['-p', '/usage', '--output-format', 'json'], USAGE_TIMEOUT_MS);
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       if (msg.includes('auth') || msg.includes('login')) {
