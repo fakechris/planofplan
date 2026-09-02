@@ -74,7 +74,7 @@ Phase 2 — in_progress
 `;
 
 describe('parsePlanMarkdown', () => {
-  test('task_plan.md:标题/Goal/当前阶段/小节状态/checkbox 统计', () => {
+  test('task_plan.md:标题/Goal/当前阶段/小节状态/checkbox 统计', async () => {
     const parsed = parsePlanMarkdown(TASK_PLAN);
     expect(parsed.title).toBe('把入口页重构为列表式布局');
     expect(parsed.goal).toContain('分组列表');
@@ -87,14 +87,14 @@ describe('parsePlanMarkdown', () => {
     expect(parsed.sections[2]).toMatchObject({ status: 'pending', checked: 0, total: 1 });
   });
 
-  test('progress.md 的 Session 节同构复用', () => {
+  test('progress.md 的 Session 节同构复用', async () => {
     const parsed = parsePlanMarkdown('# Progress Log\n\n## Session: 2026-07-17\n\n### Phase 1: 核对\n\n- **Status:** complete\n- Actions taken:\n  - 核对配置\n');
     expect(parsed.sections[0]).toMatchObject({ heading: 'Phase 1: 核对', status: 'complete' });
   });
 });
 
 describe('parseTodoToolText', () => {
-  test('claude(content)与 zcode(title)两种形态统一;坏行文返回 null', () => {
+  test('claude(content)与 zcode(title)两种形态统一;坏行文返回 null', async () => {
     expect(parseTodoToolText('{"todos":[{"content":"验证 web 健康","status":"in_progress"},{"content":"检查 env","status":"pending"}]}'))
       .toEqual([
         { title: '验证 web 健康', status: 'in_progress' },
@@ -109,7 +109,7 @@ describe('parseTodoToolText', () => {
 });
 
 describe('materializeTodoSnapshots', () => {
-  test('从消息表抽取两种工具形态,幂等;级联随 session', () => {
+  test('从消息表抽取两种工具形态,幂等;级联随 session', async () => {
     const store = openMemoryDb();
     store.upsertSessions([
       session({ id: 'claude:t1', provider: 'claude', nativeId: 't1' }),
@@ -133,7 +133,7 @@ describe('materializeTodoSnapshots', () => {
 });
 
 describe('④ 尾总结抽取', () => {
-  test('isSummaryMessage:强前缀 + ≥40 字;短句/普通回复不算', () => {
+  test('isSummaryMessage:强前缀 + ≥40 字;短句/普通回复不算', async () => {
     expect(isSummaryMessage('已完成源 PDF 六份的视觉渲染与财务报表页初步查看;当前未遇到渲染阻塞。现在重新用浏览器打开。')).toBe(true);
     expect(isSummaryMessage('本轮已提交:`57a72d4 补充架构包审计与离线入口`。当前工作树干净,无遗留修改。')).toBe(true);
     expect(isSummaryMessage('总结:这一轮做了三件事,剩下验证和文档两步。')).toBe(false); // 长度不足 40
@@ -179,7 +179,7 @@ describe('materializePlanFiles', () => {
     return store;
   }
 
-  test('发现/解析/快照幂等(mtime 门控);演进追加快照;消失置 missing_since', () => {
+  test('发现/解析/快照幂等(mtime 门控);演进追加快照;消失置 missing_since', async () => {
     const root = mkdtempSync(join(tmpdir(), 'planofplan-plans-'));
     try {
       writeFileSync(join(root, 'task_plan.md'), TASK_PLAN);
@@ -189,7 +189,7 @@ describe('materializePlanFiles', () => {
       writeFileSync(join(root, 'HANDOFF.md'), '# HANDOFF\n\n当前状态\n'); // 无分隔符的标准名
       const store = seededStore(root);
 
-      expect(materializePlanFiles(store, { spotlight: false })).toBe(4);
+      expect(await materializePlanFiles(store, { spotlight: false })).toBe(4);
       const files = store.listPlanFiles();
       expect(files).toHaveLength(4);
       const taskPlan = files.find((file) => file.path.endsWith('task_plan.md'));
@@ -295,7 +295,7 @@ describe('materializePlanFiles', () => {
     }
   });
 
-  test('发现:直接名 + docs/plans + HANDOFF + 泛计划命名(IMPLEMENTATION_PLAN/roadmap/plans 目录),排除 README 类', () => {
+  test('发现:直接名 + docs/plans + HANDOFF + 泛计划命名(IMPLEMENTATION_PLAN/roadmap/plans 目录),排除 README 类', async () => {
     const root = mkdtempSync(join(tmpdir(), 'planofplan-discover-'));
     try {
       writeFileSync(join(root, 'progress.md'), '# P\n');
