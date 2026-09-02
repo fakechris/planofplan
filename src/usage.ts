@@ -639,6 +639,8 @@ function scanCodexFile(
 ): { records: UsageRecord[]; cursor: CodexCursor } {
   let bytes: Buffer;
   try {
+    const fileSize = statSync(file).size;
+    if (fileSize > 500 * 1024 * 1024) return { records: [], cursor: initialCursor ?? emptyCodexCursor() };
     bytes = readFileSync(file);
   } catch {
     return { records: [], cursor: initialCursor ?? emptyCodexCursor() };

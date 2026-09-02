@@ -34,12 +34,16 @@ const SKIP_DIRS = new Set(['node_modules', 'target', 'dist', 'build', 'vendor', 
 const NOT_PLAN_EXTRA = /^(?:MEMORY|feedback_)/i;
 
 /** Spotlight 兜底通道:常见固定名的机器级搜索(未索引/无权限时为空)。 */
-function spotlightPlanFiles(): string[] {
+async function spotlightPlanFiles(): Promise<string[]> {
   const out: string[] = [];
   try {
-    const res = execFileSync('mdfind', [
+    const proc = Bun.spawn(['mdfind',
       'kMDItemFSName == "task_plan.md"c || kMDItemFSName == "IMPLEMENTATION_PLAN.md"c || kMDItemFSName == "PLAN.md"c || kMDItemFSName == "plan.md"c || kMDItemFSName == "roadmap.md"c || kMDItemFSName == "progress.md"c',
-    ], { encoding: 'utf8', timeout: 15_000, maxBuffer: 8 * 1024 * 1024 });
+    ], { stdout: 'pipe', stderr: 'ignore' });
+    const timer = setTimeout(() => proc.kill(), 15_000);
+    const res = await new Response(proc.stdout).text();
+    clearTimeout(timer);
+    await proc.exited;
     for (const line of res.split('\n')) {
       if (line.endsWith('.md') && !line.includes('/node_modules/')) out.push(line);
     }
@@ -309,7 +313,7 @@ function headOfFactory(): (dir: string) => string | null {
  *  B. cwd/project-root 目录树递归(新文件尚未进遥测时的兜底)
  *  C. Spotlight mdfind(人手写的、无会话遥测的机器级兜底)
  */
-export function materializePlanFiles(store: Store, options: { now?: number; spotlight?: boolean } = {}): number {
+export async function materializePlanFiles(store: Store, options: { now?: number; spotlight?: boolean } = {}): Promise<number> {
   const now = options.now ?? Date.now();
   const roots = planRootsOf(store.sessionCwds(), store.projectRoots());
   const rootSet = new Set(roots);
@@ -331,7 +335,7 @@ export function materializePlanFiles(store: Store, options: { now?: number; spot
     for (const path of discoverPlanFiles(root)) walked.add(path);
   }
   // 通道 C:Spotlight
-  const spotlit = new Set(options.spotlight === false ? [] : spotlightPlanFiles());
+  const spotlit = new Set(options.spotlight === false ? [] : await spotlightPlanFiles());
 
   const candidates = new Set<string>([...touchedRepo.keys(), ...walked, ...spotlit]);
   for (const path of candidates) {
