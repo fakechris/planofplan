@@ -35,6 +35,8 @@
         title="登录时自动启动 daemon（launchd 守护，崩溃自动重启）。关闭后注销/重启不再自启，当前服务不受影响。">开机自启</button>
       <button id="resetOrder" class="secondary-btn" type="button" hidden
         title="清掉拖拽排序记忆，回到默认顺序">恢复默认顺序</button>
+      <button id="restoreHidden" class="secondary-btn" type="button" hidden
+        title="恢复在首页被隐藏的卡片">已隐藏 <span id="hiddenCount">0</span> 个卡片 (恢复)</button>
       <button id="refreshBtn" class="button-primary" type="button">刷新全部</button>
     </div>
   </header>
@@ -206,6 +208,10 @@
       <div class="settings-col">
         <div class="session-attrs">
           <h3>Plans</h3>
+          <div id="settingsHiddenBanner" class="settings-hidden-notice" hidden>
+            <span>当前有 <b id="settingsHiddenCount">0</b> 个卡片在首页隐藏</span>
+            <button type="button" class="secondary-btn" id="settingsUnhideAllBtn">全部恢复显示</button>
+          </div>
           <div id="settingsPlanList"></div>
           <dialog class="settings-dialog" id="planKeyDialog">
             <div class="dialog-head">

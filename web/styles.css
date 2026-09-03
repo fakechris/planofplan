@@ -642,8 +642,13 @@ a.attr-sha:hover { text-decoration: underline; }
 .card-name { color: var(--text); font-size: var(--text-lg); font-weight: var(--weight-semibold); letter-spacing: -0.012em; }
 .card-sub { margin-top: 3px; color: var(--muted); font-family: var(--font-mono); font-size: var(--text-xs); }
 .badges { flex-direction: row; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
-.settings-trigger { margin-left: auto; padding: 4px 9px; border-color: var(--border); color: var(--muted); background: transparent; font-size: var(--text-xs); border-radius: 6px; }
+.card-actions { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; }
+.card-action-btn { padding: 4px 9px; border: var(--border-width) solid var(--border); color: var(--muted); background: transparent; font-size: var(--text-xs); border-radius: 6px; cursor: pointer; transition: color var(--dur-fast), border-color var(--dur-fast); }
+.card-action-btn:hover { color: var(--text); border-color: var(--border-strong); }
+.settings-trigger { padding: 4px 9px; border-color: var(--border); color: var(--muted); background: transparent; font-size: var(--text-xs); border-radius: 6px; }
 .settings-trigger:hover { color: var(--accent-2); border-color: var(--border-strong); }
+.empty-hidden-prompt { grid-column: 1 / -1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 48px 24px; border: var(--border-width) dashed var(--border); border-radius: var(--radius-card); color: var(--muted); font-size: var(--text-sm); }
+.settings-hidden-notice { display: flex; justify-content: space-between; align-items: center; padding: 8px 14px; margin-bottom: 12px; background: color-mix(in srgb, var(--accent) 8%, var(--bg-card)); border: var(--border-width) solid color-mix(in srgb, var(--accent) 25%, var(--border)); border-radius: var(--radius-input); font-size: var(--text-xs); color: var(--text); }
 .badge { color: var(--muted); font-size: var(--text-xs); white-space: nowrap; display: inline-flex; align-items: center; }
 .badge.st-ok { color: var(--success); }
 .badge.st-stale, .badge.st-not_configured { color: var(--warn); }

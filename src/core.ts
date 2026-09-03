@@ -103,7 +103,13 @@ export function buildOverview(store: Store, configPlans: PlanConfig[], now: numb
       };
       return buildPlanOverview(store, effective, now);
     });
-  return { generatedAt: now, plans };
+  const isConfigured = (p: OverviewPlan) => p.status !== 'not_configured' && p.status !== 'unavailable';
+  const sortedPlans = [...plans].sort((a, b) => {
+    const aConf = isConfigured(a) ? 0 : 1;
+    const bConf = isConfigured(b) ? 0 : 1;
+    return aConf - bConf;
+  });
+  return { generatedAt: now, plans: sortedPlans };
 }
 
 function buildPlanOverview(store: Store, plan: PlanConfig, now: number): OverviewPlan {
