@@ -59,7 +59,7 @@ async function seededStore(root: string) {
   materializeRequirements(store);
   materializeTodoSnapshots(store);
   materializeProgressNotes(store);
-  await materializePlanFiles(store);
+  await materializePlanFiles(store, { spotlight: false });
   return store;
 }
 

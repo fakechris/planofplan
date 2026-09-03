@@ -220,6 +220,11 @@ describe('Kimi credential priority', () => {
   });
 
   test('有效 KIMI_AUTH_TOKEN 优先走 web，可取月度限额', async () => {
+    const root = await Bun.$`mktemp -d`.text();
+    const home = root.trim();
+    const previousHome = process.env.HOME;
+    const previousCreds = process.env.KIMI_CODE_CREDENTIALS;
+    process.env.KIMI_CODE_CREDENTIALS = join(home, 'empty.json');
     const header = Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString('base64url');
     const payload = Buffer.from(
       JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 }),
@@ -237,6 +242,10 @@ describe('Kimi credential priority', () => {
       expect(credential?.source).toBe('web');
       expect(credential?.cookie).toBe(token);
     } finally {
+      if (previousHome == null) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousCreds == null) delete process.env.KIMI_CODE_CREDENTIALS;
+      else process.env.KIMI_CODE_CREDENTIALS = previousCreds;
       if (previous == null) delete process.env.KIMI_AUTH_TOKEN;
       else process.env.KIMI_AUTH_TOKEN = previous;
     }
