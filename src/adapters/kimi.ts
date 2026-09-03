@@ -61,9 +61,13 @@ function expandHomePath(path: string): string {
 }
 
 function kimiCredentialCandidates(): string[] {
+  if (process.env.KIMI_CODE_CREDENTIALS?.trim()) {
+    return [expandHomePath(process.env.KIMI_CODE_CREDENTIALS.trim())];
+  }
+  if (process.env.KIMI_CREDENTIALS?.trim()) {
+    return [expandHomePath(process.env.KIMI_CREDENTIALS.trim())];
+  }
   const candidates = [
-    process.env.KIMI_CODE_CREDENTIALS,
-    process.env.KIMI_CREDENTIALS,
     join(kimiHome(), 'credentials', 'kimi-code.json'),
     join(homedir(), '.kimi-code', 'credentials', 'kimi-code.json'),
   ];
