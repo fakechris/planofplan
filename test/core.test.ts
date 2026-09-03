@@ -204,3 +204,55 @@ describe('buildOverview manualKey 入口', () => {
     expect(overview.plans[0]!.manualKey).toBeFalse();
   });
 });
+
+describe('buildOverview window reset normalization', () => {
+  test('到达或超过 resetAt 的窗口，percentage 和 used 动态重置为 0', () => {
+    const store = openMemoryDb();
+    const claude = DEFAULT_PLANS.find((item) => item.slug === 'claude')!;
+    store.syncPlan(claude);
+
+    // 00:01 抓取到的快照：5H 满额 100%，00:10 重置；Week 14%，14:00 重置
+    const fetchTime = 1_000_000;
+    const resetTime5h = fetchTime + 9 * 60 * 1000; // 00:10
+    const resetTimeWeek = fetchTime + 14 * 3600 * 1000; // 14:00
+
+    store.insertWindows(claude.slug, [
+      {
+        window: 'rolling_5h',
+        label: '5H',
+        used: null,
+        total: null,
+        unit: 'percent',
+        percentage: 100,
+        resetAt: resetTime5h,
+        note: null,
+      },
+      {
+        window: 'weekly',
+        label: 'Week',
+        used: null,
+        total: null,
+        unit: 'percent',
+        percentage: 14,
+        resetAt: resetTimeWeek,
+        note: null,
+      },
+    ], fetchTime);
+    store.setState(claude.slug, { last_success_at: fetchTime });
+
+    // 场景 1：在重置前（00:05），5H 仍显示 100%
+    const beforeReset = buildOverview(store, [claude], fetchTime + 4 * 60 * 1000);
+    const w5hBefore = beforeReset.plans[0]!.windows.find((w) => w.window === 'rolling_5h')!;
+    expect(w5hBefore.percentage).toBe(100);
+
+    // 场景 2：在重置时刻及之后（00:10:49），5H 动态归零为 0%，不再显示 100%
+    const afterReset = buildOverview(store, [claude], resetTime5h + 49 * 1000);
+    const w5hAfter = afterReset.plans[0]!.windows.find((w) => w.window === 'rolling_5h')!;
+    expect(w5hAfter.percentage).toBe(0);
+    expect(w5hAfter.resetAt).toBe(resetTime5h);
+
+    // Week 窗口尚未到期，百分比保持不变
+    const weekAfter = afterReset.plans[0]!.windows.find((w) => w.window === 'weekly')!;
+    expect(weekAfter.percentage).toBe(14);
+  });
+});
