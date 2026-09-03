@@ -6,3 +6,4 @@ macos/PlanofplanMenuBar/.build/
 *.db-shm
 .DS_Store
 .env
+.zvec-grep/

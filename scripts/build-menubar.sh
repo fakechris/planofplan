@@ -36,9 +36,9 @@ DIRTY_FILES=$(git -C "$ROOT" status --porcelain --untracked-files=all -- \
   ':(exclude)dist/**' \
   ':(exclude)macos/PlanofplanMenuBar/.build/**' \
   ':(exclude)macos/SweetCookieKit/.build/**')
-if [ -n "$DIRTY_FILES" ]; then
+if [ -n "$DIRTY_FILES" ] && [ "${ALLOW_DIRTY:-0}" != "1" ]; then
   echo "Refusing to build with uncommitted source changes." >&2
-  echo "Commit the changes first, then run bun run menubar:build." >&2
+  echo "Commit the changes first, or set ALLOW_DIRTY=1." >&2
   printf '%s\n' "$DIRTY_FILES" >&2
   exit 1
 fi

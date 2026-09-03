@@ -6,7 +6,10 @@ import { buildUsageReport } from './usage.ts';
 import { searchSessions } from './sessions.ts';
 import { getBuildInfo } from './build-info.ts';
 import { buildLineageReport } from './lineage-report.ts';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import type { SessionCommit, SessionRecord, UsageRecord } from './types.ts';
+import { searchSkills, syncSkillsCatalog } from './skills.ts';
 
 // ── 只读 MCP server(streamable HTTP 子集) ───────────────────────────
 // 手写 JSON-RPC 2.0 的最小协议面而不引 SDK 依赖:initialize / ping /
@@ -233,7 +236,124 @@ function toolRequirementStatus(store: Store, args: { days?: unknown; limit?: unk
   return lines.join('\n');
 }
 
+function toolSearchSkills(store: Store, args: { q?: unknown; limit?: unknown }): string {
+  const q = typeof args.q === 'string' ? args.q.trim() : '';
+  const limit = Math.min(30, Math.max(1, Math.floor(Number(args.limit ?? 10)) || 10));
+
+  try {
+    const count = (store.db.query('SELECT COUNT(*) as c FROM skills').get() as { c: number } | null)?.c ?? 0;
+    if (count === 0) {
+      syncSkillsCatalog(store);
+    }
+  } catch {
+    syncSkillsCatalog(store);
+  }
+
+  const hits = searchSkills(store, q, limit);
+  if (hits.length === 0) {
+    return q ? `未找到与 "${q}" 匹配的 Agent Skill。` : '当前系统未索引到任何 Agent Skill。';
+  }
+
+  const lines = [`找到 ${hits.length} 个匹配的 Skill${q ? ` (关键词: "${q}")` : ''}:`];
+  for (const hit of hits) {
+    lines.push(`- **${hit.name}**: ${hit.description.replace(/\s+/g, ' ').slice(0, 140)}`);
+    if (hit.triggers && hit.triggers.length > 0) {
+      lines.push(`  触发场景: ${hit.triggers.slice(0, 4).join(', ')}`);
+    }
+    lines.push(`  路径: ${hit.path}`);
+  }
+  return lines.join('\n');
+}
+
+function toolInspectProjectContext(store: Store, args: { project?: unknown }): string {
+  const project = typeof args.project === 'string' ? args.project.trim() : '';
+  if (!project) throw new ToolArgError('project is required (name or path)');
+
+  const sessions = store.listSessionRows()
+    .filter((s) => sessionMatchesRepo(s, project))
+    .sort((a, b) => b.updatedAt - a.updatedAt);
+
+  if (sessions.length === 0) {
+    return `在本地记录中未找到与 "${project}" 相关的 Agent 会话或项目谱系。`;
+  }
+
+  const needle = project.toLowerCase();
+  const directSession = sessions.find((s) =>
+    (s.gitName?.toLowerCase().includes(needle)) ||
+    (s.gitRoot?.toLowerCase().includes(needle)) ||
+    (s.cwd?.toLowerCase().includes(needle))
+  );
+  const targetSession = directSession ?? sessions[0]!;
+
+  const matchedRepo = targetSession.repos?.find((r) =>
+    r.name.toLowerCase().includes(needle) ||
+    r.root?.toLowerCase().includes(needle) ||
+    r.url.toLowerCase().includes(needle)
+  );
+
+  const repoName = matchedRepo?.name ?? (targetSession.gitName?.toLowerCase().includes(needle) ? targetSession.gitName : undefined) ?? project;
+  const repoRoot = matchedRepo?.root ?? (targetSession.gitRoot?.toLowerCase().includes(needle) ? targetSession.gitRoot : undefined) ?? targetSession.cwd ?? '未知路径';
+  const repoUrl = matchedRepo?.url ?? (targetSession.gitUrl?.toLowerCase().includes(needle) ? targetSession.gitUrl : undefined) ?? targetSession.gitUrl ?? '无远程仓库';
+
+
+  // 检查 zg 语义索引状态
+  const hasZg = repoRoot !== '未知路径' && existsSync(join(repoRoot, '.zvec-grep'));
+  const zgNote = hasZg
+    ? '✅ 已就绪 (可直接调用 zvec_grep_search 语义查代码)'
+    : '⚠️ 未建立 (可在该项目根目录下运行 zg index 以启用语义搜索)';
+
+  const lines: string[] = [
+    `=== 项目上下文透视: ${repoName} ===`,
+    `- 根目录: ${repoRoot}`,
+    `- 远程地址: ${repoUrl}`,
+    `- 代码语义索引 (.zvec-grep): ${zgNote}`,
+    `- 历史被交互次数: ${sessions.length} 个会话 (最近活跃: ${new Date(targetSession.updatedAt).toISOString().slice(0, 16).replace('T', ' ')})`,
+    '',
+  ];
+
+  // 最近需求动机 (Top 3)
+  const requirements = store.firstRequirementBySession();
+  const reqLines: string[] = [];
+  const seenReqs = new Set<string>();
+  for (const s of sessions) {
+    const text = requirements.get(s.id)?.text;
+    if (text && !seenReqs.has(text)) {
+      seenReqs.add(text);
+      reqLines.push(`- [${s.provider}] ${text}`);
+      if (reqLines.length >= 3) break;
+    }
+  }
+  if (reqLines.length > 0) {
+    lines.push('【最近开发需求/用户意图】:');
+    lines.push(...reqLines);
+    lines.push('');
+  }
+
+  // 最近提交 (Top 3)
+  const commits = commitsBySession(store);
+  const repoCommits: SessionCommit[] = [];
+  const seenCommits = new Set<string>();
+  for (const s of sessions) {
+    for (const c of commits.get(s.id) ?? []) {
+      if (!seenCommits.has(c.sha)) {
+        seenCommits.add(c.sha);
+        repoCommits.push(c);
+      }
+    }
+  }
+  if (repoCommits.length > 0) {
+    lines.push('【最近落地 Commits】:');
+    for (const c of repoCommits.slice(0, 3)) {
+      lines.push(`- ${c.sha.slice(0, 8)} [${c.kind}] ${c.summary}`);
+    }
+    lines.push('');
+  }
+
+  return lines.join('\n').trim();
+}
+
 // ── 工具注册表 ──────────────────────────────────────────────────────
+
 
 interface ToolDef {
   name: string;
@@ -364,7 +484,35 @@ const TOOLS: ToolDef[] = [
     },
     run: (store, _cfg, args) => toolRequirementStatus(store, args),
   },
+  {
+    name: 'planofplan_search_skills',
+    description: '跨本机 150+ coding agent skills 库快速检索。当需要特定专业能力(如 obsidian 笔记整理、tldraw 画布、微信发布、PPT制作、系统化调试等)时用它。返回匹配的 skill 名称、作用与文件路径。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        q: { type: 'string', description: '搜索关键词或用户意图场景(如 "obsidian", "debug", "画架构图")' },
+        limit: { type: 'number', description: '返回条数上限,默认 10,最大 30' },
+      },
+      additionalProperties: false,
+    },
+    run: (store, _cfg, args) => toolSearchSkills(store, args),
+  },
+  {
+    name: 'planofplan_project_context',
+    description: '跨项目切换时的上下文透视:查看任意本地项目的概况、最近的需求动机、落地的 commits、活跃的 agent 会话及触及文件流，并报告该项目是否已建立 zg 语义代码索引。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: '项目名称、路径或仓库 URL 片段' },
+      },
+      required: ['project'],
+      additionalProperties: false,
+    },
+    run: (store, _cfg, args) => toolInspectProjectContext(store, args),
+  },
 ];
+
+
 
 // ── JSON-RPC 分发 ───────────────────────────────────────────────────
 
@@ -394,7 +542,9 @@ function handleMessage(store: Store, cfg: AppConfig, message: RpcMessage): { jso
     case 'tools/call': {
       const params = message.params as { name?: unknown; arguments?: unknown } | undefined;
       const name = typeof params?.name === 'string' ? params.name : '';
-      const tool = TOOLS.find((t) => t.name === name);
+      const tool = TOOLS.find((t) => t.name === name)
+        ?? (name === 'search_skills' ? TOOLS.find((t) => t.name === 'planofplan_search_skills') : undefined)
+        ?? (name === 'inspect_project_context' ? TOOLS.find((t) => t.name === 'planofplan_project_context') : undefined);
       if (!tool) return rpcError(id, -32602, `unknown tool: ${name || '(missing)'}`);
       const args = (params?.arguments ?? {}) as Record<string, unknown>;
       try {

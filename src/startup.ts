@@ -73,13 +73,24 @@ export function setLaunchOnStartup(enabled: boolean): LaunchOnStartupResult {
       note: 'daemon 正在切换到 launchd 守护，页面会短暂重连',
     };
   }
-  // 关闭只删除自启注册；launchd 已加载的任务保留到注销/重启，
+  // 关闭删除自启注册及登录项；launchd 已加载的任务保留到注销/重启，
   // 不打断当前正在服务的 daemon。
   rmSync(launchAgentPlistPath(), { force: true });
+  if (process.platform === 'darwin' && !process.env.PLANOFPPLAN_LAUNCH_AGENTS_DIR) {
+    try {
+      Bun.spawnSync([
+        'osascript',
+        '-e',
+        'tell application "System Events" to delete (every login item whose name is "planofplan" or path is "/Applications/planofplan.app")',
+      ]);
+    } catch {
+      // 忽略非 GUI 环境或测试环境执行失败
+    }
+  }
   return {
     ok: true,
     enabled: false,
     restarting: false,
-    note: '注销/重启后不再自动启动；当前 daemon 继续运行',
+    note: '注销/重启后不再自动启动；当前服务继续运行',
   };
 }

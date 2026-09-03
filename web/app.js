@@ -289,13 +289,30 @@ async function request(path, options = {}) {
 
 async function load() {
   const days = document.getElementById('usageDays')?.value || '30';
-  const [overview, buildInfo, usage, sessions] = await Promise.all([
+  const [overview, buildInfo, usage] = await Promise.all([
     request('/api/overview'),
     request('/api/build-info'),
     request(`/api/usage?days=${encodeURIComponent(days)}`),
-    request(`/api/sessions?${sessionListParams()}`).catch(() => null),
   ]);
-  return { overview, buildInfo, usage, sessions };
+  return { overview, buildInfo, usage };
+}
+
+let sessionsLoading = false;
+
+async function loadSessionsBackground(generation) {
+  if (sessionsLoading) return;
+  sessionsLoading = true;
+  try {
+    const sessions = await request(`/api/sessions?${sessionListParams()}`).catch(() => null);
+    if (generation && generation !== renderGeneration) return;
+    latestSessions = sessions;
+    renderSessions(latestSessions);
+    if (currentTab() === 'graph') void refreshGraph();
+    if (currentTab() === 'projects') void refreshProjects();
+    maybePollSessionIndex(latestSessions);
+  } finally {
+    sessionsLoading = false;
+  }
 }
 
 function sessionRepos(session, role) {
@@ -418,11 +435,11 @@ function renderSessions(list) {
       ? '正在索引本机对话目录… 不用盯着扫。编好后会出现在左边。'
       : `${indexedLabel} · 已监听本机目录，新对话自动出现 · 本机只读 ~/.claude / ~/.codex / ~/.grok / ~/.dsh 等目录 · Token 数字请看 Token 页`;
   }
-  if (!list || list.sessions.length === 0) {
+  if (!list || !list.sessions || list.sessions.length === 0) {
     listEl.innerHTML = `
       <div class="usage-empty">
-        <strong>${indexing ? '正在建立目录' : '还没有对话'}</strong>
-        <span>${indexing ? '第一次大约几十秒，之后只扫有改动的文件。' : '确认 daemon 在跑。打开这页或重启 planofplan 会自动索引。'}</span>
+        <strong>${list === null ? '正在读取对话…' : indexing ? '正在建立目录' : '还没有对话'}</strong>
+        <span>${list === null ? '正在载入本地会话列表，稍候片刻。' : indexing ? '第一次大约几十秒，之后只扫有改动的文件。' : '确认 daemon 在跑。打开这页或重启 planofplan 会自动索引。'}</span>
       </div>
     `;
     return;
@@ -2847,7 +2864,6 @@ async function render() {
     latestOverview = result.overview;
     latestBuildInfo = result.buildInfo;
     latestUsage = result.usage;
-    latestSessions = result.sessions;
     const now = Date.now();
     document.getElementById('connectionState').className = 'connection connected';
     document.getElementById('connectionState').innerHTML = '<i></i> live';
@@ -2857,31 +2873,18 @@ async function render() {
     build.title = latestBuildInfo
       ? `${latestBuildInfo.commitSha} · ${latestBuildInfo.buildTimestamp}`
       : '当前运行构建';
-    renderSummary(latestOverview);
-    renderUsage(latestUsage);
-    renderSessions(latestSessions);
-    if (currentTab() === 'graph') void refreshGraph();
-    if (currentTab() === 'projects') void refreshProjects();
-    maybePollSessionIndex(latestSessions);
-    if (dragInFlight) return;
-    const grid = document.getElementById('grid');
-    // 多账号凭据冲突等配置警告(daemon 侧计算)
-    const warnEl = document.getElementById('configWarnings');
-    if (warnEl) {
-      const warns = latestOverview.warnings || [];
-      warnEl.hidden = warns.length === 0;
-      warnEl.textContent = warns.join('；');
-    }
     const orderedPlans = applyOrder(latestOverview.plans);
     const hiddenPlans = loadHiddenPlans();
     const visiblePlans = orderedPlans.filter((p) => !hiddenPlans.has(p.slug));
 
     renderSummary(latestOverview, visiblePlans);
     renderUsage(latestUsage);
-    renderSessions(latestSessions);
-    if (currentTab() === 'graph') void refreshGraph();
-    if (currentTab() === 'projects') void refreshProjects();
-    maybePollSessionIndex(latestSessions);
+    if (latestSessions) {
+      renderSessions(latestSessions);
+      if (currentTab() === 'graph') void refreshGraph();
+      if (currentTab() === 'projects') void refreshProjects();
+      maybePollSessionIndex(latestSessions);
+    }
     if (dragInFlight) return;
     const grid = document.getElementById('grid');
     // 多账号凭据冲突等配置警告(daemon 侧计算)
@@ -2906,6 +2909,7 @@ async function render() {
     grid.replaceChildren(nextGrid);
     syncResetOrderVisibility();
     syncRestoreHiddenVisibility();
+    void loadSessionsBackground(generation);
   } catch (error) {
     if (generation !== renderGeneration) return;
     document.getElementById('connectionState').className = 'connection disconnected';
@@ -2992,7 +2996,7 @@ document.getElementById('startupToggle')?.addEventListener('click', async (event
     });
     renderStartupToggle(result.enabled);
     showToast(next
-      ? '开机自启已开启：daemon 正在切换到 launchd 守护，页面会短暂重连'
+      ? '开机自启已开启：已注册登录项与后台守护，页面会短暂重连'
       : '开机自启已关闭：注销/重启后不再自动启动，当前服务继续运行');
     if (next) {
       // 开启会让 daemon 在 launchd 下重启接管，连接短暂中断，稍后重连刷新
@@ -3116,6 +3120,7 @@ function showTab(name) {
   document.querySelectorAll('.tab-panel').forEach((panel) => {
     panel.hidden = panel.getAttribute('data-panel') !== name;
   });
+  if (name === 'sessions' && !latestSessions) void loadSessionsBackground();
   if (name === 'graph') void refreshGraph();
   if (name === 'files') void refreshFileEdits();
   if (name === 'projects') void refreshProjects();
