@@ -30,6 +30,21 @@ struct Window: Decodable {
     let percentage: Double?
     let resetAt: Double?
     let note: String?
+
+    var isReset: Bool {
+        guard let resetAt else { return false }
+        return resetAt <= Date().timeIntervalSince1970 * 1000
+    }
+
+    var effectivePercentage: Double? {
+        guard let percentage else { return nil }
+        return isReset ? 0 : percentage
+    }
+
+    var effectiveUsed: Double? {
+        guard let used else { return nil }
+        return isReset ? 0 : used
+    }
 }
 
 /// /api/usage 的最小子集：menubar 面板展示 30 天总量、成本、top providers
@@ -257,8 +272,8 @@ final class PanelView: NSView {
         var y = top - 14
 
         let sorted = rows.sorted { a, b in
-            let pa = plans[a].windows.compactMap { $0.percentage }.max() ?? 0
-            let pb = plans[b].windows.compactMap { $0.percentage }.max() ?? 0
+            let pa = plans[a].windows.compactMap { $0.effectivePercentage }.max() ?? 0
+            let pb = plans[b].windows.compactMap { $0.effectivePercentage }.max() ?? 0
             return pa > pb
         }
 
@@ -276,17 +291,17 @@ final class PanelView: NSView {
                      font: .systemFont(ofSize: 11.5, weight: .medium), color: textPrimary)
 
             // 右侧:摘要值(最右)+ 倒计时(值左侧,灰);余额型无倒计时
-            let tight = plan.windows.filter { $0.percentage != nil }
-                .max { ($0.percentage ?? 0) < ($1.percentage ?? 0) }
+            let tight = plan.windows.filter { $0.effectivePercentage != nil }
+                .max { ($0.effectivePercentage ?? 0) < ($1.effectivePercentage ?? 0) }
             let balance = plan.windows.first(where: PanelView.isBalanceWindow)
-            let unlimited = plan.windows.contains { $0.note == "不限量" && $0.percentage == nil }
+            let unlimited = plan.windows.contains { $0.note == "不限量" && $0.effectivePercentage == nil }
 
-            var right = cardRect.maxX - 16
+            let right = cardRect.maxX - 16
             var value = "--"
             var valueColor = textTertiary
             if let tight {
-                value = "\(Int(tight.percentage!.rounded()))%"
-                valueColor = color(forRemaining: 100 - tight.percentage!)
+                value = "\(Int(tight.effectivePercentage!.rounded()))%"
+                valueColor = color(forRemaining: 100 - tight.effectivePercentage!)
                 if let resetAt = tight.resetAt {
                     let cd = PanelView.countdownText(until: resetAt)
                     let cdFont = NSFont.systemFont(ofSize: 9.5)
@@ -352,7 +367,7 @@ final class PanelView: NSView {
                      maxWidth: contentWidth, maxLines: 2)
         } else {
             for window in plan.windows {
-                let pct = window.percentage
+                let pct = window.effectivePercentage
                 let balance = PanelView.isBalanceWindow(window)
                 let remaining = pct.map { 100 - $0 }
                 let levelColor = color(forRemaining: remaining)
@@ -382,9 +397,9 @@ final class PanelView: NSView {
                 // 余额型不重复 used / total(金额已在主数字)
                 if !balance {
                     var fraction = ""
-                    if let used = window.used, let total = window.total {
+                    if let used = window.effectiveUsed, let total = window.total {
                         fraction = PanelView.shortNumber(used) + " / " + PanelView.shortNumber(total)
-                    } else if let used = window.used {
+                    } else if let used = window.effectiveUsed {
                         fraction = PanelView.shortNumber(used)
                     }
                     if !fraction.isEmpty {
@@ -645,7 +660,7 @@ final class PanelView: NSView {
 
     // 纯函数标 nonisolated:要作为谓词传给 first(where:) 等 stdlib 参数
     nonisolated static func isBalanceWindow(_ w: Window) -> Bool {
-        guard let used = w.used, let total = w.total, w.percentage == nil else { return false }
+        guard let used = w.effectiveUsed, let total = w.total, w.effectivePercentage == nil else { return false }
         return abs(used - total) < 1e-9
     }
 
@@ -659,7 +674,7 @@ final class PanelView: NSView {
 
     /// 窗口数值文本(货币带符号两位小数;其余走 shortNumber)。
     static func windowValueText(_ w: Window) -> String {
-        guard let used = w.used else { return "--" }
+        guard let used = w.effectiveUsed else { return "--" }
         guard let sym = currencySymbol(w.unit) else { return shortNumber(used) }
         let f = NumberFormatter()
         f.numberStyle = .decimal
@@ -672,14 +687,14 @@ final class PanelView: NSView {
 
     /// 总览紧凑行右侧的摘要值:最紧窗口的百分比 / 余额 / ∞ / --。
     static func indexSummaryValue(for plan: Plan) -> String {
-        if let tight = plan.windows.filter({ $0.percentage != nil })
-            .max(by: { ($0.percentage ?? 0) < ($1.percentage ?? 0) }) {
-            return "\(Int(tight.percentage!.rounded()))%"
+        if let tight = plan.windows.filter({ $0.effectivePercentage != nil })
+            .max(by: { ($0.effectivePercentage ?? 0) < ($1.effectivePercentage ?? 0) }) {
+            return "\(Int(tight.effectivePercentage!.rounded()))%"
         }
         if let balance = plan.windows.first(where: isBalanceWindow) {
             return windowValueText(balance)
         }
-        if plan.windows.contains(where: { $0.note == "不限量" && $0.percentage == nil }) {
+        if plan.windows.contains(where: { $0.note == "不限量" && $0.effectivePercentage == nil }) {
             return "∞"
         }
         return "--"

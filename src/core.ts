@@ -144,11 +144,17 @@ function buildPlanOverview(store: Store, plan: PlanConfig, now: number): Overvie
   const visibleWindows = status === 'auth_error' ? [] : windows;
 
   // 为每个窗口估算 startedAt，供前端渲染时间进度参考线（WTD/MTD）。
-  //  provider 未返回时按窗口类型近似：5h→-5h，week→-7d，month/credits→-30d。
-  const withStart = visibleWindows.map((window) => ({
-    ...window,
-    startedAt: window.startedAt ?? estimateWindowStart(window.window, window.resetAt),
-  }));
+  // provider 未返回时按窗口类型近似：5h→-5h，week→-7d，month/credits→-30d。
+  // 若窗口已到达或超过 resetAt（已恢复），历史额度已失效，动态重置为 0%（防轮询间隔内旧额度倒挂）。
+  const withStart = visibleWindows.map((window) => {
+    const isReset = window.resetAt != null && window.resetAt <= now;
+    return {
+      ...window,
+      percentage: isReset && window.percentage != null ? 0 : window.percentage,
+      used: isReset && window.used != null ? 0 : window.used,
+      startedAt: window.startedAt ?? estimateWindowStart(window.window, window.resetAt),
+    };
+  });
 
   // 高峰/低谷注解：仅在「全局开关 + per-plan 开关」都打开时打。
   // tier 是「当前时间」的属性，db 不持久化，每次 buildOverview 重算。
@@ -180,6 +186,7 @@ function buildPlanOverview(store: Store, plan: PlanConfig, now: number): Overvie
 
 export class Scheduler {
   private timers = new Map<string, ReturnType<typeof setInterval>>();
+  private resetTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(
     private store: Store,
@@ -198,6 +205,10 @@ export class Scheduler {
         void this.maybePoll(plan.slug);
       }, intervalSec * 1000);
       this.timers.set(plan.slug, t);
+
+      // 若库中已有未来重置时间，预约重置时刻抓取
+      const windows = this.store.latestByPlan(plan.slug, true);
+      this.scheduleNextResetPoll(plan.slug, windows);
     }
   }
 
@@ -213,6 +224,31 @@ export class Scheduler {
   stop(): void {
     for (const t of this.timers.values()) clearInterval(t);
     this.timers.clear();
+    for (const t of this.resetTimers.values()) clearTimeout(t);
+    this.resetTimers.clear();
+  }
+
+  private scheduleNextResetPoll(slug: string, windows: QuotaWindow[]): void {
+    const existing = this.resetTimers.get(slug);
+    if (existing) {
+      clearTimeout(existing);
+      this.resetTimers.delete(slug);
+    }
+    const now = Date.now();
+    const futureResets = windows
+      .map((w) => w.resetAt)
+      .filter((t): t is number => t != null && t > now);
+    if (futureResets.length === 0) return;
+    const nextReset = Math.min(...futureResets);
+    // 窗口重置时刻后延 2 秒抓取，确保 provider 端已完成额度翻转
+    const delayMs = Math.max(1000, nextReset - now + 2000);
+    // 超过 24 小时的重置时间不必常驻 setTimeout（由常规周期轮询接管）
+    if (delayMs > 24 * 3600 * 1000) return;
+    const t = setTimeout(() => {
+      this.resetTimers.delete(slug);
+      void this.maybePoll(slug);
+    }, delayMs);
+    this.resetTimers.set(slug, t);
   }
 
   private async maybePoll(slug: string): Promise<void> {
@@ -265,6 +301,7 @@ export class Scheduler {
         paused_until: null,
         auth_status: cred.source === 'manual' ? AUTH_STATUS.MANUAL : AUTH_STATUS.AUTO,
       });
+      this.scheduleNextResetPoll(slug, windows);
       return { ok: true, slug, windows };
     } catch (e) {
       const err = e instanceof AdapterError ? e : new AdapterError('unknown', String(e instanceof Error ? e.message : e));

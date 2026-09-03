@@ -2316,8 +2316,12 @@ function renderSummary(ov) {
   const issueCount = plans.filter((p) => p.status !== 'ok').length;
   const windows = plans.flatMap((plan) => plan.windows
     .filter((w) => w.percentage != null)
-    .map((w) => ({ plan, w })))
-    .sort((a, b) => (100 - a.w.percentage) - (100 - b.w.percentage));
+    .map((w) => {
+      const isReset = w.resetAt != null && w.resetAt <= now;
+      const effectivePercentage = isReset ? 0 : w.percentage;
+      return { plan, w, effectivePercentage };
+    }))
+    .sort((a, b) => (100 - a.effectivePercentage) - (100 - b.effectivePercentage));
   const tight = windows[0];
   const nextReset = plans.flatMap((plan) => plan.windows
     .filter((w) => w.resetAt != null && w.resetAt > now)
@@ -2337,7 +2341,7 @@ function renderSummary(ov) {
     </div>
     <div class="summary-item">
       <span class="summary-label">最紧张额度</span>
-      <strong>${tight ? `${Math.max(0, 100 - tight.w.percentage).toFixed(0)}%` : '--'}</strong>
+      <strong>${tight ? `${Math.max(0, 100 - tight.effectivePercentage).toFixed(0)}%` : '--'}</strong>
       <span class="summary-detail">${tight ? `${escapeHtml(tight.plan.name)} · ${escapeHtml(tight.w.label)} 剩余` : '等待额度数据'}</span>
     </div>
     <div class="summary-item summary-next">
@@ -2503,17 +2507,20 @@ function renderPlan(p, now) {
       const node = tpl.content.cloneNode(true);
       node.querySelector('.win-label').textContent = w.label;
       const meta = node.querySelector('.win-meta');
-      const unlimited = w.note === '不限量' && w.percentage == null;
-      const hasPct = Number.isFinite(w.percentage);
-      const pct = unlimited ? '∞' : hasPct ? `${w.percentage}%` : '';
+      const isReset = w.resetAt != null && w.resetAt <= now;
+      const rawPct = isReset && w.percentage != null ? 0 : w.percentage;
+      const rawUsed = isReset && w.used != null ? 0 : w.used;
+      const unlimited = w.note === '不限量' && rawPct == null;
+      const hasPct = Number.isFinite(rawPct);
+      const pct = unlimited ? '∞' : hasPct ? `${rawPct}%` : '';
       // 余额型 provider(used==total 且无 percentage)只显示金额一次,不当配额刻度;
       // 其它场景保留 "used / total" 的习惯(单位由 formatWindowValue 自动识别货币)。
       const sameBalance = w.used != null && w.total != null && Math.abs(w.used - w.total) < 1e-9 && !hasPct;
       const frac = unlimited || sameBalance
-        ? (w.used != null ? formatWindowValue(w.used, w.unit) : '')
-        : w.used != null && w.total != null
-          ? `${formatWindowValue(w.used, w.unit)}/${formatWindowValue(w.total, w.unit)}`
-          : w.used != null ? formatWindowValue(w.used, w.unit) : '';
+        ? (rawUsed != null ? formatWindowValue(rawUsed, w.unit) : '')
+        : rawUsed != null && w.total != null
+          ? `${formatWindowValue(rawUsed, w.unit)}/${formatWindowValue(w.total, w.unit)}`
+          : rawUsed != null ? formatWindowValue(rawUsed, w.unit) : '';
       // 渲染策略——balance-only 主数字走 <b>(白 + 大号,跟 usage-metric 同档);
       // pct-provider 主数字是百分比,used/total 是次要灰字;无 pct 又无值时退回 '--'。
       if (sameBalance) {
@@ -2524,14 +2531,14 @@ function renderPlan(p, now) {
         meta.innerHTML = frac ? `<b>--</b><span class="sep">·</span>${escapeHtml(frac)}` : '<b>--</b>';
       }
       const fill = node.querySelector('.fill');
-      fill.className = `fill ${levelClass(w.percentage)}`;
+      fill.className = `fill ${levelClass(rawPct)}`;
       // 余额型 provider 没有百分比刻度,进度条 0 宽、不抢戏。
-      fill.style.width = hasPct ? `${w.percentage}%` : '0';
-      // 时间进度参考线：按窗口时长估算当前时间应到的位置。
+      fill.style.width = hasPct ? `${rawPct}%` : '0';
+      // 时间进度参考线：按窗口时长估算当前时间应到的位置。已重置窗口不显示旧参考线。
       const marker = node.querySelector('.pace-marker');
       if (marker) {
         const pace = timePacePercentage(w, now);
-        if (pace != null && hasPct) {
+        if (pace != null && hasPct && !isReset) {
           marker.style.left = `${pace}%`;
           marker.hidden = false;
           marker.title = `时间进度 ${pace}%`;
@@ -2732,9 +2739,19 @@ function tickClock() {
     weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
   }).format(new Date());
   if (latestOverview) {
+    let hasNewlyReset = false;
+    const now = Date.now();
     document.querySelectorAll('[data-reset-at]').forEach((el) => {
-      el.textContent = fmtCountdown(Number(el.dataset.resetAt), Date.now());
+      const resetAt = Number(el.dataset.resetAt);
+      el.textContent = fmtCountdown(resetAt, now);
+      if (Number.isFinite(resetAt) && resetAt <= now && !el.dataset.resetHandled) {
+        el.dataset.resetHandled = 'true';
+        hasNewlyReset = true;
+      }
     });
+    if (hasNewlyReset) {
+      void render();
+    }
   }
 }
 
