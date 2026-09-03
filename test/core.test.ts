@@ -77,6 +77,32 @@ describe('buildOverview plan filtering', () => {
     const all = buildOverview(store, DEFAULT_PLANS, Date.now());
     expect(all.plans.length).toBeGreaterThanOrEqual(2);
   });
+
+  test('已配置凭据的 plan 自动排在未配置的前面', () => {
+    const store = openMemoryDb();
+    const kimi = DEFAULT_PLANS.find((item) => item.slug === 'kimi')!;
+    const grok = DEFAULT_PLANS.find((item) => item.slug === 'grok')!;
+    store.syncPlan(kimi);
+    store.syncPlan(grok);
+
+    // grok 有成功快照（已配置），kimi 没有（not_configured）
+    store.insertWindows(grok.slug, [{
+      window: 'credits',
+      label: 'Credits',
+      used: 10,
+      total: 100,
+      unit: 'percent',
+      percentage: 10,
+      resetAt: null,
+      note: null,
+    }], 100);
+    store.setState(grok.slug, { last_success_at: 100 });
+
+    // 无论输入顺序是 [kimi, grok]，输出都自动将已配置的 grok 排在前面
+    const overview = buildOverview(store, [kimi, grok], 200);
+    expect(overview.plans[0]!.slug).toBe('grok');
+    expect(overview.plans[1]!.slug).toBe('kimi');
+  });
 });
 
 describe('buildOverview current snapshot batch', () => {

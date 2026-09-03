@@ -74,8 +74,15 @@ function groupedNumber(n, digits) {
   return n.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits });
 }
 
-// /plans 拖拽排序：localStorage 保存用户拖过的顺序，applyOrder 在 render 时套用。
+// /plans 拖拽排序与卡片隐藏：localStorage 保存用户自定义顺序与已隐藏的 plan slug。
 const ORDER_KEY = 'planofplan.planOrder.v1';
+const HIDE_KEY = 'planofplan.hiddenPlans.v1';
+
+function isPlanConfigured(p) {
+  if (p.status === 'not_configured' || p.status === 'unavailable') return false;
+  if (p.authStatus === 'missing') return false;
+  return true;
+}
 
 function loadPlanOrder() {
   try {
@@ -90,27 +97,86 @@ function loadPlanOrder() {
 
 function savePlanOrder(slugs) {
   try {
-    localStorage.setItem(ORDER_KEY, JSON.stringify(slugs));
+    const existing = loadPlanOrder();
+    const currentSet = new Set(slugs);
+    const retained = existing.filter((s) => !currentSet.has(s));
+    localStorage.setItem(ORDER_KEY, JSON.stringify([...slugs, ...retained]));
   } catch {
     /* localStorage 不可用（隐私模式）则静默丢弃 — UI 仍可拖动，只是不持久化 */
   }
 }
 
+function loadHiddenPlans() {
+  try {
+    const raw = localStorage.getItem(HIDE_KEY);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    return new Set(Array.isArray(parsed) ? parsed.filter((s) => typeof s === 'string') : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function saveHiddenPlans(hiddenSet) {
+  try {
+    localStorage.setItem(HIDE_KEY, JSON.stringify([...hiddenSet]));
+  } catch {
+    /* localStorage 不可用（隐私模式）则静默丢弃 */
+  }
+}
+
+function hidePlan(slug, name) {
+  const hidden = loadHiddenPlans();
+  hidden.add(slug);
+  saveHiddenPlans(hidden);
+  showToast(`已隐藏 ${name || slug}，可在「设置」中找回`);
+  if (typeof render === 'function') void render();
+  if (typeof renderSettings === 'function') renderSettings();
+  syncRestoreHiddenVisibility();
+}
+
+function unhidePlan(slug, name) {
+  const hidden = loadHiddenPlans();
+  hidden.delete(slug);
+  saveHiddenPlans(hidden);
+  showToast(`已恢复显示 ${name || slug}`);
+  if (typeof render === 'function') void render();
+  if (typeof renderSettings === 'function') renderSettings();
+  syncRestoreHiddenVisibility();
+}
+
+function unhideAllPlans() {
+  saveHiddenPlans(new Set());
+  showToast('已恢复所有隐藏卡片');
+  if (typeof render === 'function') void render();
+  if (typeof renderSettings === 'function') renderSettings();
+  syncRestoreHiddenVisibility();
+}
+
 function applyOrder(plans) {
   const order = loadPlanOrder();
   if (!order.length) {
-    // 无自定义顺序时默认按 adapter 分组:同 provider 的多账号卡挨着
-    // (多账号支持后,kimi-personal/kimi-work 不再散落各处)
+    // 默认排序：已配置的 plan 自动排在前面，未配置的在后面；
+    // 组内保持按 adapter 分组和 slug 字典序。
     const rank = new Map([...new Set(plans.map((p) => p.adapter))].sort()
       .map((adapter, i) => [adapter, i]));
-    return [...plans].sort((a, b) => (rank.get(a.adapter) ?? 99) - (rank.get(b.adapter) ?? 99)
-      || String(a.slug).localeCompare(String(b.slug)));
+    return [...plans].sort((a, b) => {
+      const aConf = isPlanConfigured(a) ? 0 : 1;
+      const bConf = isPlanConfigured(b) ? 0 : 1;
+      if (aConf !== bConf) return aConf - bConf;
+      return (rank.get(a.adapter) ?? 99) - (rank.get(b.adapter) ?? 99)
+        || String(a.slug).localeCompare(String(b.slug));
+    });
   }
   const idx = new Map(order.map((slug, i) => [slug, i]));
   return [...plans].sort((a, b) => {
     const ai = idx.has(a.slug) ? idx.get(a.slug) : Number.POSITIVE_INFINITY;
     const bi = idx.has(b.slug) ? idx.get(b.slug) : Number.POSITIVE_INFINITY;
-    return ai - bi;
+    if (ai !== bi) return ai - bi;
+    const aConf = isPlanConfigured(a) ? 0 : 1;
+    const bConf = isPlanConfigured(b) ? 0 : 1;
+    if (aConf !== bConf) return aConf - bConf;
+    return String(a.slug).localeCompare(String(b.slug));
   });
 }
 
@@ -2308,10 +2374,10 @@ function renderUsage(report) {
   `;
 }
 
-function renderSummary(ov) {
+function renderSummary(ov, visiblePlans) {
   const now = Date.now();
   const el = document.getElementById('summary');
-  const plans = ov.plans;
+  const plans = visiblePlans || ov.plans;
   const okCount = plans.filter((p) => p.status === 'ok').length;
   const issueCount = plans.filter((p) => p.status !== 'ok').length;
   const windows = plans.flatMap((plan) => plan.windows
@@ -2461,7 +2527,10 @@ function renderPlan(p, now) {
           <div class="card-sub">${escapeHtml(p.slug)} · ${escapeHtml(p.adapter)}${browser ? ` · ${escapeHtml(browser)}` : ''}</div>
         </div>
       </div>
-      ${hasSettings ? '<button type="button" class="settings-trigger" data-open-settings>设置</button>' : ''}
+      <div class="card-actions">
+        <button type="button" class="card-action-btn" data-hide-plan title="在首页隐藏此卡片">隐藏</button>
+        ${hasSettings ? '<button type="button" class="settings-trigger" data-open-settings>设置</button>' : ''}
+      </div>
       <div class="badges">
         ${renderTierPill(p, now)}
         ${renderFableIdlePill(p, now)}
@@ -2487,6 +2556,11 @@ function renderPlan(p, now) {
         <div class="settings">
         ${renderBrowserSettings(card, p)}
         ${renderCredentialSettings(card, p)}
+        <div class="settings-section">
+          <div class="settings-title">卡片展示</div>
+          <p class="settings-copy">若暂不使用此 provider，可在首页将其隐藏。隐藏后可在全局「设置」随时找回。</p>
+          <button type="button" class="secondary-btn" data-dialog-hide-plan>在首页隐藏此卡片</button>
+        </div>
         </div>
       </dialog>
       ${p.lastError ? `<div class="error-line">${escapeHtml(p.lastError)}</div>` : ''}
@@ -2637,6 +2711,14 @@ function bindPlanActions(card, p) {
   card.querySelector('[data-close-settings]')?.addEventListener('click', () => settingsDialog?.close());
   settingsDialog?.addEventListener('click', (event) => {
     if (event.target === settingsDialog) settingsDialog.close();
+  });
+  card.querySelector('[data-hide-plan]')?.addEventListener('click', (event) => {
+    event.stopPropagation();
+    hidePlan(p.slug, p.name);
+  });
+  card.querySelector('[data-dialog-hide-plan]')?.addEventListener('click', () => {
+    settingsDialog?.close();
+    hidePlan(p.slug, p.name);
   });
   if (select) {
     select.addEventListener('change', async () => {
@@ -2790,10 +2872,40 @@ async function render() {
       warnEl.hidden = warns.length === 0;
       warnEl.textContent = warns.join('；');
     }
+    const orderedPlans = applyOrder(latestOverview.plans);
+    const hiddenPlans = loadHiddenPlans();
+    const visiblePlans = orderedPlans.filter((p) => !hiddenPlans.has(p.slug));
+
+    renderSummary(latestOverview, visiblePlans);
+    renderUsage(latestUsage);
+    renderSessions(latestSessions);
+    if (currentTab() === 'graph') void refreshGraph();
+    if (currentTab() === 'projects') void refreshProjects();
+    maybePollSessionIndex(latestSessions);
+    if (dragInFlight) return;
+    const grid = document.getElementById('grid');
+    // 多账号凭据冲突等配置警告(daemon 侧计算)
+    const warnEl = document.getElementById('configWarnings');
+    if (warnEl) {
+      const warns = latestOverview.warnings || [];
+      warnEl.hidden = warns.length === 0;
+      warnEl.textContent = warns.join('；');
+    }
     const nextGrid = document.createDocumentFragment();
-    for (const p of applyOrder(latestOverview.plans)) nextGrid.appendChild(renderPlan(p, now));
+    if (visiblePlans.length === 0 && orderedPlans.length > 0) {
+      const empty = document.createElement('div');
+      empty.className = 'empty-hidden-prompt';
+      empty.innerHTML = `<span>首页所有卡片均已被隐藏</span><button type="button" class="secondary-btn" id="emptyUnhideAllBtn">全部恢复显示</button>`;
+      nextGrid.appendChild(empty);
+      empty.querySelector('#emptyUnhideAllBtn')?.addEventListener('click', () => {
+        unhideAllPlans();
+      });
+    } else {
+      for (const p of visiblePlans) nextGrid.appendChild(renderPlan(p, now));
+    }
     grid.replaceChildren(nextGrid);
     syncResetOrderVisibility();
+    syncRestoreHiddenVisibility();
   } catch (error) {
     if (generation !== renderGeneration) return;
     document.getElementById('connectionState').className = 'connection disconnected';
@@ -2825,6 +2937,20 @@ function syncResetOrderVisibility() {
   if (!btn) return;
   btn.hidden = loadPlanOrder().length === 0;
 }
+
+/** 根据是否有被隐藏的卡片，显示「恢复已隐藏卡片」入口。 */
+function syncRestoreHiddenVisibility() {
+  const btn = document.getElementById('restoreHidden');
+  if (!btn) return;
+  const count = loadHiddenPlans().size;
+  btn.hidden = count === 0;
+  const countEl = document.getElementById('hiddenCount');
+  if (countEl) countEl.textContent = String(count);
+}
+
+document.getElementById('restoreHidden')?.addEventListener('click', () => {
+  unhideAllPlans();
+});
 
 document.getElementById('resetOrder')?.addEventListener('click', () => {
   try {
@@ -3040,11 +3166,27 @@ function renderSettings() {
     return;
   }
   const { config, llm, overview } = latestSettings;
+  const hiddenPlans = loadHiddenPlans();
+  const hiddenCount = hiddenPlans.size;
+  const bannerEl = document.getElementById('settingsHiddenBanner');
+  if (bannerEl) {
+    bannerEl.hidden = hiddenCount === 0;
+    const countEl = document.getElementById('settingsHiddenCount');
+    if (countEl) countEl.textContent = String(hiddenCount);
+    const unhideBtn = document.getElementById('settingsUnhideAllBtn');
+    if (unhideBtn) {
+      unhideBtn.onclick = () => {
+        unhideAllPlans();
+      };
+    }
+  }
+
   // 运行时状态合入:authStatus 是「检测/抓取后」的真值,credRef 只是配置态
   const runtimeBySlug = new Map((overview?.plans || []).map((row) => [row.slug, row]));
   const rows = (config.plans || []).map((plan) => {
     const rt = runtimeBySlug.get(plan.slug);
     const auth = rt?.authStatus ?? 'unknown';
+    const isHidden = hiddenPlans.has(plan.slug);
     void llm;
     const credBadge = plan.credRef
       ? '<i class="settings-cred settings-cred-set">✓ 专属凭据</i>'
@@ -3060,16 +3202,21 @@ function renderSettings() {
       : rt?.lastFetchedAt
         ? `<i class="settings-cred settings-cred-set" title="${fmtTime(rt.lastFetchedAt, true)}">✓ ${fmtAgo(rt.lastFetchedAt, Date.now())}抓取</i>`
         : '<i class="settings-cred">未抓取</i>';
+    const hiddenBadge = isHidden
+      ? '<i class="settings-cred settings-cred-off" title="已在首页隐藏">○ 首页隐藏</i>'
+      : '';
     return `
     <div class="attr-row settings-plan-row" data-plan-slug="${escapeHtml(plan.slug)}">
       <span class="attr-path">${escapeHtml(plan.name)} <span class="muted">${escapeHtml(plan.slug)}</span></span>
       <span class="settings-plan-badges">
         <i class="settings-adapter">${escapeHtml(plan.adapter)}</i>
         ${plan.enabled ? '<i class="settings-cred settings-cred-on">● 启用</i>' : '<i class="settings-cred settings-cred-off">○ 已停用</i>'}
+        ${hiddenBadge}
         ${credBadge}
         ${fetchBadge}
       </span>
       <span class="settings-plan-actions">
+        <button type="button" class="secondary-btn" data-toggle-hide="${escapeHtml(plan.slug)}">${isHidden ? '恢复卡片' : '隐藏'}</button>
         <button type="button" class="secondary-btn" data-auth-plan="${escapeHtml(plan.slug)}">${plan.credRef ? '换 key' : '配 key'}</button>
         <button type="button" class="secondary-btn" data-toggle-plan="${escapeHtml(plan.slug)}" data-enabled="${plan.enabled ? '1' : '0'}">${plan.enabled ? '停用' : '启用'}</button>
         <button type="button" class="secondary-btn" data-del-plan="${escapeHtml(plan.slug)}">删除</button>
@@ -3078,6 +3225,18 @@ function renderSettings() {
   `;
   }).join('');
   listEl.innerHTML = rows || '<div class="muted">还没有 plan</div>';
+  listEl.querySelectorAll('[data-toggle-hide]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const slug = btn.getAttribute('data-toggle-hide');
+      const plan = (config.plans || []).find((row) => row.slug === slug);
+      if (!slug) return;
+      if (hiddenPlans.has(slug)) {
+        unhidePlan(slug, plan?.name);
+      } else {
+        hidePlan(slug, plan?.name);
+      }
+    });
+  });
   // 凭据配置:额度页同款 dialog(password 输入 + 保存 / 回自动),不再用 prompt
   listEl.querySelectorAll('[data-auth-plan]').forEach((btn) => {
     btn.addEventListener('click', () => {
