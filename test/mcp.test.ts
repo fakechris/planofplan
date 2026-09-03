@@ -88,15 +88,17 @@ describe('mcp handshake', () => {
     expect((body.result as { protocolVersion?: string }).protocolVersion).toBe('2025-06-18');
   });
 
-  test('tools/list 暴露五个只读工具', async () => {
+  test('tools/list 暴露九个只读工具', async () => {
     const body = await rpc(app(), 'tools/list', {});
     const tools = ((body.result as { tools?: Array<{ name: string; inputSchema: unknown }> }).tools) ?? [];
     expect(tools.map((t) => t.name).sort()).toEqual([
-      'lineage_report', 'plan_quota_status', 'recent_edits', 'repo_lineage',
-      'requirement_status', 'session_search', 'usage_summary',
+      'lineage_report', 'plan_quota_status', 'planofplan_project_context', 'planofplan_search_skills',
+      'recent_edits', 'repo_lineage', 'requirement_status', 'session_search', 'usage_summary',
     ]);
     for (const tool of tools) expect(tool.inputSchema).toBeDefined();
   });
+
+
 
   test('notifications 回 202,未知方法 -32601', async () => {
     const server = app();
@@ -184,4 +186,25 @@ describe('mcp 新工具', () => {
     expect(text).toContain('把部署脚本改成幂等的');
     expect(text).toContain('声明');
   });
+
+  test('planofplan_search_skills 跨技能库检索(支持别名 search_skills)', async () => {
+    const textPrefixed = await callTool(app(), 'planofplan_search_skills', { q: 'obsidian' });
+    expect(textPrefixed).toContain('Skill');
+    expect(textPrefixed).toContain('obsidian');
+
+    const textAlias = await callTool(app(), 'search_skills', { q: 'obsidian' });
+    expect(textAlias).toContain('Skill');
+  });
+
+  test('planofplan_project_context 返回项目上下文与 zg 状态(支持别名 inspect_project_context)', async () => {
+    const textPrefixed = await callTool(app(), 'planofplan_project_context', { project: 'demo' });
+    expect(textPrefixed).toContain('项目上下文透视: demo');
+    expect(textPrefixed).toContain('代码语义索引 (.zvec-grep)');
+    expect(textPrefixed).toContain('最近开发需求/用户意图');
+
+    const textAlias = await callTool(app(), 'inspect_project_context', { project: 'demo' });
+    expect(textAlias).toContain('项目上下文透视: demo');
+  });
 });
+
+

@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import ServiceManagement
 import SweetCookieKit
 
 struct Overview: Decodable {
@@ -771,6 +772,153 @@ struct BuildMetadata {
     let bundlePath: String
 }
 
+enum AutoLaunchManager {
+    static let appPath = "/Applications/planofplan.app"
+    static let appName = "planofplan"
+    static let daemonLabel = "local.planofplan.daemon"
+
+    static var isEnabled: Bool {
+        if #available(macOS 13.0, *) {
+            if SMAppService.mainApp.status == .enabled {
+                return true
+            }
+        }
+        let plistPath = "\(NSHomeDirectory())/Library/LaunchAgents/\(daemonLabel).plist"
+        if FileManager.default.fileExists(atPath: plistPath) {
+            return true
+        }
+        return isLoginItemRegistered()
+    }
+
+    static func setEnabled(_ enabled: Bool, port: Int) {
+        if #available(macOS 13.0, *) {
+            do {
+                if enabled {
+                    if SMAppService.mainApp.status != .enabled {
+                        try SMAppService.mainApp.register()
+                    }
+                } else {
+                    if SMAppService.mainApp.status == .enabled {
+                        try SMAppService.mainApp.unregister()
+                    }
+                }
+            } catch {
+                NSLog("planofplan: SMAppService error: \(error)")
+            }
+        }
+
+        if enabled {
+            addLoginItem()
+            installDaemonLaunchAgent(port: port)
+        } else {
+            removeLoginItem()
+            removeDaemonLaunchAgent()
+        }
+    }
+
+    private static func isLoginItemRegistered() -> Bool {
+        let script = """
+        tell application "System Events"
+            return exists (login items whose name is "\(appName)" or path is "\(appPath)")
+        end tell
+        """
+        guard let appleScript = NSAppleScript(source: script) else { return false }
+        var error: NSDictionary?
+        let result = appleScript.executeAndReturnError(&error)
+        if let error {
+            NSLog("planofplan: check login item error: \(error)")
+            return false
+        }
+        return result.booleanValue
+    }
+
+    private static func addLoginItem() {
+        let script = """
+        tell application "System Events"
+            if not (exists (login items whose name is "\(appName)" or path is "\(appPath)")) then
+                make login item at end with properties {path:"\(appPath)", hidden:false, name:"\(appName)"}
+            end if
+        end tell
+        """
+        if let appleScript = NSAppleScript(source: script) {
+            var error: NSDictionary?
+            appleScript.executeAndReturnError(&error)
+            if let error {
+                NSLog("planofplan: add login item error: \(error)")
+            }
+        }
+    }
+
+    private static func removeLoginItem() {
+        let script = """
+        tell application "System Events"
+            delete (every login item whose name is "\(appName)" or path is "\(appPath)")
+        end tell
+        """
+        if let appleScript = NSAppleScript(source: script) {
+            var error: NSDictionary?
+            appleScript.executeAndReturnError(&error)
+            if let error {
+                NSLog("planofplan: remove login item error: \(error)")
+            }
+        }
+    }
+
+    static func installDaemonLaunchAgent(port: Int) {
+        let plistPath = "\(NSHomeDirectory())/Library/LaunchAgents/\(daemonLabel).plist"
+        let logPath = "\(NSHomeDirectory())/.planofplan/serve.log"
+        let plist = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+          <key>Label</key>
+          <string>\(daemonLabel)</string>
+          <key>ProgramArguments</key>
+          <array>
+            <string>/Applications/planofplan.app/Contents/MacOS/planofplan-daemon</string>
+            <string>serve</string>
+            <string>--port</string>
+            <string>\(port)</string>
+          </array>
+          <key>RunAtLoad</key>
+          <true/>
+          <key>KeepAlive</key>
+          <true/>
+          <key>ThrottleInterval</key>
+          <integer>10</integer>
+          <key>StandardOutPath</key>
+          <string>\(logPath)</string>
+          <key>StandardErrorPath</key>
+          <string>\(logPath)</string>
+        </dict>
+        </plist>
+        """
+        do {
+            let launchAgentsDir = "\(NSHomeDirectory())/Library/LaunchAgents"
+            try FileManager.default.createDirectory(atPath: launchAgentsDir, withIntermediateDirectories: true)
+            try plist.write(toFile: plistPath, atomically: true, encoding: .utf8)
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+            task.arguments = ["bootstrap", "gui/\(getuid())", plistPath]
+            try task.run()
+            task.waitUntilExit()
+        } catch {
+            NSLog("planofplan: failed to install LaunchAgent: \(error)")
+        }
+    }
+
+    static func removeDaemonLaunchAgent() {
+        let plistPath = "\(NSHomeDirectory())/Library/LaunchAgents/\(daemonLabel).plist"
+        try? FileManager.default.removeItem(atPath: plistPath)
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        task.arguments = ["bootout", "gui/\(getuid())/\(daemonLabel)"]
+        try? task.run()
+        task.waitUntilExit()
+    }
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var port = 9288
@@ -813,64 +961,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// 首次启动：若 LaunchAgent 还没装，弹窗问用户要不要开机自启。
+    /// 首次启动：若开机自启还没装，弹窗问用户要不要开机自启。
     /// 用户回答过（包括拒绝）就只问一次，记在 UserDefaults。
     private func offerAutoLaunchIfNeeded() {
-        let plistPath = "\(NSHomeDirectory())/Library/LaunchAgents/local.planofplan.daemon.plist"
-        if FileManager.default.fileExists(atPath: plistPath) { return }
+        if AutoLaunchManager.isEnabled { return }
         if UserDefaults.standard.bool(forKey: "planofplan.autoLaunchOffered") { return }
         UserDefaults.standard.set(true, forKey: "planofplan.autoLaunchOffered")
 
         let alert = NSAlert()
         alert.messageText = "登录时自动启动 planofplan？"
-        alert.informativeText = "开启后崩溃/重启会自动拉起 daemon（launchd 守护）。Dashboard 顶部的「开机自启」开关可随时关闭。"
+        alert.informativeText = "开启后登录时会自动启动菜单栏应用与本地后台服务。菜单栏与 Dashboard 中的「开机自启」开关可随时切换。"
         alert.addButton(withTitle: "开启")
         alert.addButton(withTitle: "暂不")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        installLaunchAgent(plistPath: plistPath)
-    }
-
-    private func installLaunchAgent(plistPath: String) {
-        let logPath = "\(NSHomeDirectory())/.planofplan/serve.log"
-        let plist = """
-        <?xml version="1.0" encoding="UTF-8"?>
-        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-        <plist version="1.0">
-        <dict>
-          <key>Label</key>
-          <string>local.planofplan.daemon</string>
-          <key>ProgramArguments</key>
-          <array>
-            <string>/Applications/planofplan.app/Contents/MacOS/planofplan-daemon</string>
-            <string>serve</string>
-            <string>--port</string>
-            <string>\(port)</string>
-          </array>
-          <key>RunAtLoad</key>
-          <true/>
-          <key>KeepAlive</key>
-          <true/>
-          <key>ThrottleInterval</key>
-          <integer>10</integer>
-          <key>StandardOutPath</key>
-          <string>\(logPath)</string>
-          <key>StandardErrorPath</key>
-          <string>\(logPath)</string>
-        </dict>
-        </plist>
-        """
-        do {
-            let launchAgentsDir = "\(NSHomeDirectory())/Library/LaunchAgents"
-            try FileManager.default.createDirectory(atPath: launchAgentsDir, withIntermediateDirectories: true)
-            try plist.write(toFile: plistPath, atomically: true, encoding: .utf8)
-            let task = Process()
-            task.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-            task.arguments = ["bootstrap", "gui/\(getuid())", plistPath]
-            try task.run()
-            task.waitUntilExit()
-        } catch {
-            NSLog("planofplan: failed to install LaunchAgent: \(error)")
-        }
+        AutoLaunchManager.setEnabled(true, port: port)
+        refreshUISafely()
     }
 
     func applicationWillTerminate(_: Notification) {
@@ -971,6 +1076,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let dashboard = NSMenuItem(title: "打开 Dashboard", action: #selector(openDashboard), keyEquivalent: "o")
         dashboard.target = self
         menu.addItem(dashboard)
+
+        let autoLaunch = NSMenuItem(
+            title: "开机自启",
+            action: #selector(toggleLaunchAtLogin),
+            keyEquivalent: ""
+        )
+        autoLaunch.target = self
+        autoLaunch.state = AutoLaunchManager.isEnabled ? .on : .off
+        menu.addItem(autoLaunch)
 
         let quit = NSMenuItem(title: "退出 planofplan", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
@@ -1638,6 +1752,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openDashboard() {
         NSWorkspace.shared.open(URL(string: "http://127.0.0.1:\(port)")!)
+    }
+
+    @objc private func toggleLaunchAtLogin() {
+        let next = !AutoLaunchManager.isEnabled
+        AutoLaunchManager.setEnabled(next, port: port)
+        refreshUISafely()
     }
 
     @objc private func openFullDiskAccessSettings() {

@@ -1,8 +1,19 @@
-# planofplan:本机 agent 洞察中枢查询技能
+---
+name: planofplan
+description: 本机 Agent 记忆、用量配额、项目上下文透视与 150+ 技能库路由中枢。
+triggers:
+  - 查配额还剩多少
+  - 查最近改动和需求
+  - 跨项目切换透视
+  - 搜寻本机技能
+---
+
+# planofplan: 本机 agent 洞察中枢查询技能
 
 > 给 coding agent 用的 planofplan MCP 工具使用指南。daemon 常驻本机
 > (默认 `http://localhost:9291/mcp`,streamable HTTP)。未接入时:
 > `claude mcp add --transport http planofplan http://localhost:9291/mcp`。
+
 
 ## 什么时候用
 
@@ -15,8 +26,11 @@
 - **需求清单**:"最近提了哪些需求" "哪些还没落" → `requirement_status`
 - **文件动向**:"最近 agent 都在改什么文件" → `recent_edits`
 - **周期回顾**:"这周做了什么、落了多少、各烧多少" → `lineage_report`
+- **查技能能力**:"怎么整理 Obsidian 知识库" "用什么 skill 生成 PPT/画架构图" "找找有没有关于 X 的 skill" → `search_skills`
+- **项目切换透视**:"切换到 X 项目" "了解一下这个项目背景" "这个项目代码索引建了没有" → `inspect_project_context`
 
 ## 惯例与坑
+
 
 1. **自指防护**:你是 coding agent 时,`session_search` 请带上
    `exclude=<你自己的 session id>`——否则你正在进行的会话会混进"历史证据"。

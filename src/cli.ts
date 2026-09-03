@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { join } from 'node:path';
 import { ensureHome, loadConfig } from './config.ts';
-import { openDb, openMemoryDb } from './db.ts';
+import { Store, openDb, openMemoryDb } from './db.ts';
 import { Scheduler, buildOverview, formatResetCountdown, type OverviewPlan } from './core.ts';
 import { createServer } from './server.ts';
 import { readCredential, writeCredential, deleteCredential } from './auth.ts';
@@ -9,7 +9,7 @@ import { refreshKimiBrowserSession } from './adapters/kimi.ts';
 import { KIMI_BROWSERS, type KimiBrowser } from './browser-cookies.ts';
 import { acceptFactoryBrowserCookies } from './factory-session.ts';
 import { readFactoryCliAuth } from './factory-cli-auth.ts';
-import type { Store } from './db.ts';
+
 import type { QuotaWindow } from './types.ts';
 import { buildUsageReport, collectUsageReport } from './usage.ts';
 import { buildSessionList, collectSessionCatalog, searchSessions } from './sessions.ts';
@@ -18,6 +18,7 @@ import { installCommitHook, uninstallCommitHook, prepareCommitMsgPath } from './
 import { existsSync, statSync, renameSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { sessionProject } from './repos.ts';
+import { searchSkills, syncSkillsCatalog } from './skills.ts';
 
 const argv = process.argv.slice(2);
 
@@ -42,6 +43,7 @@ function help(): void {
   planofplan usage [--json] [--provider sl] 全 plan 用量输出
   planofplan tokens [--json] [--days N] [--provider sl] token usage & spend 报表
   planofplan sessions [--json] [--days N] [--provider sl] [--search q] [--refresh] 本地 session 目录
+  planofplan skills [--json] [--search q] [--refresh] 本机 150+ coding agent skills 目录
   planofplan pricing refresh                拉取 LiteLLM 模型价格快照(离线时用内置家族表估算)
   planofplan hook install [--repo 路径]     装 commit trailer 钩子(agent 提交自动声明 session)
   planofplan pricing status                 显示价格快照状态
@@ -493,6 +495,34 @@ function seedDemo(store: Store): void {
   ]);
 }
 
+async function skillsCmd(): Promise<void> {
+  const f = flags();
+  const store = openDb(f.db ?? join(ensureHome(), 'planofplan.db'));
+  if (f.refresh) {
+    const res = syncSkillsCatalog(store);
+    console.log(`Skills 同步完成: 共 ${res.total} 个, 新增/更新 ${res.indexed} 个, 移除 ${res.removed} 个`);
+  }
+
+  const hits = searchSkills(store, f.search ?? '', 30);
+  if (f.json) {
+    console.log(JSON.stringify(hits, null, 2));
+    return;
+  }
+  if (hits.length === 0) {
+    console.log(f.search ? `未找到匹配 "${f.search}" 的 skill。` : '暂无索引的 skill。运行 planofplan skills --refresh 扫描。');
+    return;
+  }
+  console.log(`Skills (${hits.length} 个):`);
+  for (const h of hits) {
+    const desc = h.description.replace(/\s+/g, ' ').slice(0, 90);
+    console.log(`- \x1b[1m${h.name}\x1b[0m: ${desc}`);
+    if (h.triggers && h.triggers.length > 0) {
+      console.log(`  触发场景: \x1b[33m${h.triggers.slice(0, 3).join(', ')}\x1b[0m`);
+    }
+    console.log(`  路径: \x1b[2m${h.path}\x1b[0m`);
+  }
+}
+
 // ── main ────────────────────────────────────────────────────────────
 const cmd = argv[0] ?? 'help';
 
@@ -500,7 +530,11 @@ switch (cmd) {
   case 'serve':
     await serve();
     break;
+  case 'skills':
+    await skillsCmd();
+    break;
   case 'usage':
+
     usage();
     break;
   case 'tokens':

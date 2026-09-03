@@ -77,3 +77,10 @@ fi
 
 echo "Installed $LABEL (port $PORT, log $LOG_DIR/serve.log)"
 launchctl print "gui/$UID_/$LABEL" 2>/dev/null | grep -E '^\s*(state|pid)' || true
+
+# 注册菜单栏 App 到 macOS 登录项，确保开机启动带界面应用
+APP_PATH="/Applications/planofplan.app"
+if [ -d "$APP_PATH" ]; then
+  osascript -e "tell application \"System Events\" to if not (exists (login items whose name is \"planofplan\" or path is \"$APP_PATH\")) then make login item at end with properties {path:\"$APP_PATH\", hidden:false, name:\"planofplan\"}" 2>/dev/null || true
+  echo "Added $APP_PATH to macOS Login Items"
+fi

@@ -620,3 +620,23 @@ export const AUTH_STATUS = {
   INVALID: 'invalid',
   UNKNOWN: 'unknown',
 } as const;
+
+export interface SkillRecord {
+  name: string;
+  path: string;
+  description: string;
+  allowedTools?: string[];
+  triggers?: string[];
+  mtimeMs: number;
+  updatedAt: number;
+}
+
+export interface SkillHit {
+  name: string;
+  path: string;
+  description: string;
+  allowedTools?: string[];
+  triggers?: string[];
+  score?: number;
+}
+
