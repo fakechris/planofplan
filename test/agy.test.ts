@@ -45,4 +45,25 @@ describe('agy adapter 配额解析', () => {
     if (origPath !== undefined) process.env.AGY_PATH = origPath;
     else delete process.env.AGY_PATH;
   });
+
+  test('防弹窗 dummy open 脚本能拦截并记录 URL', async () => {
+    const { existsSync, unlinkSync, readFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const { tmpdir } = await import('node:os');
+    const binDir = join(process.env.HOME ?? '', '.planofplan', 'bin', 'open');
+    expect(existsSync(binDir)).toBe(true);
+
+    const sentinel = join(tmpdir(), `test-sentinel-${Date.now()}.tmp`);
+    try {
+      const proc = Bun.spawn([binDir, 'https://accounts.google.com/test'], {
+        env: { ...process.env, PLANOFPLAN_OPEN_SENTINEL: sentinel },
+      });
+      const code = await proc.exited;
+      expect(code).toBe(0);
+      expect(existsSync(sentinel)).toBe(true);
+      expect(readFileSync(sentinel, 'utf8').trim()).toBe('https://accounts.google.com/test');
+    } finally {
+      try { unlinkSync(sentinel); } catch {}
+    }
+  });
 });

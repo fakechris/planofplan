@@ -15,7 +15,10 @@
  */
 import type { AdapterContext, Credential, PlanAdapter, QuotaWindow } from '../types.ts';
 import { AdapterError } from '../types.ts';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { execSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const USAGE_TIMEOUT_MS = 45_000;  // 实测 agy 启动+查询 ≈18s;15s 会 kill 导致 context canceled
 
@@ -64,15 +67,111 @@ function findAgyBinary(): string | null {
   return null;
 }
 
+/** 缓存系统代理探测结果(1 分钟)。 */
+let cachedProxyEnv: { env: Record<string, string>; expiresAt: number } | null = null;
+
+/** 检测系统代理(优先继承 process.env,兜底读取 macOS scutil --proxy)。 */
+function getProxyEnv(): Record<string, string> {
+  const explicit =
+    process.env.HTTPS_PROXY ??
+    process.env.https_proxy ??
+    process.env.HTTP_PROXY ??
+    process.env.http_proxy ??
+    process.env.ALL_PROXY ??
+    process.env.all_proxy;
+  if (explicit) {
+    const res: Record<string, string> = {};
+    for (const key of ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'NO_PROXY', 'no_proxy']) {
+      if (process.env[key]) res[key] = process.env[key]!;
+    }
+    return res;
+  }
+
+  const now = Date.now();
+  if (cachedProxyEnv && cachedProxyEnv.expiresAt > now) {
+    return cachedProxyEnv.env;
+  }
+
+  const env: Record<string, string> = {};
+  if (process.platform === 'darwin') {
+    try {
+      const out = execSync('/usr/sbin/scutil --proxy', { encoding: 'utf8', timeout: 1500 });
+      const httpEnabled = /HTTPEnable\s*:\s*1/.test(out);
+      const httpsEnabled = /HTTPSEnable\s*:\s*1/.test(out);
+      const socksEnabled = /SOCKSEnable\s*:\s*1/.test(out);
+      const httpHost = out.match(/HTTPProxy\s*:\s*([^\s]+)/)?.[1];
+      const httpPort = out.match(/HTTPPort\s*:\s*(\d+)/)?.[1];
+      const httpsHost = out.match(/HTTPSProxy\s*:\s*([^\s]+)/)?.[1];
+      const httpsPort = out.match(/HTTPSPort\s*:\s*(\d+)/)?.[1];
+      const socksHost = out.match(/SOCKSProxy\s*:\s*([^\s]+)/)?.[1];
+      const socksPort = out.match(/SOCKSPort\s*:\s*(\d+)/)?.[1];
+
+      if (httpEnabled && httpHost && httpPort) {
+        const url = `http://${httpHost}:${httpPort}`;
+        env.HTTP_PROXY = url;
+        env.http_proxy = url;
+      }
+      if (httpsEnabled && httpsHost && httpsPort) {
+        const url = `http://${httpsHost}:${httpsPort}`;
+        env.HTTPS_PROXY = url;
+        env.https_proxy = url;
+      }
+      if (socksEnabled && socksHost && socksPort) {
+        const url = `socks5://${socksHost}:${socksPort}`;
+        env.ALL_PROXY = url;
+        env.all_proxy = url;
+      }
+    } catch {
+      // 静默容错
+    }
+  }
+
+  cachedProxyEnv = { env, expiresAt: now + 60_000 };
+  return env;
+}
+
+/**
+ * 确保本地无头 dummy open 脚本存在。
+ * agy 在静默鉴权超时/失效时会尝试通过 open 唤起默认浏览器走交互 OAuth。
+ * 将 dummy open 脚本置于 PATH 最前端并设置 BROWSER 环境变量:
+ * 1) 彻底阻断弹窗骚扰用户;
+ * 2) 捕获 OAuth 请求并快速中断进程,避免白等 45s 超时。
+ */
+function ensureNoopOpenBin(): string {
+  const binDir = join(process.env.HOME ?? '', '.planofplan', 'bin');
+  const openScript = join(binDir, 'open');
+  if (!existsSync(openScript)) {
+    mkdirSync(binDir, { recursive: true });
+    const scriptContent = [
+      '#!/bin/sh',
+      'if [ -n "$PLANOFPLAN_OPEN_SENTINEL" ]; then',
+      '  echo "$@" > "$PLANOFPLAN_OPEN_SENTINEL"',
+      'fi',
+      'exit 0',
+      '',
+    ].join('\n');
+    writeFileSync(openScript, scriptContent, { mode: 0o755 });
+  }
+  return binDir;
+}
+
 /** 异步执行命令并取 stdout;超时杀进程。 */
 async function execAsync(bin: string, args: string[], timeoutMs: number): Promise<string> {
   // daemon 的 launchd PATH 只有 /usr/bin:/bin — agy 需要更完整的环境
   // 启动子进程(language server 等)。补齐常见路径 + 继承 HOME。
   const home = process.env.HOME ?? '';
-  const env = {
+  const noopBinDir = ensureNoopOpenBin();
+  const proxyEnv = getProxyEnv();
+  const sentinelPath = join(tmpdir(), `pop-agy-sentinel-${process.pid}-${Math.random().toString(36).slice(2)}.tmp`);
+
+  const env: Record<string, string> = {
     ...process.env,
+    ...proxyEnv,
     HOME: home,
+    BROWSER: join(noopBinDir, 'open'),
+    PLANOFPLAN_OPEN_SENTINEL: sentinelPath,
     PATH: [
+      noopBinDir,
       `${home}/.local/bin`,
       `${home}/.bun/bin`,
       '/opt/homebrew/bin',
@@ -80,12 +179,24 @@ async function execAsync(bin: string, args: string[], timeoutMs: number): Promis
       process.env.PATH ?? '',
     ].filter(Boolean).join(':'),
   };
+
   const proc = Bun.spawn([bin, ...args], {
     stdout: 'pipe',
     stderr: 'pipe',
     stdin: 'ignore',
     env,
   });
+
+  const intercepted: { url: string | null } = { url: null };
+  const checkTimer = setInterval(() => {
+    try {
+      if (existsSync(sentinelPath)) {
+        intercepted.url = readFileSync(sentinelPath, 'utf8').trim();
+        proc.kill();
+      }
+    } catch {}
+  }, 200);
+
   const timer = setTimeout(() => proc.kill(), timeoutMs);
   try {
     // 并发读 stdout/stderr:串行读在进程快速退出时会错过 pipe 数据
@@ -94,6 +205,15 @@ async function execAsync(bin: string, args: string[], timeoutMs: number): Promis
       new Response(proc.stderr).text().catch(() => ''),
     ]);
     const code = await proc.exited;
+
+    if (intercepted.url !== null) {
+      const target = intercepted.url ? ` (${intercepted.url.slice(0, 60)}...)` : '';
+      throw new AdapterError(
+        'auth',
+        `agy 鉴权失效并尝试打开浏览器登录${target}，已自动拦截防打扰（请在终端手动运行 agy 重新登录）`,
+      );
+    }
+
     if (code !== 0) {
       // agy 可能把错误打到 stdout(如 auth 错误输出 JSON),两个都带上
       const diag = (stderr || stdout || '').slice(0, 160);
@@ -101,7 +221,9 @@ async function execAsync(bin: string, args: string[], timeoutMs: number): Promis
     }
     return stdout;
   } finally {
+    clearInterval(checkTimer);
     clearTimeout(timer);
+    try { unlinkSync(sentinelPath); } catch {}
   }
 }
 
@@ -125,6 +247,7 @@ export const agyAdapter: PlanAdapter = {
     try {
       raw = await execAsync(bin, ['-p', '/usage', '--output-format', 'json'], USAGE_TIMEOUT_MS);
     } catch (error) {
+      if (error instanceof AdapterError) throw error;
       const msg = error instanceof Error ? error.message : String(error);
       if (msg.includes('auth') || msg.includes('login')) {
         throw new AdapterError('auth', 'agy 未登录（运行 agy 登录 Google 账号）');
