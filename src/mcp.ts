@@ -584,10 +584,18 @@ export function registerMcpRoutes(app: Hono, store: Store, cfg: AppConfig): void
     } catch {
       return c.json(rpcError(null, -32700, 'parse error'), 400);
     }
+    const method = (body as Record<string, unknown>)?.method;
+    const params = (body as Record<string, unknown>)?.params as Record<string, unknown> | undefined;
+    const toolName = params?.name;
+    const callerTag = toolName ? `method=${method} tool=${toolName}` : `method=${method ?? 'unknown'}`;
+    const userAgent = c.req.header('user-agent') ?? 'unknown-client';
+    console.log(`[mcp] ${new Date().toISOString().slice(11, 19)} [${userAgent.slice(0, 30)}] ${callerTag}`);
+
     const response = handleMcpBody(store, cfg, body);
     if (response == null) return c.body(null, 202);
     return c.json(response);
   });
+
   // streamable HTTP 的 GET(SSE 推送)与 DELETE(会话终止)都是可选能力:
   // 无会话状态的只读 server 直接 405,客户端会走 POST 请求/响应
   app.get('/mcp', (c) => c.text('method not allowed: POST JSON-RPC only', 405));

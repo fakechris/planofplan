@@ -25,6 +25,8 @@ import {
   type RepoRef,
 } from './repos.ts';
 import type { SessionRecord, SessionRepo } from './types.ts';
+import { recordsFromOpencodeDb } from './opencode-session.ts';
+import { recordsFromAmpThread } from './amp-session.ts';
 
 export const TOUCH_BYTES = 2 * 1024 * 1024;
 export const ZSTD_MAX_BYTES = 8 * 1024 * 1024;
@@ -34,7 +36,7 @@ export const TRAILER_SESSION = 'Harness-Session';
 export type GitRunner = (args: string[]) => string;
 
 export const defaultGitRunner: GitRunner = (args) =>
-  execFileSync('git', args, { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
+  execFileSync('git', args, { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
 
 export function sourcePathFor(session: SessionRecord): string | null {
   if (!session.sourceFile) return null;
@@ -169,7 +171,7 @@ export function touchReposFromRecords(
 export function parseTrailers(body: string): Array<{ key: string; value: string }> {
   const out: Array<{ key: string; value: string }> = [];
   if (!body) return out;
-  const re = /^(Harness-Session):\s*(.+)$/gim;
+  const re = /^(Harness-Session|Amp-Thread):\s*(.+)$/gim;
   let match: RegExpExecArray | null;
   while ((match = re.exec(body)) !== null) {
     const value = match[2]!.trim();
@@ -267,6 +269,10 @@ export function extractSessionRepos(
     const path = sourcePathFor(session);
     if (path && session.provider === 'zcode' && path.endsWith('.sqlite')) {
       records = recordsFromZcodeDb(path, session.nativeId);
+    } else if (path && session.provider === 'opencode' && path.endsWith('.db')) {
+      records = recordsFromOpencodeDb(path, session.nativeId);
+    } else if (path && session.provider === 'amp' && path.endsWith('.json')) {
+      records = recordsFromAmpThread(path);
     } else if (path && existsSync(path)) {
       records = parseJsonl(readLogText(path));
     } else {

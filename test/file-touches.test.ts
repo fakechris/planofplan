@@ -175,6 +175,9 @@ describe('collectSessionCatalog touch indexing', () => {
       kimiRoot: join(root, 'missing-kimi'),
       droidRoot: join(root, 'missing-factory'),
       zcodeRoot: join(root, 'missing-zcode'),
+      antigravityRoot: join(root, 'missing-antigravity'),
+      opencodeRoot: join(root, 'missing-opencode'),
+      ampRoot: join(root, 'missing-amp'),
     };
   }
 

@@ -404,6 +404,9 @@ describe('usage report', () => {
         grokRoot: join(root, 'grok'),
         dshRoot: join(root, 'dsh'),
         droidRoot: join(root, 'droid'),
+        antigravityRoot: join(root, 'antigravity'),
+        opencodeRoot: join(root, 'opencode'),
+        ampRoot: join(root, 'amp'),
       };
 
       await collectUsageReport(store, options);
@@ -453,6 +456,9 @@ describe('usage report', () => {
         grokRoot: join(root, 'grok'),
         dshRoot: join(root, 'dsh'),
         droidRoot: join(root, 'droid'),
+        antigravityRoot: join(root, 'antigravity'),
+        opencodeRoot: join(root, 'opencode'),
+        ampRoot: join(root, 'amp'),
       };
 
       await collectUsageReport(store, options);

@@ -22,6 +22,8 @@
  *   - repo 之间 yieldEventLoop;单个 repo 最坏阻塞 = timeout(5s),典型 <20ms
  */
 import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import type { Store } from './db.ts';
 import {
   SESSION_GRACE_MS,
@@ -48,6 +50,7 @@ export function boundedGitRunner(timeoutMs = GIT_TIMEOUT_MS): GitRunner {
       encoding: 'utf8',
       maxBuffer: 8 * 1024 * 1024,
       timeout: timeoutMs,
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
     if (result.status !== 0 || result.error) {
       throw new Error(result.error?.message ?? result.stderr?.trim() ?? 'git failed');
@@ -316,6 +319,7 @@ export async function collectSessionCommits(
   for (const session of sessions) {
     for (const repo of session.repos ?? []) {
       if (repo.role === 'commit' || !repo.root) continue;
+      if (options.git === undefined && !existsSync(join(repo.root, '.git'))) continue;
       const group = byRepo.get(repo.url) ?? { repo, sessions: [] };
       if (!group.sessions.some((s) => s.id === session.id)) group.sessions.push(session);
       byRepo.set(repo.url, group);

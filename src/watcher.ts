@@ -18,7 +18,13 @@ export function isRelevantWatchName(name: string): boolean {
     || name.endsWith('.jsonl.zst')
     || name === 'state.json'
     || name === 'summary.json'
-    || name === 'db.sqlite';
+    || name === 'db.sqlite'
+    || name === 'db.sqlite-wal'
+    || name === 'opencode.db'
+    || name === 'opencode.db-wal'
+    || name === 'opencode-next.db'
+    || name === 'opencode-next.db-wal'
+    || (name.startsWith('T-') && name.endsWith('.json'));
 }
 
 export interface FlushScheduler {
@@ -96,7 +102,10 @@ export function startSessionWatcher(
   const scheduler = createFlushScheduler((paths) => {
     const alive = paths.filter((path) => {
       try {
-        return statSync(path).isFile();
+        const s = statSync(path);
+        // SQLite WAL header guard: empty/read-only WAL header is 32 bytes; ignore to prevent loop
+        if (path.endsWith('-wal') && s.size <= 32) return false;
+        return s.isFile();
       } catch {
         return false;
       }

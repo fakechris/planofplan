@@ -77,6 +77,15 @@ GET /api/usage?days=7&provider=codex
 GET /api/usage?days=30&refresh=1
 ```
 
+## Agent 状态 API(桌宠/外设消费)
+
+`GET /api/agent-status` 返回本机 coding agent 的**实时 4 槽状态快照**
+(6 态模型:idle/working/needs-you/review/failed/celebrate,3s TTL 缓存,
+`?disable=amp,agy` 临时禁源,`?force=1` 跳缓存)。扫描 dsh/opencode HTTP、
+claude/droid hooks 文件、codex/kimi/zcode/grok 会话新鲜度、amp/agy 进程,
+归并逻辑与优先级见 [`docs/agent-status-api.md`](docs/agent-status-api.md)。
+桌面宠(`moyu-badge/sender`)是第一个消费方:拉本接口 → BLE 推给设备。
+
 ## MCP（agent 查 planofplan）
 
 daemon 在 `POST http://localhost:<port>/mcp` 提供只读 MCP（streamable HTTP，

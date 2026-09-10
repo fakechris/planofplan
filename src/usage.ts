@@ -44,6 +44,8 @@ export interface CollectUsageOptions extends UsageScanOptions {
   grokRoot?: string;
   dshRoot?: string;
   antigravityRoot?: string;
+  opencodeRoot?: string;
+  ampRoot?: string;
 }
 
 function finiteNumber(value: unknown): number {
