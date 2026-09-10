@@ -271,10 +271,10 @@ function repoOfFactory(): (dir: string) => string | null {
     if (cache.has(dir)) return cache.get(dir) ?? null;
     let repo: string | null = null;
     try {
-      const root = execFileSync('git', ['-C', dir, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', timeout: 4000 }).trim();
+      const root = execFileSync('git', ['-C', dir, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', timeout: 4000, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
       let url: string | null = null;
       try {
-        url = execFileSync('git', ['-C', root, 'config', '--get', 'remote.origin.url'], { encoding: 'utf8', timeout: 4000 }).trim() || null;
+        url = execFileSync('git', ['-C', root, 'config', '--get', 'remote.origin.url'], { encoding: 'utf8', timeout: 4000, stdio: ['ignore', 'pipe', 'pipe'] }).trim() || null;
       } catch {
         /* 无 remote */
       }
@@ -293,7 +293,7 @@ function headOfFactory(): (dir: string) => string | null {
     if (cache.has(dir)) return cache.get(dir) ?? null;
     let sha: string | null = null;
     try {
-      sha = execFileSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 4000 }).trim() || null;
+      sha = execFileSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 4000, stdio: ['ignore', 'pipe', 'pipe'] }).trim() || null;
     } catch {
       sha = null;
     }

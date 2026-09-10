@@ -11,6 +11,8 @@ import { textOf } from './sessions.ts';
 import { sourcePathFor } from './session-repos.ts';
 import { resumeFor } from './resume.ts';
 import { messagesFromAntigravityRecord } from './antigravity-session.ts';
+import { turnsFromOpencodeDb } from './opencode-session.ts';
+import { turnsFromAmpThread } from './amp-session.ts';
 
 const MAX_BYTES = 2 * 1024 * 1024;
 const MAX_TURNS = 160;
@@ -262,6 +264,14 @@ export async function readTranscript(session: SessionRecord): Promise<SessionTra
     const turns = turnsFromZcodeDb(session.sourceFile, session.nativeId);
     return { session, turns: turns.slice(0, MAX_TURNS), truncated: turns.length > MAX_TURNS, resume };
   }
+  if (session.provider === 'opencode' && session.sourceFile && existsSync(session.sourceFile)) {
+    const turns = turnsFromOpencodeDb(session.sourceFile, session.nativeId);
+    return { session, turns: turns.slice(0, MAX_TURNS), truncated: turns.length > MAX_TURNS, resume };
+  }
+  if (session.provider === 'amp' && session.sourceFile && existsSync(session.sourceFile)) {
+    const turns = turnsFromAmpThread(session.sourceFile);
+    return { session, turns: turns.slice(0, MAX_TURNS), truncated: turns.length > MAX_TURNS, resume };
+  }
   const path = sourcePathFor(session);
   if (!path || !existsSync(path)) {
     return { session, turns: [], truncated: false, resume };
@@ -337,7 +347,7 @@ function toolInputText(input: unknown): string {
   }
 }
 
-function textRow(
+export function textRow(
   sessionId: string,
   id: string,
   seq: number,
@@ -356,7 +366,7 @@ function textRow(
   };
 }
 
-function toolRow(
+export function toolRow(
   sessionId: string,
   id: string,
   seq: number,

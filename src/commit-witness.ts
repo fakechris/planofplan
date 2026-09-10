@@ -68,7 +68,7 @@ function unescapeJsonish(raw: string): string {
   ));
 }
 
-function shaFromOutput(text: string): string | null {
+export function shaFromOutput(text: string): string | null {
   const match = COMMIT_OUTPUT_RE.exec(text);
   return match?.[1] ?? null;
 }

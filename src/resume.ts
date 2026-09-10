@@ -43,6 +43,8 @@ const BINS: Record<string, ResumeSpec> = {
   kimi: { kind: 'cli', names: ['kimi', 'kimi-cli'], args: (id) => ['--session', id], label: 'Resume' },
   dsh: { kind: 'url', names: [], args: () => [], label: '打开 DSH' },
   zcode: { kind: 'app', names: [], args: () => [], missingReason: '未找到 ZCode.app', label: '打开 ZCode' },
+  opencode: { kind: 'cli', names: ['opencode', 'opencode2'], args: (id) => ['-s', id], label: '打开 OpenCode' },
+  amp: { kind: 'cli', names: ['amp'], args: (id) => ['threads', 'continue', id], label: '打开 Amp' },
 };
 
 const binCache = new Map<string, string | null>();
@@ -55,6 +57,8 @@ function extraBinDirs(home: string): string[] {
   const dirs = [
     join(home, '.grok', 'bin'),
     join(home, '.kimi-code', 'bin'),
+    join(home, '.opencode', 'bin'),
+    join(home, '.amp', 'bin'),
     join(home, '.local', 'bin'),
     join(home, '.bun', 'bin'),
     join(home, 'bin'),

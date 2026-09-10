@@ -27,6 +27,7 @@ import { getStartupSettings, setLaunchOnStartup } from './startup.ts';
 import { startSessionWatcher } from './watcher.ts';
 import { registerMcpRoutes } from './mcp.ts';
 import { buildLineageReport } from './lineage-report.ts';
+import { getAgentStatus } from './agent-status.ts';
 
 // In dev (bun src/cli.ts), import.meta.dir points at src/ and ../web = repo/web.
 // In a bun build --compile binary, import.meta.dir is a virtual $bunfs/root path
@@ -142,6 +143,14 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
 
   app.get('/api/build-info', (c) => {
     return c.json(getBuildInfo());
+  });
+
+  // 实时 coding-agent 状态快照(桌宠等外设消费):4 槽 6 态模型,TTL 3s 缓存。
+  // 机制与语义文档:docs/agent-status-api.md
+  app.get('/api/agent-status', async (c) => {
+    const disabled = c.req.query('disable') ?? '';
+    const snap = await getAgentStatus({ disabled, force: c.req.query('force') === '1' });
+    return c.json(snap);
   });
 
   // SSE:dashboard 常驻订阅,索引开始/完成实时推送;15s ping 防中间层掐空闲连接。

@@ -222,6 +222,9 @@ describe('session catalog extractors', () => {
         kimiRoot: join(root, 'missing-kimi'),
         droidRoot: join(root, 'missing-factory'),
         zcodeRoot: join(root, 'missing-zcode'),
+        antigravityRoot: join(root, 'missing-antigravity'),
+        opencodeRoot: join(root, 'missing-opencode'),
+        ampRoot: join(root, 'missing-amp'),
       });
       expect(count).toBeGreaterThanOrEqual(4);
       const claude = store.getSession(`claude:${claudeId}`);
@@ -312,6 +315,9 @@ describe('claude subagent discovery', () => {
         kimiRoot: join(root, 'm4'),
         droidRoot: join(root, 'm5'),
         zcodeRoot: join(root, 'm6'),
+        antigravityRoot: join(root, 'm7'),
+        opencodeRoot: join(root, 'm8'),
+        ampRoot: join(root, 'm9'),
       });
       const row = store.getSession('claude:agent-a3192a0f');
       expect(row).not.toBeNull();

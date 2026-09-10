@@ -42,6 +42,20 @@ import { loadConfig } from './config.ts';
 import { materializePlanFiles, materializeProgressNotes, materializeTodoSnapshots } from './plans.ts';
 import type { SessionCommit, SessionIndexState, SessionList, SessionRecord, SessionRepo } from './types.ts';
 import { extractAntigravitySession, antigravityTranscriptPath } from './antigravity-session.ts';
+import {
+  extractOpencodeDb,
+  messagesFromOpencodeDb,
+  touchesFromOpencodeDb,
+  commitWitnessesFromOpencodeDb,
+  recordsFromOpencodeDb,
+} from './opencode-session.ts';
+import {
+  extractAmpThread,
+  messagesFromAmpThread,
+  touchesFromAmpThread,
+  commitWitnessesFromAmpThread,
+  recordsFromAmpThread,
+} from './amp-session.ts';
 
 /** Subset of usage collect options — kept here to avoid a usage.ts cycle. */
 export interface SessionCollectOptions {
@@ -55,6 +69,8 @@ export interface SessionCollectOptions {
   grokRoot?: string;
   dshRoot?: string;
   antigravityRoot?: string;
+  opencodeRoot?: string;
+  ampRoot?: string;
   /** 消息/touch/水位保留天数(目录行永久保留);0 = 关闭清理。默认取 PLANOFPLAN_MESSAGE_RETENTION_DAYS 或 60。 */
   messageRetentionDays?: number;
 }
@@ -82,7 +98,7 @@ const USAGE_PROVIDER_ALIAS: Record<string, string> = {
   'kimi-cli': 'kimi',
 };
 
-export const CATALOG_PROVIDERS = ['claude', 'codex', 'grok', 'dsh', 'kimi', 'zcode', 'factory', 'antigravity'] as const;
+export const CATALOG_PROVIDERS = ['claude', 'codex', 'grok', 'dsh', 'kimi', 'zcode', 'factory', 'antigravity', 'opencode', 'amp'] as const;
 export type CatalogProvider = (typeof CATALOG_PROVIDERS)[number];
 
 export function sessionKey(provider: string, nativeId: string): string {
@@ -114,10 +130,12 @@ export function attachGit(session: SessionRecord): SessionRecord {
     return { ...session, gitRoot: session.gitRoot ?? null, gitUrl: session.gitUrl ?? null, gitName: session.gitName ?? null };
   }
   const repo = repoRefOf(session.cwd);
-  if (!repo) {
-    return { ...session, gitRoot: null, gitUrl: null, gitName: null };
-  }
-  return { ...session, gitRoot: repo.root, gitUrl: repo.url, gitName: repo.name };
+  return {
+    ...session,
+    gitRoot: repo?.root ?? session.gitRoot ?? null,
+    gitUrl: repo?.url ?? session.gitUrl ?? null,
+    gitName: repo?.name ?? session.gitName ?? null,
+  };
 }
 
 export function searchSessions(sessions: SessionRecord[], query: string): SessionRecord[] {
@@ -562,6 +580,11 @@ export function extractSessionFile(provider: string, path: string, mtimeMs: numb
 
 export function extractSessionRecords(provider: string, path: string, mtimeMs: number): SessionRecord[] {
   if (provider === 'zcode') return extractZcodeDb(path, mtimeMs);
+  if (provider === 'opencode') return extractOpencodeDb(path, mtimeMs);
+  if (provider === 'amp') {
+    const row = extractAmpThread(path, mtimeMs);
+    return row ? [row] : [];
+  }
   if (provider === 'antigravity') {
     const transcript = antigravityTranscriptPath(path, dirname(path));
     const row = extractAntigravitySession(path, transcript, mtimeMs);
@@ -636,6 +659,21 @@ export function discoverSessionFiles(options: SessionCollectOptions, since: numb
       })(),
     },
     {
+      provider: 'opencode',
+      files: (() => {
+        const root = options.opencodeRoot ?? process.env.OPENCODE_HOME ?? join(home, '.local', 'share', 'opencode');
+        return [join(root, 'opencode.db'), join(root, 'opencode-next.db')].filter((path) => existsSync(path));
+      })(),
+    },
+    {
+      provider: 'amp',
+      files: walkFiles(
+        options.ampRoot ?? process.env.AMP_HOME ?? join(home, '.local', 'share', 'amp', 'threads'),
+        since,
+        (name) => name.startsWith('T-') && name.endsWith('.json'),
+      ),
+    },
+    {
       provider: 'antigravity',
       files: walkFiles(
         options.antigravityRoot ?? process.env.ANTIGRAVITY_HOME ?? join(home, '.gemini', 'antigravity', 'conversations'),
@@ -670,6 +708,9 @@ export function sessionWatchRoots(): string[] {
     process.env.KIMI_CODE_HOME ? join(process.env.KIMI_CODE_HOME, 'sessions') : join(home, '.kimi-code', 'sessions'),
     join(home, '.factory', 'sessions'),
     process.env.ZCODE_HOME ?? join(home, '.zcode', 'cli'),
+    process.env.ANTIGRAVITY_HOME ?? join(home, '.gemini', 'antigravity', 'conversations'),
+    process.env.OPENCODE_HOME ?? join(home, '.local', 'share', 'opencode'),
+    process.env.AMP_HOME ?? join(home, '.local', 'share', 'amp', 'threads'),
   ])];
 }
 
@@ -1013,15 +1054,58 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
     } catch {
       /* 正文文件不存在(如 kimi 尚无 wire.jsonl):只落目录元数据 */
     }
+    let compositeMtimeMs = readMtimeMs;
+    let compositeSize = readSize;
+    if (file.provider === 'opencode' || file.provider === 'zcode') {
+      try {
+        const walStat = statSync(`${readPath}-wal`);
+        if (walStat.size > 32) {
+          compositeMtimeMs = Math.max(compositeMtimeMs, walStat.mtimeMs);
+          compositeSize += walStat.size;
+        }
+      } catch {
+        /* no wal */
+      }
+    }
     const state = file.provider === 'zcode' ? null : store.getSessionIndexState(readPath);
     // mtime 同毫秒可能撞车（测试和快速重写都撞过），新鲜度必须 mtime + size 双等
     const indexFresh = state != null
       && state.parserVersion === MESSAGE_PARSER_VERSION
-      && state.mtimeMs >= readMtimeMs
-      && state.size === readSize
-      && readSize > 0;
-    if (file.provider !== 'zcode' && existingRows && latestSeen >= file.mtimeMs && indexFresh) {
+      && state.mtimeMs >= compositeMtimeMs
+      && state.size === compositeSize
+      && compositeSize > 0;
+    if (file.provider !== 'zcode' && existingRows && latestSeen >= compositeMtimeMs && indexFresh) {
       rows.push(...existingRows);
+      continue;
+    }
+    if (file.provider === 'opencode') {
+      scanned += 1;
+      const dbRows = extractSessionRecords(file.provider, file.path, file.mtimeMs);
+      store.withTransaction(() => {
+        for (const row of dbRows) {
+          if (tombstones.ids.has(row.id)) continue;
+          const withWork = attachGit(row);
+          try {
+            store.upsertSessionMessages(messagesFromOpencodeDb(file.path, row.nativeId, row.id));
+            store.upsertSessionTouches(touchesFromOpencodeDb(file.path, row.nativeId, row.id, row.cwd));
+            store.upsertSessionCommitWitnesses(commitWitnessesFromOpencodeDb(file.path, row.nativeId, row.id));
+          } catch {
+            /* ignore single session error */
+          }
+          const repos = extractSessionRepos(withWork, { records: recordsFromOpencodeDb(file.path, row.nativeId) });
+          rows.push(attachRepos(withWork, repos));
+        }
+        store.upsertSessionIndexState({
+          path: readPath,
+          mtimeMs: compositeMtimeMs,
+          size: compositeSize,
+          parsedBytes: compositeSize,
+          lines: dbRows.length,
+          parserVersion: MESSAGE_PARSER_VERSION,
+        });
+      });
+      processed += 1;
+      if (processed % CATALOG_YIELD_BATCH === 0) await yieldEventLoop();
       continue;
     }
     scanned += 1;
@@ -1038,6 +1122,29 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
           /* 单个 session 的消息抽取失败不拖垮目录 */
         }
         repos = extractSessionRepos(withWork);
+      } else if (file.provider === 'amp') {
+        if (!indexFresh && readSize > 0) {
+          store.withTransaction(() => {
+            store.deleteSessionMessages(row.id);
+            store.deleteSessionTouches(row.id);
+            try {
+              store.upsertSessionMessages(messagesFromAmpThread(file.path, row.nativeId, row.id));
+              store.upsertSessionTouches(touchesFromAmpThread(file.path, row.nativeId, row.id, row.cwd));
+              store.upsertSessionCommitWitnesses(commitWitnessesFromAmpThread(file.path, row.nativeId, row.id));
+            } catch {
+              /* ignore */
+            }
+            store.upsertSessionIndexState({
+              path: readPath,
+              mtimeMs: readMtimeMs,
+              size: readSize,
+              parsedBytes: readSize,
+              lines: 1,
+              parserVersion: MESSAGE_PARSER_VERSION,
+            });
+          });
+        }
+        repos = extractSessionRepos(withWork, { records: recordsFromAmpThread(file.path) });
       } else if (indexFresh) {
         // 文件级水位新鲜但目录行没命中(典型:codex 同一 session 续写出多个
         // rollout 文件,source_file 只能指一个)。消息已按水位索引过,目录行
@@ -1171,7 +1278,7 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
     /* todo snapshot materialization is best-effort */
   }
   try {
-    materializePlanFiles(store);
+    materializePlanFiles(store, { spotlight: false });
   } catch {
     /* plan file materialization is best-effort */
   }
