@@ -1060,6 +1060,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         browser.submenu = browserMenu
         menu.addItem(browser)
 
+        // 一键复制 MCP 接入配置(sourcebot 接入漏斗实践):三种主流客户端的
+        // 配置片段 + 通用端点,端口动态取 configuredPort(),不硬编码
+        let mcp = NSMenuItem(title: "接入 Agent (MCP)", action: nil, keyEquivalent: "")
+        let mcpMenu = NSMenu()
+        for (label, text) in mcpConfigSnippets() {
+            let item = NSMenuItem(title: label, action: #selector(copyMcpConfig(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = McpCopyPayload(label: label, text: text)
+            item.toolTip = String(text.prefix(200))
+            mcpMenu.addItem(item)
+        }
+        mcp.submenu = mcpMenu
+        menu.addItem(mcp)
+
         if safariPermissionState == .denied {
             let permission = NSMenuItem(
                 title: "自动申请 Safari 完全磁盘访问权限…",
@@ -1769,6 +1783,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSPasteboard.general.setString(buildMetadata.commitSHA, forType: .string)
     }
 
+    /** 当前部署的 MCP 端点(端口来自 Bundle Resources/port)。 */
+    private func mcpEndpoint() -> String {
+        "http://localhost:\(port)/mcp"
+    }
+
+    /** 各客户端的接入配置片段:标题 → 待复制文本。 */
+    private func mcpConfigSnippets() -> [(String, String)] {
+        let endpoint = mcpEndpoint()
+        return [
+            ("复制 Claude Code 命令", "claude mcp add --transport http planofplan \(endpoint)"),
+            ("复制 Cursor mcp.json 片段", "{\"mcpServers\":{\"planofplan\":{\"type\":\"http\",\"url\":\"\(endpoint)\"}}}"),
+            ("复制 Codex config.toml 片段", "[mcp_servers.planofplan]\nurl = \"\(endpoint)\""),
+            ("复制 MCP 端点 URL", endpoint),
+        ]
+    }
+
+    @objc private func copyMcpConfig(_ sender: NSMenuItem) {
+        guard let payload = sender.representedObject as? McpCopyPayload else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(payload.text, forType: .string)
+        sender.title = "✓ 已复制"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak sender] in
+            sender?.title = payload.label
+        }
+    }
+
     @objc private func quit() {
         NSApplication.shared.terminate(nil)
     }
@@ -1777,6 +1817,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct BrowserSelection {
     let planSlug: String
     let browser: String
+}
+
+/// 「接入 Agent (MCP)」子菜单的复制载荷:label 用于复制成功后恢复标题。
+struct McpCopyPayload {
+    let label: String
+    let text: String
 }
 
 enum BrowserSessionError: LocalizedError {
