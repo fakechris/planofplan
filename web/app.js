@@ -275,6 +275,15 @@ function escapeHtml(s) {
   })[ch]);
 }
 
+/** 限流冷却剩余时间的紧凑文案（INV-466：限流是预期态不是故障）。 */
+function cooldownText(untilMs) {
+  const sec = Math.max(0, Math.round((untilMs - Date.now()) / 1000));
+  if (sec < 60) return `${sec} 秒`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min} 分 ${sec % 60} 秒`;
+  return `${Math.floor(min / 60)} 小时 ${min % 60} 分`;
+}
+
 async function request(path, options = {}) {
   const res = await fetch(path, {
     ...options,
@@ -2580,6 +2589,8 @@ function renderPlan(p, now) {
         </div>
         </div>
       </dialog>
+      ${p.cooldownUntil && p.cooldownUntil > Date.now()
+        ? `<div class="error-line cooldown-line">⏸ 限流冷却中，约 ${cooldownText(p.cooldownUntil)} 后自动恢复</div>` : ''}
       ${p.lastError ? `<div class="error-line">${escapeHtml(p.lastError)}</div>` : ''}
     </div>
   `;
@@ -3356,6 +3367,62 @@ document.getElementById('saveLlmBtn')?.addEventListener('click', async () => {
     void refreshSettings();
   } catch (error) { result().textContent = `失败:${error.message}`; }
 });
+
+// ── 接入 Agent (MCP)：复制按钮 + 一键安装 deeplink（INV-467）────────
+// 端点用 location.host 动态拼——daemon 自己就是 web 宿主,端口天然正确。
+function mcpSnippets() {
+  const endpoint = `http://${location.host}/mcp`;
+  return {
+    endpoint,
+    claude: `claude mcp add --transport http planofplan ${endpoint}`,
+    cursor: JSON.stringify({ mcpServers: { planofplan: { type: 'http', url: endpoint } } }),
+    codex: `[mcp_servers.planofplan]\nurl = "${endpoint}"`,
+    url: endpoint,
+  };
+}
+
+function bindMcpSection() {
+  const snippets = mcpSnippets();
+  const hint = document.getElementById('mcpCopyHint');
+  const endpointHint = document.getElementById('mcpEndpointHint');
+  if (endpointHint) endpointHint.textContent = snippets.endpoint;
+
+  const flash = (button, label) => {
+    const original = button.textContent;
+    button.textContent = label;
+    button.disabled = true;
+    setTimeout(() => { button.textContent = original; button.disabled = false; }, 1400);
+  };
+
+  document.querySelectorAll('[data-mcp-copy]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const kind = button.dataset.mcpCopy;
+      const text = snippets[kind] ?? snippets.url;
+      try {
+        await navigator.clipboard.writeText(text);
+        flash(button, '✓ 已复制');
+        if (hint) hint.textContent = '已复制到剪贴板,粘贴到对应客户端配置即可';
+      } catch {
+        // 非 https/老浏览器的 clipboard 降级:弹原生 prompt 让用户手动复制
+        window.prompt('复制以下配置:', text);
+      }
+    });
+  });
+
+  document.querySelectorAll('[data-mcp-deeplink]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const endpoint = encodeURIComponent(snippets.endpoint);
+      const link = button.dataset.mcpDeeplink === 'cursor'
+        // Cursor: anysphere deeplink,name+url 直装(sourcebot clients.ts 同款)
+        ? `cursor://anysphere.cursor-deeplink/mcp/install?name=planofplan&url=${endpoint}`
+        // VS Code: vscode:mcp/install 携带 urlencoded 配置 JSON
+        : `vscode:mcp/install?${encodeURIComponent(JSON.stringify({ name: 'planofplan', server: { type: 'http', url: snippets.endpoint } }))}`;
+      window.location.href = link;
+      if (hint) hint.textContent = '已请求唤起客户端,请在客户端弹窗中确认安装';
+    });
+  });
+}
+bindMcpSection();
 
 window.addEventListener('hashchange', () => applyRoute());
 // 冷启动走路由器:支持 #tab/id 深链直接打开实体

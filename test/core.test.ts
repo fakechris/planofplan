@@ -342,3 +342,18 @@ describe('Scheduler 限流感知退避', () => {
     }
   });
 });
+
+describe('Overview cooldownUntil 透传', () => {
+  test('paused_until 在未来时暴露为 cooldownUntil,过期或无值为 null', () => {
+    const now = Date.now();
+    const store = openMemoryDb();
+    const plan = DEFAULT_PLANS.find((item) => item.slug === 'kimi')!;
+    store.syncPlan(plan);
+    store.setState('kimi', { consecutive_failures: 1, paused_until: now + 300_000, last_error: '限流' });
+    const cooling = buildOverview(store, [plan], now).plans[0]!;
+    expect(cooling.cooldownUntil).toBe(now + 300_000);
+    store.setState('kimi', { paused_until: now - 1000 });
+    const expired = buildOverview(store, [plan], now).plans[0]!;
+    expect(expired.cooldownUntil).toBeNull();
+  });
+});

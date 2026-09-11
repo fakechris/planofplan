@@ -21,7 +21,15 @@ function loadAll(): Record<string, StoredCredential> {
   }
 }
 
-export function readCredential(id: string): StoredCredential | null {
+export function readCredential(id: string, env: NodeJS.ProcessEnv = process.env): StoredCredential | null {
+  // `env:VAR_NAME` 前缀:从环境变量读(launchd EnvironmentVariables 注入,
+  // 磁盘零明文;sourcebot {"token":{"env":..}} 同思路)。所有 adapter 与
+  // LLM 层都经此漏斗,一处生效。
+  if (id.startsWith('env:')) {
+    const name = id.slice(4).trim();
+    const value = name ? env[name]?.trim() : '';
+    return value ? { kind: 'bearer', value } : null;
+  }
   return loadAll()[id] ?? null;
 }
 

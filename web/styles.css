@@ -807,3 +807,7 @@ select:focus, input:focus { border-color: var(--accent-2); box-shadow: 0 0 0 2px
 /* settings plan 行的状态芯片:启用/凭据/抓取三组 */
 .settings-cred-on { color: var(--success, #2f9e63); }
 .settings-cred-bad { color: var(--danger, #e5484d); }
+
+/* ── 限流冷却(INV-466)与 MCP 接入区(INV-467)────────────────────── */
+.cooldown-line { color: var(--warn, #b8860b); }
+.mcp-copy-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }

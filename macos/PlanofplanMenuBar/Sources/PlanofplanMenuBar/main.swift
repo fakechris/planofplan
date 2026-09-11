@@ -21,6 +21,8 @@ struct Plan: Decodable {
     let browserSupported: Bool?
     /// 上次本地 Claude Code 用 `claude-fable-5` 的 epoch ms；null/缺失表示从未用过。
     let fableLastUsedAt: Double?
+    /// 限流冷却截止 epoch ms；null/缺失=不在冷却（INV-466：限流是预期态不是故障）。
+    let cooldownUntil: Double?
 }
 
 struct Window: Decodable {
@@ -354,6 +356,15 @@ final class PanelView: NSView {
 
         if let label = PanelView.fableIdleLabel(for: plan, nowMs: Date().timeIntervalSince1970 * 1000) {
             drawText("⚠ fable-5 空闲 \(label)", at: NSPoint(x: contentLeft, y: y),
+                     font: .systemFont(ofSize: 11, weight: .semibold), color: warnColor)
+            y -= 16
+        }
+
+        if let cooldown = plan.cooldownUntil,
+           cooldown > Date().timeIntervalSince1970 * 1000 {
+            let remainSec = Int((cooldown - Date().timeIntervalSince1970 * 1000) / 1000)
+            let remain = remainSec >= 60 ? "\(remainSec / 60) 分 \(remainSec % 60) 秒" : "\(remainSec) 秒"
+            drawText("⏸ 限流冷却中 \(remain)", at: NSPoint(x: contentLeft, y: y),
                      font: .systemFont(ofSize: 11, weight: .semibold), color: warnColor)
             y -= 16
         }
