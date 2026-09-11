@@ -251,6 +251,21 @@
           </div>
           <div class="muted" id="settingsLlmHint"></div>
         </div>
+        <div class="session-attrs">
+          <h3>接入 Agent (MCP)</h3>
+          <p class="settings-copy">把 planofplan 的只读洞察（配额/谱系/会话深读）接入任意 MCP 客户端。端点：<code id="mcpEndpointHint"></code></p>
+          <div class="mcp-copy-list">
+            <button type="button" class="secondary-btn" data-mcp-copy="claude">复制 Claude Code 命令</button>
+            <button type="button" class="secondary-btn" data-mcp-copy="cursor">复制 Cursor mcp.json 片段</button>
+            <button type="button" class="secondary-btn" data-mcp-copy="codex">复制 Codex config.toml 片段</button>
+            <button type="button" class="secondary-btn" data-mcp-copy="url">复制 MCP 端点 URL</button>
+          </div>
+          <div class="handoff-actions" style="margin-top:8px">
+            <button type="button" class="secondary-btn" data-mcp-deeplink="cursor">⚡ 在 Cursor 中安装</button>
+            <button type="button" class="secondary-btn" data-mcp-deeplink="vscode">⚡ 在 VS Code 中安装</button>
+          </div>
+          <div class="muted" id="mcpCopyHint"></div>
+        </div>
       </div>
     </div>
   </section>
