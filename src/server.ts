@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { streamSSE, type SSEStreamingApi } from 'hono/streaming';
-import { dirname, join, resolve, isAbsolute } from 'node:path';
+import { dirname, resolve, isAbsolute } from 'node:path';
 import { existsSync } from 'node:fs';
 import type { AppConfig } from './config.ts';
 import type { Store } from './db.ts';
@@ -28,11 +28,13 @@ import { startSessionWatcher } from './watcher.ts';
 import { registerMcpRoutes } from './mcp.ts';
 import { buildLineageReport } from './lineage-report.ts';
 import { getAgentStatus } from './agent-status.ts';
+import { childProcessArgs } from './spawn.ts';
 
 // In dev (bun src/cli.ts), import.meta.dir points at src/ and ../web = repo/web.
-// In a bun build --compile binary, import.meta.dir is a virtual $bunfs/root path
-// that has no on-disk web/ sibling; fall back to the executable's real location
-// (Contents/MacOS/planofplan-daemon -> Contents/web).
+// In a bun build --compile binary, import.meta.dir resolves to the executable's
+// real directory (newer bun) or a virtual $bunfs path (older bun) — either way
+// the existsSync candidates pick the web/ that actually ships next to the
+// binary (Contents/MacOS/planofplan-daemon -> Contents/web).
 const WEB_DIR = (() => {
   const candidates = [
     resolve(import.meta.dir, '../web'),
@@ -41,17 +43,6 @@ const WEB_DIR = (() => {
   return candidates.find((dir) => existsSync(dir)) ?? candidates[0];
 })();
 
-
-/**
- * 构造扫描子进程参数。解释模式(execPath=bun)需要显式脚本路径;编译二进制
- * 的 process.argv 自带 $bunfs 入口占位,再传路径会把路径当命令,子进程直接
- * 打印 help 退出——2026-08-29 生产实测踩过:spawn 扫描全空转,归因/实时
- * 索引静默失效。stderr 一律 inherit:子进程本该安静,有输出即异常。
- */
-function childProcessArgs(cliArgs: string[]): string[] {
-  const compiled = import.meta.dir.startsWith('$bunfs');
-  return [process.execPath, ...(compiled ? [] : [join(import.meta.dir, 'cli.ts')]), ...cliArgs];
-}
 
 export interface ServerOptions {
   /** true 时启动文件监听,变更自动触发 session 索引(demo 模式传 false)。 */

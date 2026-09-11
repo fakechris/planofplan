@@ -19,6 +19,7 @@ import { existsSync, statSync, renameSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { sessionProject } from './repos.ts';
 import { searchSkills, syncSkillsCatalog } from './skills.ts';
+import { childProcessArgs } from './spawn.ts';
 
 const argv = process.argv.slice(2);
 
@@ -260,12 +261,9 @@ async function serve(): Promise<void> {
     // 启动扫描走子进程(与 watcher spawn 路径一致):进程内的 collectSessionCatalog
     // 含大量同步 git/zstd/readFileSync 调用,串行累计分钟级阻塞事件循环——
     // 实测导致 daemon 启动后数分钟 API 无响应(含 /api/build-info)。
-    const scanArgs = [process.execPath];
-    if (!import.meta.dir.startsWith('$bunfs')) {
-      scanArgs.push(join(import.meta.dir, 'cli.ts'));
-    }
-    scanArgs.push('sessions', '--refresh', '--days', '90');
-    void Bun.spawn(scanArgs, { stdout: 'ignore', stderr: 'inherit' })
+    // childProcessArgs 统一处理解释/编译两种形态的 argv(编译态判定失效会
+    // 让扫描子进程秒退且 exit 0,数据静默停更)。
+    void Bun.spawn(childProcessArgs(['sessions', '--refresh', '--days', '90']), { stdout: 'ignore', stderr: 'inherit' })
       .exited
       .then((code) => {
         if (code === 0) console.log('[sessions] startup scan completed (subprocess)');
@@ -273,12 +271,7 @@ async function serve(): Promise<void> {
       });
 
     // usage 启动扫描同样走子进程(同步 zstd 解压会阻塞事件循环)
-    const usageArgs = [process.execPath];
-    if (!import.meta.dir.startsWith('$bunfs')) {
-      usageArgs.push(join(import.meta.dir, 'cli.ts'));
-    }
-    usageArgs.push('tokens', '--days', '3', '--no-official');
-    void Bun.spawn(usageArgs, { stdout: 'ignore', stderr: 'inherit' })
+    void Bun.spawn(childProcessArgs(['tokens', '--days', '3', '--no-official']), { stdout: 'ignore', stderr: 'inherit' })
       .exited
       .then((code) => {
         if (code !== 0) console.error(`[usage] startup scan exit ${code}`);
