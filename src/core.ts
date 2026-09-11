@@ -3,6 +3,7 @@ import type { Store } from './db.ts';
 import { getAdapter } from './adapters/index.ts';
 import type { AdapterContext, PlanConfig, QuotaWindow } from './types.ts';
 import { AdapterError, AUTH_STATUS } from './types.ts';
+import { redactSecrets } from './redact.ts';
 import { annotateWindowsWithTier, getTier, isTierPricingEnabled, planWantsTierPricing, type TierState } from './tier.ts';
 
 /** 指数退避：1min 起步，封顶 30min */
@@ -78,6 +79,9 @@ export interface OverviewPlan {
   tier?: TierState | null;
   /** 上次在本地 Claude Code 下使用 `claude-fable-5` 的 epoch ms；null 表示从未用过。 */
   fableLastUsedAt: number | null;
+  /** 限流冷却截止(epoch ms,来自 paused_until);null=不在冷却。UI 据此显示
+   * 「冷却中」而非故障——限流是预期态不是错误(INV-460/466)。 */
+  cooldownUntil: number | null;
 }
 
 export interface Overview {
@@ -195,6 +199,7 @@ function buildPlanOverview(store: Store, plan: PlanConfig, now: number): Overvie
     credentialHint: adapter?.credentialHint ?? null,
     tier,
     fableLastUsedAt: plan.adapter === 'claude' ? store.lastModelUsed('claude', 'claude-fable-5') : null,
+    cooldownUntil: state?.paused_until != null && state.paused_until > now ? state.paused_until : null,
   };
 }
 
@@ -292,7 +297,8 @@ export class Scheduler {
     const ctx: AdapterContext = {
       plan,
       now: () => Date.now(),
-      log: (msg) => console.log(`[${plan.slug}] ${msg}`),
+      // adapter 日志单一漏斗:落盘前脱敏(token/key/cookie 值不进 serve.log)
+      log: (msg) => console.log(`[${plan.slug}] ${redactSecrets(msg)}`),
     };
 
     this.store.setState(slug, { last_attempt_at: now });
