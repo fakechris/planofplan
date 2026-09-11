@@ -173,9 +173,13 @@ export function normalizeMiniMax(raw: unknown, now: number): { windows: QuotaWin
   for (const item of modelRemains) {
     if (item == null || typeof item !== 'object') continue;
     const modelName = typeof item.model_name === 'string' ? item.model_name : undefined;
+    // 车道 window slug 必须彼此不同:latestByPlan 对 rolling_5h/weekly 等
+    // 标准窗口名按 window 单独分区去重,video 车道若复用标准名会把主车道
+    // 顶掉(实测:主 5H 车道被 视频·5H 覆盖,卡片上主额度消失)。
+    const isVideo = modelName === 'video';
     // 5h 区间车道（legacy 主窗口）
     pushLane(lanes, {
-      window: 'rolling_5h',
+      window: isVideo ? 'video_rolling_5h' : 'rolling_5h',
       label: '5H',
       modelName,
       total: num(item.current_interval_total_count),
@@ -193,7 +197,7 @@ export function normalizeMiniMax(raw: unknown, now: number): { windows: QuotaWin
     const weeklyTotal = num(item.current_weekly_total_count);
     if (weeklyTotal != null && weeklyTotal > 0) {
       pushLane(lanes, {
-        window: 'weekly',
+        window: isVideo ? 'video_weekly' : 'weekly',
         label: 'Week',
         modelName,
         total: weeklyTotal,
@@ -206,7 +210,7 @@ export function normalizeMiniMax(raw: unknown, now: number): { windows: QuotaWin
       }, now);
     } else if (num(item.weekly_end_time) != null) {
       pushLane(lanes, {
-        window: 'weekly_unlimited',
+        window: isVideo ? 'video_weekly_unlimited' : 'weekly_unlimited',
         label: 'Week',
         modelName,
         total: null,

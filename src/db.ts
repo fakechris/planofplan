@@ -1437,14 +1437,17 @@ export class Store {
    * 指定 provider/model 最近一次在本地会话里被使用的 epoch ms；null 表示从未用过。
    * 走 idx_usage_records_provider_model(provider, model, timestamp)，单 MAX 查询。
    */
-  lastModelUsed(provider: string, model: string): number | null {
+  /** 模型家族前缀匹配（如 'claude-fable' 覆盖 claude-fable-5 / claude-fable-5-1 等版本演进）。 */
+  lastModelUsed(provider: string, modelPrefix: string): number | null {
+    // LIKE 通配符转义，前缀按字面量匹配
+    const escaped = modelPrefix.replace(/[\\%_]/g, (ch) => `\\${ch}`);
     const row = this.db
       .query(
         `SELECT MAX(timestamp) AS last
          FROM usage_records
-         WHERE provider = ? AND model = ?`,
+         WHERE provider = ? AND model LIKE ? ESCAPE '\\'`,
       )
-      .get(provider, model) as { last: number | null } | undefined;
+      .get(provider, `${escaped}%`) as { last: number | null } | undefined;
     return row?.last ?? null;
   }
 

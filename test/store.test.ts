@@ -164,4 +164,54 @@ describe('Store', () => {
     expect(deleted).toBe(1);
     expect(store.latestByPlan('minimax')).toHaveLength(1);
   });
+
+  test('MiniMax 主车道与 video 车道共存（同批 4 车道不被分区去重吞掉）', () => {
+    const store = openMemoryDb();
+    store.syncPlan(plan);
+    const t0 = 1_770_000_000_000;
+    // normalizeMiniMax 的真实输出形态：主 5H 纯百分比 + video 计数车道 + 周不限量
+    store.insertWindows('minimax', [
+      { ...win(1, t0), window: 'rolling_5h', label: '5H', used: null, total: 0, percentage: 1 },
+      { ...win(0, t0), window: 'weekly_unlimited', label: 'Week', used: null, total: null, percentage: null, note: '不限量' },
+      { ...win(0, t0), window: 'video_rolling_5h', label: '视频·5H', used: 0, total: 3, percentage: 0 },
+      { ...win(3, t0), window: 'video_weekly', label: '视频·周', used: 3, total: 21, percentage: 15 },
+    ], t0);
+
+    const latest = store.latestByPlan('minimax', true);
+    expect(latest).toHaveLength(4);
+    expect(latest.find((w) => w.label === '5H')?.window).toBe('rolling_5h');
+  });
+
+  test('lastModelUsed 按模型家族前缀匹配（claude-fable 覆盖版本号演进）', () => {
+    const store = openMemoryDb();
+    store.syncPlan({ ...plan, slug: 'claude', adapter: 'claude', name: 'Claude Code' });
+    const t0 = 1_770_000_000_000;
+    store.upsertUsageRecords([
+      {
+        id: 'r1', day: '2026-09-01', timestamp: t0, provider: 'claude', model: 'claude-fable-5',
+        inputTokens: 1, cachedInputTokens: 0, cacheCreationInputTokens: 0, outputTokens: 1,
+        reasoningOutputTokens: 0, totalTokens: 2, billableTokens: null, estimatedCostUsd: null,
+        source: 'local', confidence: 'measured',
+      },
+      {
+        id: 'r2', day: '2026-09-11', timestamp: t0 + 10 * 86_400_000, provider: 'claude', model: 'claude-fable-5-1',
+        inputTokens: 1, cachedInputTokens: 0, cacheCreationInputTokens: 0, outputTokens: 1,
+        reasoningOutputTokens: 0, totalTokens: 2, billableTokens: null, estimatedCostUsd: null,
+        source: 'local', confidence: 'measured',
+      },
+      {
+        id: 'r3', day: '2026-09-11', timestamp: t0 + 10 * 86_400_000 + 60_000, provider: 'claude', model: 'claude-opus-5',
+        inputTokens: 1, cachedInputTokens: 0, cacheCreationInputTokens: 0, outputTokens: 1,
+        reasoningOutputTokens: 0, totalTokens: 2, billableTokens: null, estimatedCostUsd: null,
+        source: 'local', confidence: 'measured',
+      },
+    ]);
+
+    // fable 家族取最新一条（fable-5-1，而非早 10 天的 fable-5）
+    expect(store.lastModelUsed('claude', 'claude-fable')).toBe(t0 + 10 * 86_400_000);
+    // 非 fable 模型不计入
+    expect(store.lastModelUsed('claude', 'claude-sonnet')).toBeNull();
+    // 前缀中的 LIKE 通配符按字面量处理
+    expect(store.lastModelUsed('claude', 'claude-fable%')).toBeNull();
+  });
 });
