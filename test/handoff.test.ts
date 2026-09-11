@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openMemoryDb } from '../src/db.ts';
-import { buildHandoffPackage, deliverHandoff } from '../src/handoff.ts';
+import { buildHandoffPackage, deliverHandoff, extractSessionRefs, repairHandoffReferences, sessionRef } from '../src/handoff.ts';
 import { createServer } from '../src/server.ts';
 import { DEFAULT_PLANS } from '../src/config.ts';
 import { materializePlanFiles, materializeProgressNotes, materializeTodoSnapshots } from '../src/plans.ts';
@@ -128,6 +128,37 @@ describe('buildHandoffPackage', () => {
       rmSync(root, { recursive: true, force: true });
       throw error;
     }
+  });
+});
+
+describe('会话引用协议(@session:{id})', () => {
+  test('交接包的相关会话行带规范引用,可被 extractSessionRefs 反解', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'planofplan-handoff-ref-'));
+    try {
+      writeFileSync(join(root, 'task_plan.md'), TASK_PLAN);
+      const store = await seededStore(root);
+      const pkg = buildHandoffPackage(store, 'session', 'claude:h1', LINK)!;
+      expect(pkg.markdown).toContain(sessionRef('claude:h1'));
+      expect(pkg.markdown).toContain('read_session');
+      expect(extractSessionRefs(pkg.markdown)).toContain('claude:h1');
+      rmSync(root, { recursive: true, force: true });
+    } catch (error) {
+      rmSync(root, { recursive: true, force: true });
+      throw error;
+    }
+  });
+
+  test('repairHandoffReferences 修复 LLM 常见畸形:裸引用/全角括号/未闭合', () => {
+    expect(repairHandoffReferences('见 @session:claude:abc-123 的记录'))
+      .toBe('见 @session:{claude:abc-123} 的记录');
+    expect(repairHandoffReferences('见 @session:｛claude:abc｝ 的记录'))
+      .toBe('见 @session:{claude:abc} 的记录');
+    expect(repairHandoffReferences('续 @session:{claude:abc 后面还有字'))
+      .toBe('续 @session:{claude:abc} 后面还有字');
+    // 已规范的引用与句尾标点不被破坏
+    const canonical = `规范 ${sessionRef('claude:abc')} 与句尾 ${sessionRef('claude:def')}.`;
+    expect(repairHandoffReferences(canonical)).toBe(canonical);
+    expect(extractSessionRefs(canonical)).toEqual(['claude:abc', 'claude:def']);
   });
 });
 

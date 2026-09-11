@@ -14,7 +14,8 @@ import { searchSkills, syncSkillsCatalog } from './skills.ts';
 // ── 只读 MCP server(streamable HTTP 子集) ───────────────────────────
 // 手写 JSON-RPC 2.0 的最小协议面而不引 SDK 依赖:initialize / ping /
 // tools/list / tools/call;通知回 202,单 JSON 响应(不用 SSE 流),无会话状态。
-// 定位是三家里没人做的错位面:agent 查配额与谱系,不做通用历史检索。
+// 定位:agent 查配额与谱系,并支持 会话检索 → read_session 分页续读 的
+// 历史深读链路(输出协议参照 sourcebot:行级截断/截断告知/offset 续读)。
 // Host 头校验(server.ts 的全局中间件)同样覆盖 /mcp。
 
 const SUPPORTED_PROTOCOL_VERSIONS = ['2024-11-05', '2025-03-26', '2025-06-18'];
@@ -37,6 +38,37 @@ function rpcError(id: unknown, code: number, message: string): { jsonrpc: '2.0';
 
 function textContent(text: string): { content: Array<{ type: 'text'; text: string }> } {
   return { content: [{ type: 'text', text }] };
+}
+
+// ── 面向 LLM 的输出协议(sourcebot 实践)─────────────────────────────
+// 1) 任何进入输出的一行都有字符上限:超长 title/snippet/消息正文截断,
+//    模型不会被一个 10K 的 base64 行淹没;
+// 2) 列表被 limit 截断时,尾部给出可执行的改参建议而不是静默丢弃;
+// 3) read_session 的 offset 续读是机械协议:页尾永远告诉模型下一页参数。
+
+const LINE_MAX = 2_000;
+
+function clipLine(text: string, max = LINE_MAX): string {
+  const cleaned = text.replace(/\s+/g, ' ').trim();
+  if (cleaned.length <= max) return cleaned;
+  return `${cleaned.slice(0, max)}…(line truncated to ${max} chars)`;
+}
+
+/** 列表截断告知:shown >= total(穷尽)时返回空串,否则一段可执行建议。 */
+function truncationNote(shown: number, total: number, advice: string): string {
+  if (shown >= total) return '';
+  return `\n(showing ${shown} of ${total} — ${advice})`;
+}
+
+// 用户在 dashboard 隐藏的 session 对 MCP 出口同样不可见(sourcebot
+// 「权限边界贯穿所有出口」:web API 默认排除 hidden,MCP 不能成为旁路)。
+// 墓碑 session 已不在 sessions 表,天然不会出现。
+function hiddenSessionIds(store: Store): Set<string> {
+  return new Set(
+    [...store.getSessionUserMetaMap().entries()]
+      .filter(([, meta]) => meta.hidden)
+      .map(([id]) => id),
+  );
 }
 
 // ── 工具实现(全部只读、有界) ────────────────────────────────────────
@@ -130,10 +162,12 @@ function toolSessionSearch(store: Store, args: { q?: unknown; days?: unknown; li
   const exclude = typeof args.exclude === 'string' && args.exclude.trim() ? args.exclude.trim() : null;
   const now = Date.now();
   const since = now - days * DAY_MS;
+  const hidden = hiddenSessionIds(store);
   const rows = store.listSessionRows()
     .filter((row) => row.updatedAt >= since && row.updatedAt < now)
-    .filter((row) => row.id !== exclude);
-  const hits = store.searchSessionMessages(q).filter((hit) => hit.sessionId !== exclude);
+    .filter((row) => row.id !== exclude)
+    .filter((row) => !hidden.has(row.id));
+  const hits = store.searchSessionMessages(q).filter((hit) => hit.sessionId !== exclude && !hidden.has(hit.sessionId));
   const hitBySession = new Map(hits.map((hit) => [hit.sessionId, hit]));
   const matched = searchSessions(rows, q);
   const have = new Set(matched.map((row) => row.id));
@@ -148,18 +182,89 @@ function toolSessionSearch(store: Store, args: { q?: unknown; days?: unknown; li
   matched.sort((a, b) => b.updatedAt - a.updatedAt);
   if (matched.length === 0) return `No sessions match "${q}" in the last ${days} days.`;
   const requirements = store.firstRequirementBySession();
-  const lines: string[] = [`${matched.length} session(s) match "${q}" (last ${days} days, showing ${Math.min(limit, matched.length)}):`];
+  const shown = Math.min(limit, matched.length);
+  const lines: string[] = [`${matched.length} session(s) match "${q}" (last ${days} days, showing ${shown}):`];
   for (const session of matched.slice(0, limit)) {
     const date = new Date(session.updatedAt).toISOString().slice(0, 16).replace('T', ' ');
-    const title = requirements.get(session.id)?.text ?? session.title ?? '无标题';
+    const title = clipLine(requirements.get(session.id)?.text ?? session.title ?? '无标题', 160);
     lines.push(`- [${session.provider}] ${date} ${title} (${session.id})`);
     const hit = hitBySession.get(session.id);
-    if (hit) lines.push(`  content hit: ${hit.snippet.replaceAll('\u0001', '').replaceAll('\u0002', '')} (${hit.count} 处)`);
+    if (hit) lines.push(`  content hit: ${clipLine(hit.snippet.replaceAll('\u0001', '').replaceAll('\u0002', ''))} (${hit.count} 处)`);
   }
-  return lines.join('\n');
+  lines.push(truncationNote(shown, matched.length, 'pass a higher limit (max 30), narrow the query, or shorten days').trim());
+  return lines.filter((line) => line !== '').join('\n');
 }
 
 class ToolArgError extends Error {}
+
+// ── read_session:offset 续读协议 ────────────────────────────────────
+// 每条消息截 2000 字符,整页再受字节预算约束;预算或 limit 截断时页尾给出
+// `Use offset=N to continue`,穷尽时明确 End of session——模型不需要猜
+// 还有没有下一页(对应 sourcebot read_file 的 500 行/5KB/续读三件套)。
+
+const READ_SESSION_BYTE_BUDGET = 24 * 1024;
+
+function fmtMsgTime(ts: number | null): string {
+  if (ts == null) return '';
+  return new Date(ts).toISOString().slice(5, 16).replace('T', ' ');
+}
+
+function toolReadSession(store: Store, args: { session_id?: unknown; offset?: unknown; limit?: unknown; role?: unknown }): string {
+  const sessionId = typeof args.session_id === 'string' ? args.session_id.trim() : '';
+  if (!sessionId) throw new ToolArgError('session_id is required (get it from session_search / repo_lineage result lines)');
+  const offset = Math.max(1, Math.floor(Number(args.offset ?? 1)) || 1);
+  const limit = Math.min(100, Math.max(1, Math.floor(Number(args.limit ?? 30)) || 30));
+  const role = args.role === 'user' || args.role === 'assistant' ? args.role : undefined;
+
+  const session = store.getSession(sessionId);
+  if (!session) {
+    throw new ToolArgError(`session not found: ${sessionId} (use session_search to find the id first)`);
+  }
+  if (hiddenSessionIds(store).has(sessionId)) {
+    throw new ToolArgError(`session is hidden by the user: ${sessionId}`);
+  }
+  const { rows, total } = store.listSessionMessagePage(sessionId, offset, limit, role);
+  if (total === 0) {
+    return `Session ${sessionId} has no indexed messages${role ? ` with role=${role}` : ''} (older providers may lack message indexing).`;
+  }
+  if (rows.length === 0) {
+    return `No messages at offset ${offset} (this view has ${total} message(s)). Use offset=1 to restart from the beginning.`;
+  }
+
+  const lines: string[] = [];
+  const title = clipLine(session.title ?? '', 120);
+  lines.push(`Session ${session.id} · ${session.provider}${title ? ` · ${title}` : ''}${session.cwd ? ` · cwd ${session.cwd}` : ''}`);
+  lines.push(
+    `Showing messages ${offset}-${offset + rows.length - 1} of ${total}${role ? ` (role=${role})` : ''}.`,
+  );
+  let bytes = 0;
+  let stoppedAt = 0;
+  for (const [index, row] of rows.entries()) {
+    const n = offset + index;
+    const time = fmtMsgTime(row.timestamp);
+    const body = clipLine(row.text);
+    let line: string;
+    if (row.role === 'tool') {
+      line = `[${n}] tool:${row.toolName ?? 'tool'}${time ? ` ${time}` : ''} · ${body}`;
+    } else {
+      const model = row.role === 'assistant' && row.model ? ` (${row.model})` : '';
+      line = `[${n}] ${row.role}${model}${time ? ` ${time}` : ''} · ${body}`;
+    }
+    bytes += Buffer.byteLength(line, 'utf8');
+    if (bytes > READ_SESSION_BYTE_BUDGET && index > 0) {
+      stoppedAt = n - 1;
+      break;
+    }
+    lines.push(line);
+    stoppedAt = n;
+  }
+  if (stoppedAt < total) {
+    lines.push(`(Showing messages ${offset}-${stoppedAt} of ${total}. Use offset=${stoppedAt + 1} to continue.)`);
+  } else {
+    lines.push(`(End of session — ${total} message(s) total.)`);
+  }
+  return lines.join('\n');
+}
 
 function commitsBySession(store: Store): Map<string, SessionCommit[]> {
   const map = new Map<string, SessionCommit[]>();
@@ -185,26 +290,31 @@ function toolRepoLineage(store: Store, args: { repo?: unknown; days?: unknown; l
   const limit = Math.min(50, Math.max(1, Math.floor(Number(args.limit ?? 20)) || 20));
   const now = Date.now();
   const since = now - days * DAY_MS;
+  const hidden = hiddenSessionIds(store);
   const rows = store.listSessionRows()
     .filter((row) => row.updatedAt >= since && row.updatedAt < now)
     .filter((row) => sessionMatchesRepo(row, repo))
+    .filter((row) => !hidden.has(row.id))
     .sort((a, b) => b.updatedAt - a.updatedAt);
   if (rows.length === 0) return `No sessions in the last ${days} days touch a repo matching "${repo}".`;
   const commits = commitsBySession(store);
   const requirements = store.firstRequirementBySession();
-  const lines: string[] = [`${rows.length} session(s) touch "${repo}" (last ${days} days, showing ${Math.min(limit, rows.length)}):`];
+  const shown = Math.min(limit, rows.length);
+  const lines: string[] = [`${rows.length} session(s) touch "${repo}" (last ${days} days, showing ${shown}):`];
   for (const session of rows.slice(0, limit)) {
     const date = new Date(session.updatedAt).toISOString().slice(0, 16).replace('T', ' ');
-    const title = requirements.get(session.id)?.text ?? session.title ?? '无标题';
+    const title = clipLine(requirements.get(session.id)?.text ?? session.title ?? '无标题', 160);
     const sessionCommits = commits.get(session.id) ?? [];
     const commitNote = sessionCommits.length > 0
       ? ` · ${sessionCommits.length} commit(s)${sessionCommits.some((c) => c.kind === 'declared') ? ' (含声明)' : ''}`
       : '';
     lines.push(`- [${session.provider}] ${date} ${title}${commitNote}`);
     for (const commit of sessionCommits.slice(0, 5)) {
-      lines.push(`    ${commit.sha.slice(0, 8)} [${commit.kind}] ${commit.summary}`);
+      lines.push(`    ${commit.sha.slice(0, 8)} [${commit.kind}] ${clipLine(commit.summary, 200)}`);
     }
   }
+  const note = truncationNote(shown, rows.length, 'pass a higher limit (max 50) or shorten days');
+  if (note) lines.push(note.trim());
   return lines.join('\n');
 }
 
@@ -213,18 +323,21 @@ function toolRequirementStatus(store: Store, args: { days?: unknown; limit?: unk
   const limit = Math.min(60, Math.max(1, Math.floor(Number(args.limit ?? 30)) || 30));
   const now = Date.now();
   const since = now - days * DAY_MS;
+  const hidden = hiddenSessionIds(store);
   const requirements = store.firstRequirementBySession();
   const rows = store.listSessionRows()
     .filter((row) => row.updatedAt >= since && row.updatedAt < now)
     .filter((row) => (row.origin ?? 'user') === 'user')
     .filter((row) => requirements.has(row.id))
+    .filter((row) => !hidden.has(row.id))
     .sort((a, b) => b.updatedAt - a.updatedAt);
   if (rows.length === 0) return `No extracted requirements in the last ${days} days.`;
   const commits = commitsBySession(store);
-  const lines: string[] = [`${rows.length} requirement(s) in the last ${days} days (showing ${Math.min(limit, rows.length)}):`];
+  const shown = Math.min(limit, rows.length);
+  const lines: string[] = [`${rows.length} requirement(s) in the last ${days} days (showing ${shown}):`];
   for (const session of rows.slice(0, limit)) {
     const date = new Date(session.updatedAt).toISOString().slice(0, 16).replace('T', ' ');
-    const text = requirements.get(session.id)?.text ?? '';
+    const text = clipLine(requirements.get(session.id)?.text ?? '', 200);
     const sessionCommits = commits.get(session.id) ?? [];
     const declared = sessionCommits.filter((c) => c.kind === 'declared').length;
     const witnessed = sessionCommits.filter((c) => c.kind === 'witnessed').length;
@@ -233,6 +346,8 @@ function toolRequirementStatus(store: Store, args: { days?: unknown; limit?: unk
       : ' · no commits yet';
     lines.push(`- ${date} [${session.provider}] ${text}${commitNote}`);
   }
+  const note = truncationNote(shown, rows.length, 'pass a higher limit (max 60) or shorten days');
+  if (note) lines.push(note.trim());
   return lines.join('\n');
 }
 
@@ -269,8 +384,10 @@ function toolInspectProjectContext(store: Store, args: { project?: unknown }): s
   const project = typeof args.project === 'string' ? args.project.trim() : '';
   if (!project) throw new ToolArgError('project is required (name or path)');
 
+  const hidden = hiddenSessionIds(store);
   const sessions = store.listSessionRows()
     .filter((s) => sessionMatchesRepo(s, project))
+    .filter((s) => !hidden.has(s.id))
     .sort((a, b) => b.updatedAt - a.updatedAt);
 
   if (sessions.length === 0) {
@@ -357,20 +474,35 @@ function toolInspectProjectContext(store: Store, args: { project?: unknown }): s
 
 interface ToolDef {
   name: string;
+  /** 人类可读名(MCP 2025-06-18 title 字段),客户端 UI 展示用。 */
+  title: string;
   description: string;
   inputSchema: Record<string, unknown>;
   run: (store: Store, cfg: AppConfig, args: Record<string, unknown>) => string;
 }
 
+// 全部工具只读且幂等(本地索引查询,无副作用):以 annotations 显式声明,
+// 受限客户端(审批策略/只读模式)可据此自动放行,无需逐工具配置。
+// destructiveHint 显式 false(协议默认 true);openWorldHint false——
+// 只读本机已物化的数据,不与外部世界交互。
+const READ_ONLY_TOOL_ANNOTATIONS = {
+  readOnlyHint: true,
+  idempotentHint: true,
+  destructiveHint: false,
+  openWorldHint: false,
+};
+
 const TOOLS: ToolDef[] = [
   {
     name: 'plan_quota_status',
+    title: 'Plan quota status',
     description: '查询本机所有 AI coding plan 订阅的配额窗口状态(5H/周/月用量百分比与重置倒计时)。用户问"额度还剩多少""5H 窗口什么时候重置"时用它。',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     run: (store, cfg) => toolPlanQuotaStatus(store, cfg),
   },
   {
     name: 'usage_summary',
+    title: 'Token usage summary',
     description: '查询本地 agent 日志统计的 token 用量与成本估算(按天/按 provider/按模型)。用户问"最近烧了多少 token""这个月花了多少钱"时用它。数据是本地日志估算,不是账单。',
     inputSchema: {
       type: 'object',
@@ -384,7 +516,8 @@ const TOOLS: ToolDef[] = [
   },
   {
     name: 'session_search',
-    description: '跨本机全部 coding agent 会话搜索:标题/项目等元数据 ∪ 消息正文全文(FTS,中文需 ≥3 字符)。用户问"之前哪个对话聊过 X"时用它。你是 coding agent 时建议在 arguments 里带上 exclude=你自己的 session id,避免把当前会话误当历史证据。',
+    title: 'Search sessions',
+    description: '跨本机全部 coding agent 会话搜索:标题/项目等元数据 ∪ 消息正文全文(FTS,中文需 ≥3 字符)。用户问"之前哪个对话聊过 X"时用它。你是 coding agent 时建议在 arguments 里带上 exclude=你自己的 session id,避免把当前会话误当历史证据。找到目标后用 read_session 读取消息细节。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -399,7 +532,25 @@ const TOOLS: ToolDef[] = [
     run: (store, _cfg, args) => toolSessionSearch(store, args),
   },
   {
+    name: 'read_session',
+    title: 'Read session messages',
+    description: '读取一条会话的消息正文,按序分页:每条消息截断到 2000 字符,整页有字节预算,截断时页尾给出 `Use offset=N to continue`,穷尽时明确 End of session——按页尾指示续读即可,不需要猜。信封噪音(命令包装/系统注入)已在索引期过滤。role=user 只看用户原话,role=assistant 只看模型回复。先用 session_search / repo_lineage 拿到 session id。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session_id: { type: 'string', description: '会话 id,如 claude:<uuid>(来自 session_search 结果行尾括号)' },
+        offset: { type: 'number', description: '起始消息序号(1 起);续读用上一页页尾给出的值' },
+        limit: { type: 'number', description: '本页最多返回条数,默认 30,最大 100' },
+        role: { type: 'string', enum: ['user', 'assistant'], description: '只看某一角色;缺省返回全部(含 tool 调用)' },
+      },
+      required: ['session_id'],
+      additionalProperties: false,
+    },
+    run: (store, _cfg, args) => toolReadSession(store, args),
+  },
+  {
     name: 'repo_lineage',
+    title: 'Repo lineage',
     description: '查一个 git 仓库最近的"谱系":哪些 agent 会话碰过它、各自的需求是什么、落了哪些 commit(declared=trailer 声明/witnessed=transcript 目击/candidate=时间窗推断)。用户问"这个 repo 最近做了什么""X 需求有没有落成 commit"时用它。',
     inputSchema: {
       type: 'object',
@@ -415,6 +566,7 @@ const TOOLS: ToolDef[] = [
   },
   {
     name: 'recent_edits',
+    title: 'Recent file edits',
     description: '最近被 agent 改动的文件流:哪个文件在被反复改、出自哪条对话。用户问"最近 agent 都在改什么文件""X 文件是哪个会话改的"时用它。',
     inputSchema: {
       type: 'object',
@@ -433,14 +585,17 @@ const TOOLS: ToolDef[] = [
       if (files.length === 0) return `最近 ${days} 天没有文件改动记录。`;
       const lines = [`最近 ${days} 天被 agent 改动的文件(前 ${files.length}):`];
       for (const file of files) {
-        const names = file.sessions.map((s) => `${s.provider}:${(s.title ?? s.id).slice(0, 24)}`).join(' / ');
-        lines.push(`- ${file.path}(${file.sessionCount} 个会话)← ${names}`);
+        const names = file.sessions.map((s) => `${s.provider}:${clipLine(s.title ?? s.id, 24)}`).join(' / ');
+        lines.push(`- ${file.path}(${file.sessionCount} 个会话)← ${clipLine(names, 400)}`);
       }
+      // limit 在 SQL 里生效,拿不到总角数:打满即可能是冰山一角,如实告知
+      if (files.length === limit) lines.push(`(possibly truncated — pass a higher limit (max 200) or shorten days to see more)`);
       return lines.join('\n');
     },
   },
   {
     name: 'lineage_report',
+    title: 'Lineage report',
     description: '谱系周报:窗口内需求 × commit × token 消耗的静态汇总(declared=trailer 声明/witnessed=transcript 目击/candidate=时间窗推断)。用户问"这周做了什么、落了多少、各烧多少"时用它。',
     inputSchema: {
       type: 'object',
@@ -466,13 +621,16 @@ const TOOLS: ToolDef[] = [
       for (const item of report.items.slice(0, limit)) {
         const mark = item.landed ? `[✓${item.commits.length}]` : '[…]';
         const cost = item.estimatedCostUsd != null ? ` · $${item.estimatedCostUsd.toFixed(2)}` : '';
-        lines.push(`- ${mark} ${item.text.slice(0, 60)}(${item.provider}${item.project ? ` · ${item.project}` : ''}${cost})`);
+        lines.push(`- ${mark} ${clipLine(item.text, 60)}(${item.provider}${item.project ? ` · ${item.project}` : ''}${cost})`);
       }
+      const note = truncationNote(Math.min(limit, report.items.length), report.items.length, 'pass a higher limit (max 60) or shorten days');
+      if (note) lines.push(note.trim());
       return lines.join('\n');
     },
   },
   {
     name: 'requirement_status',
+    title: 'Requirement status',
     description: '列出最近从用户消息里抽取的需求(会话 → 需求 → commit 归因链的中间层),附每个需求是否已落 commit。用户问"最近提了哪些需求""哪些还没落"时用它。',
     inputSchema: {
       type: 'object',
@@ -486,6 +644,7 @@ const TOOLS: ToolDef[] = [
   },
   {
     name: 'planofplan_search_skills',
+    title: 'Search agent skills',
     description: '跨本机 150+ coding agent skills 库快速检索。当需要特定专业能力(如 obsidian 笔记整理、tldraw 画布、微信发布、PPT制作、系统化调试等)时用它。返回匹配的 skill 名称、作用与文件路径。',
     inputSchema: {
       type: 'object',
@@ -499,6 +658,7 @@ const TOOLS: ToolDef[] = [
   },
   {
     name: 'planofplan_project_context',
+    title: 'Project context',
     description: '跨项目切换时的上下文透视:查看任意本地项目的概况、最近的需求动机、落地的 commits、活跃的 agent 会话及触及文件流，并报告该项目是否已建立 zg 语义代码索引。',
     inputSchema: {
       type: 'object',
@@ -530,14 +690,20 @@ function handleMessage(store: Store, cfg: AppConfig, message: RpcMessage): { jso
         protocolVersion,
         capabilities: { tools: { listChanged: false } },
         serverInfo: { name: 'planofplan', version: `0.1.0+${getBuildInfo().shortCommitSha}` },
-        instructions: 'planofplan 是本机 coding agent 的洞察中枢:查订阅配额、token 用量,以及 会话→需求→commit 的谱系。全部只读。',
+        instructions: 'planofplan 是本机 coding agent 的洞察中枢:查订阅配额、token 用量,以及 会话→需求→commit 的谱系;session_search 找到会话后可用 read_session 分页深读消息正文。全部只读。',
       });
     }
     case 'ping':
       return rpcResult(id, {});
     case 'tools/list':
       return rpcResult(id, {
-        tools: TOOLS.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })),
+        tools: TOOLS.map(({ name, title, description, inputSchema }) => ({
+          name,
+          title,
+          description,
+          inputSchema,
+          annotations: READ_ONLY_TOOL_ANNOTATIONS,
+        })),
       });
     case 'tools/call': {
       const params = message.params as { name?: unknown; arguments?: unknown } | undefined;

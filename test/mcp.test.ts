@@ -21,6 +21,16 @@ function app() {
     startedAt: NOW - 3_600_000, updatedAt: NOW - 1_000_000,
     inputTokens: 0, outputTokens: 0, totalTokens: 100, estimatedCostUsd: null, seenAt: NOW,
   }]);
+  // 第二条同 repo 会话:repo_lineage 截断告知测试需要 >limit 的命中
+  store.upsertSessions([{
+    id: 'claude:s2', provider: 'claude', nativeId: 's2', cwd: '/repo/demo',
+    title: '另一个会话', sourceFile: '/tmp/s2.jsonl',
+    startedAt: NOW - 2_000_000, updatedAt: NOW - 900_000,
+    inputTokens: 0, outputTokens: 0, totalTokens: 50, estimatedCostUsd: null, seenAt: NOW,
+  }]);
+  store.replaceSessionRepos('claude:s2', [
+    { sessionId: 'claude:s2', role: 'work', url: 'git@example.com:org/demo.git', root: '/repo/demo', name: 'demo', evidenceKind: 'observed' },
+  ]);
   store.replaceSessionRepos(sessionId, [
     { sessionId, role: 'work', url: 'git@example.com:org/demo.git', root: '/repo/demo', name: 'demo', evidenceKind: 'observed' },
   ]);
@@ -35,7 +45,18 @@ function app() {
     text: '部署脚本幂等化改造的需求在这里', timestamp: NOW - 3_600_000,
     model: null, inputTokens: null, outputTokens: null,
   };
-  store.upsertSessionMessages([message]);
+  store.upsertSessionMessages([
+    message,
+    { id: 'm2', sessionId, seq: 2, role: 'assistant', kind: 'text', toolName: null,
+      text: '好的,我来把部署脚本改成幂等的', timestamp: NOW - 3_500_000,
+      model: 'claude-fable-5', inputTokens: null, outputTokens: null },
+    { id: 'm3', sessionId, seq: 3, role: 'tool', kind: 'tool_use', toolName: 'Edit',
+      text: '{"file_path":"/repo/deploy.sh","old_string":"x"}', timestamp: NOW - 3_400_000,
+      model: null, inputTokens: null, outputTokens: null },
+    { id: 'm4', sessionId, seq: 4, role: 'user', kind: 'text', toolName: null,
+      text: 'y'.repeat(2_500), timestamp: NOW - 3_300_000,
+      model: null, inputTokens: null, outputTokens: null },
+  ]);
   store.upsertSessionCommits([{
     sessionId, repo: 'git@example.com:org/demo.git',
     sha: 'abcdef1234567890abcdef1234567890abcdef12', kind: 'declared',
@@ -88,14 +109,20 @@ describe('mcp handshake', () => {
     expect((body.result as { protocolVersion?: string }).protocolVersion).toBe('2025-06-18');
   });
 
-  test('tools/list 暴露九个只读工具', async () => {
+  test('tools/list 暴露十个只读工具,全部带只读注解', async () => {
     const body = await rpc(app(), 'tools/list', {});
-    const tools = ((body.result as { tools?: Array<{ name: string; inputSchema: unknown }> }).tools) ?? [];
+    const tools = ((body.result as {
+      tools?: Array<{ name: string; title?: string; inputSchema: unknown; annotations?: Record<string, unknown> }>;
+    }).tools) ?? [];
     expect(tools.map((t) => t.name).sort()).toEqual([
       'lineage_report', 'plan_quota_status', 'planofplan_project_context', 'planofplan_search_skills',
-      'recent_edits', 'repo_lineage', 'requirement_status', 'session_search', 'usage_summary',
+      'read_session', 'recent_edits', 'repo_lineage', 'requirement_status', 'session_search', 'usage_summary',
     ]);
-    for (const tool of tools) expect(tool.inputSchema).toBeDefined();
+    for (const tool of tools) {
+      expect(tool.inputSchema).toBeDefined();
+      expect(tool.title).toBeTruthy();
+      expect(tool.annotations).toEqual({ readOnlyHint: true, idempotentHint: true, destructiveHint: false, openWorldHint: false });
+    }
   });
 
 
@@ -204,6 +231,98 @@ describe('mcp 新工具', () => {
 
     const textAlias = await callTool(app(), 'inspect_project_context', { project: 'demo' });
     expect(textAlias).toContain('项目上下文透视: demo');
+  });
+});
+
+describe('mcp read_session(offset 续读协议)', () => {
+  test('首页包含会话头信息、角色行与 End of session', async () => {
+    const text = await callTool(app(), 'read_session', { session_id: 'claude:s1' });
+    expect(text).toContain('Session claude:s1 · claude · 部署脚本修复 · cwd /repo/demo');
+    expect(text).toContain('Showing messages 1-4 of 4.');
+    expect(text).toContain('[1] user');
+    expect(text).toContain('[2] assistant (claude-fable-5)');
+    expect(text).toContain('[3] tool:Edit');
+    expect(text).toContain('(End of session — 4 message(s) total.)');
+  });
+
+  test('超长消息行截断到 2000 字符并注明', async () => {
+    const text = await callTool(app(), 'read_session', { session_id: 'claude:s1' });
+    expect(text).toContain('line truncated to 2000 chars');
+    expect(text).not.toContain('y'.repeat(2_100));
+  });
+
+  test('limit 截断给出 Use offset=N 续读指示,续页后穷尽', async () => {
+    const server = app();
+    const page1 = await callTool(server, 'read_session', { session_id: 'claude:s1', limit: 2 });
+    expect(page1).toContain('Showing messages 1-2 of 4.');
+    expect(page1).toContain('Use offset=3 to continue.');
+    const page2 = await callTool(server, 'read_session', { session_id: 'claude:s1', offset: 3, limit: 2 });
+    expect(page2).toContain('Showing messages 3-4 of 4.');
+    expect(page2).toContain('(End of session — 4 message(s) total.)');
+  });
+
+  test('offset 越界给出重启指示', async () => {
+    const text = await callTool(app(), 'read_session', { session_id: 'claude:s1', offset: 9 });
+    expect(text).toContain('No messages at offset 9');
+    expect(text).toContain('Use offset=1');
+  });
+
+  test('role 过滤只统计同口径消息', async () => {
+    const text = await callTool(app(), 'read_session', { session_id: 'claude:s1', role: 'assistant' });
+    expect(text).toContain('Showing messages 1-1 of 1 (role=assistant).');
+    expect(text).toContain('[1] assistant (claude-fable-5)');
+  });
+
+  test('未知 session 返回 isError 与查找建议', async () => {
+    const body = await rpc(app(), 'tools/call', { name: 'read_session', arguments: { session_id: 'claude:nope' } });
+    const result = body.result as { isError?: boolean; content?: Array<{ text: string }> };
+    expect(result?.isError).toBe(true);
+    expect(result?.content?.[0]?.text).toContain('session not found');
+    expect(result?.content?.[0]?.text).toContain('session_search');
+  });
+});
+
+describe('mcp 截断告知(sourcebot 实践)', () => {
+  test('repo_lineage 命中超过 limit 时尾部给出可执行建议', async () => {
+    const text = await callTool(app(), 'repo_lineage', { repo: 'demo', limit: 1 });
+    expect(text).toContain('(showing 1 of 2 — pass a higher limit (max 50) or shorten days)');
+  });
+
+  test('穷尽时不追加截断噪音', async () => {
+    const text = await callTool(app(), 'repo_lineage', { repo: 'demo' });
+    expect(text).toContain('showing 2):');
+    expect(text).not.toContain('of 2 —');
+  });
+});
+
+describe('mcp 隐藏边界贯穿所有出口', () => {
+  test('dashboard 隐藏的 session 在 search/lineage/read 三处都不可见', async () => {
+    const store = openMemoryDb();
+    for (const plan of DEFAULT_PLANS) store.syncPlan(plan);
+    const server = createServer(store, scheduler as never, { port: 9291, plans: DEFAULT_PLANS });
+    // 复用 app() 的种子数据构造(store 层直接种,便于隐藏后复用同一 server)
+    store.upsertSessions([{
+      id: 'claude:h1', provider: 'claude', nativeId: 'h1', cwd: '/repo/demo',
+      title: '隐藏会话', sourceFile: '/tmp/h1.jsonl',
+      startedAt: NOW - 3_600_000, updatedAt: NOW - 1_000_000,
+      inputTokens: 0, outputTokens: 0, totalTokens: 10, estimatedCostUsd: null, seenAt: NOW,
+    }]);
+    store.upsertSessionMessages([{
+      id: 'hm1', sessionId: 'claude:h1', seq: 1, role: 'user', kind: 'text', toolName: null,
+      text: '隐藏会话的正文包含独特关键词xyzzy', timestamp: NOW - 3_600_000,
+      model: null, inputTokens: null, outputTokens: null,
+    }]);
+
+    // 隐藏前可见
+    expect(await callTool(server, 'session_search', { q: 'xyzzy' })).toContain('claude:h1');
+    // 隐藏后:search(FTS+元数据)、repo_lineage、read_session 三处全部挡掉
+    store.setSessionHidden('claude:h1', true);
+    expect(await callTool(server, 'session_search', { q: 'xyzzy' })).toContain('No sessions match');
+    expect(await callTool(server, 'repo_lineage', { repo: 'demo' })).not.toContain('claude:h1');
+    const denied = await rpc(server, 'tools/call', { name: 'read_session', arguments: { session_id: 'claude:h1' } });
+    const deniedResult = denied.result as { isError?: boolean; content?: Array<{ text: string }> };
+    expect(deniedResult?.isError).toBe(true);
+    expect(deniedResult?.content?.[0]?.text).toContain('hidden');
   });
 });
 

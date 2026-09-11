@@ -1841,6 +1841,60 @@ export class Store {
     this.db.query('DELETE FROM session_messages WHERE session_id = ?').run(sessionId);
   }
 
+  /**
+   * read_session 工具的分页读:按 seq 升序返回该会话的消息行(信封过滤
+   * 已在入库时完成)。offset 是 1 起的行序(不是源文件 seq——各 provider
+   * 的 seq 是稀疏行号,行序才是模型能机械续读的契约),与返回体里的 #n
+   * 对齐:下一页永远 offset = 上一页最后 n + 1。role 过滤时 total 也是
+   * 同过滤口径的计数,保证 X-Y of Z 自洽。
+   */
+  listSessionMessagePage(
+    sessionId: string,
+    offset: number,
+    limit: number,
+    role?: 'user' | 'assistant',
+  ): { rows: SessionMessageRow[]; total: number } {
+    const filter = role ? 'AND role = ?' : '';
+    const total = (this.db.query(
+      `SELECT COUNT(*) AS c FROM session_messages WHERE session_id = ? ${filter}`,
+    ).get(...(role ? [sessionId, role] : [sessionId])) as { c: number }).c;
+    const rows = this.db.query(
+      `SELECT id, session_id, seq, role, kind, tool_name, text, timestamp, model, input_tokens, output_tokens
+       FROM session_messages
+       WHERE session_id = ? ${filter}
+       ORDER BY seq
+       LIMIT ? OFFSET ?`,
+    ).all(...(role ? [sessionId, role, limit, offset - 1] : [sessionId, limit, offset - 1])) as Array<{
+      id: string;
+      session_id: string;
+      seq: number;
+      role: SessionMessageRow['role'];
+      kind: SessionMessageRow['kind'];
+      tool_name: string | null;
+      text: string | null;
+      timestamp: number | null;
+      model: string | null;
+      input_tokens: number | null;
+      output_tokens: number | null;
+    }>;
+    return {
+      total,
+      rows: rows.map((row) => ({
+        id: row.id,
+        sessionId: row.session_id,
+        seq: row.seq,
+        role: row.role,
+        kind: row.kind,
+        toolName: row.tool_name,
+        text: row.text ?? '',
+        timestamp: row.timestamp,
+        model: row.model,
+        inputTokens: row.input_tokens,
+        outputTokens: row.output_tokens,
+      })),
+    };
+  }
+
   // ── 库维护:孤儿水位清理 + 消息保留期 ─────────────────────────────
 
   listSessionIndexStatePaths(): string[] {
