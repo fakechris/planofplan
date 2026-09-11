@@ -40,6 +40,35 @@ export function handoffProviders(): string[] {
   return Object.keys(HANDOFF_BINS);
 }
 
+// ── 会话引用协议(sourcebot @file:{repo::path:lines} 的会话版)─────────
+// 交接包与 agent 产出文本里的会话指针统一为 @session:{<sessionId>}
+// (id 自带 provider 前缀,如 claude:<uuid>;花括号保护内部的冒号)。
+// 后继 agent 拿到引用可直接调 planofplan MCP 的 read_session 分页深读,
+// 免去把 transcript 搬进交接包。repairHandoffReferences 对 LLM 常见的
+// 缺括号/全角括号做容错修复(sourcebot repairReferences 同思路)。
+
+export function sessionRef(sessionId: string): string {
+  return `@session:{${sessionId}}`;
+}
+
+/** 提取文本里全部会话引用的 sessionId(已修复形态,花括号内原样)。 */
+export function extractSessionRefs(text: string): string[] {
+  return [...text.matchAll(/@session:\{([^\s{}]+)\}/g)].map((m) => m[1]!);
+}
+
+/** "@session:" 后紧跟裸 provider:id token(没包花括号)。句尾标点不吞。 */
+const BARE_SESSION_REF = /@session:([a-z][a-z0-9_]*:[A-Za-z0-9][^\s{}｛｝,.;!?"'，。；！？]*)/g;
+/** 花括号开了没关:id 到空白/标点即收尾补上 "}"(已闭合的不匹配)。 */
+const UNCLOSED_SESSION_REF = /@session:\{([^\s{}]+)(?=[\s,;.)!?"']|$)/g;
+
+export function repairHandoffReferences(text: string): string {
+  return text
+    .replaceAll('｛', '{')
+    .replaceAll('｝', '}')
+    .replace(UNCLOSED_SESSION_REF, (_match, id: string) => `@session:{${id}}`)
+    .replace(BARE_SESSION_REF, (_match, id: string) => `@session:{${id}}`);
+}
+
 function fmtTs(ts: number | null | undefined): string {
   if (!ts) return '--';
   return new Date(ts).toLocaleString('zh-CN', { hour12: false });
@@ -136,7 +165,7 @@ ${args.planSection}${args.progressSection}${args.commitSection}${args.fileSectio
 ${args.sessionLine}${args.subagentNote}
 ---
 
-接手建议:先读上面的目标与计划状态,${args.defaultDir ? `工作目录在 \`${args.defaultDir}\`,` : ''}需要更多上下文时打开 ${args.deepLink}(需求原文、span 文件、快照时间线都在详情页)。
+接手建议:先读上面的目标与计划状态,${args.defaultDir ? `工作目录在 \`${args.defaultDir}\`,` : ''}需要更多上下文时打开 ${args.deepLink}(需求原文、span 文件、快照时间线都在详情页);若你接入了 planofplan MCP,可对上面的 ${'@session:{…}'} 引用直接调用 read_session 分页深读。
 `;
   return {
     title: args.title,
@@ -177,7 +206,7 @@ export function buildHandoffPackage(
       progressSection: `${todoBlock(store, req.sessionId)}${noteBlock(store, req.sessionId)}`,
       commitSection: commitBlock(commits),
       fileSection: fileBlock(store, req.sessionId, req.seq, next ? next.seq : null),
-      sessionLine: `- ${session.provider} · ${session.title || session.id}(${fmtTs(session.updatedAt)})`,
+      sessionLine: `- ${session.provider} · ${session.title || session.id}(${fmtTs(session.updatedAt)}) · ${sessionRef(session.id)}`,
       subagentNote: subagentBlock(store, req.sessionId),
       defaultDir: session.cwd,
       sourceType: type,
@@ -199,7 +228,7 @@ export function buildHandoffPackage(
       commitSection: commitBlock(store.commitsForPath(plan.path)),
       fileSection: latestSession ? fileBlock(store, latestSession.id) : '',
       sessionLine: sessions.length > 0
-        ? sessions.slice(0, 5).map((s) => `- ${s.provider} · ${s.title || s.id}(${fmtTs(s.updatedAt)})`).join('\n')
+        ? sessions.slice(0, 5).map((s) => `- ${s.provider} · ${s.title || s.id}(${fmtTs(s.updatedAt)}) · ${sessionRef(s.id)}`).join('\n')
         : '(窗口内没有 session 触碰过该文件)',
       subagentNote: latestSession ? subagentBlock(store, latestSession.id) : '',
       defaultDir: plan.path.slice(0, plan.path.lastIndexOf('/')) || null,
@@ -219,7 +248,7 @@ function sessionPackage(store: Store, session: SessionRecord, deepLink: string):
     progressSection: `${todoBlock(store, session.id)}${noteBlock(store, session.id)}`,
     commitSection: commitBlock(store.listSessionCommits(session.id)),
     fileSection: fileBlock(store, session.id),
-    sessionLine: `- ${session.provider} · ${session.title || session.id}(${fmtTs(session.updatedAt)}) · cwd ${session.cwd || '--'}`,
+    sessionLine: `- ${session.provider} · ${session.title || session.id}(${fmtTs(session.updatedAt)}) · cwd ${session.cwd || '--'} · ${sessionRef(session.id)}`,
     subagentNote: subagentBlock(store, session.id),
     defaultDir: session.cwd,
     sourceType: 'session',

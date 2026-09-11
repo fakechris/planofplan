@@ -91,18 +91,25 @@ claude/droid hooks 文件、codex/kimi/zcode/grok 会话新鲜度、amp/agy 进�
 daemon 在 `POST http://localhost:<port>/mcp` 提供只读 MCP（streamable HTTP，
 无会话状态；Host 头校验同样生效）。被监控的 agent 可以反过来查配额与谱系——
 这是三家里没人做的错位面：agentsview/obelisk 的 agent 面是通用历史检索，
-这里集成配额、谱系、技能库与跨项目上下文。九个工具：
+这里集成配额、谱系、技能库与跨项目上下文。十个工具，全部带 `readOnlyHint`
+注解（受限客户端可自动放行）；列表类工具截断时尾部给出可执行改参建议：
 
 - `plan_quota_status` 各订阅的配额窗口与重置倒计时
 - `usage_summary` 本地日志的 token 用量/成本估算（按天/provider/模型）
 - `session_search` 跨全部 agent 会话的元数据 ∪ 消息正文 FTS 搜索
   （`exclude` 参数可排除调用者自己的 session id——agent 搜历史时不把当前会话误当证据）
+- `read_session` 分页深读一条会话的消息正文（信封已过滤；每条截 2000 字符，
+  整页有字节预算，页尾给出 `Use offset=N to continue` 续读指示）
 - `repo_lineage` 一个仓库最近的会话→需求→commit 谱系
 - `requirement_status` 最近抽取的需求及其 commit 落地状态
 - `recent_edits` 最近被 agent 改动的文件流与关联会话
 - `lineage_report` 需求 × commit × token 消耗的谱系周报
 - `search_skills` 跨本机 150+ coding agent skills 库快速检索与路由
 - `inspect_project_context` 跨项目切换时的上下文透视（需求、落地 commits、活跃会话与 zg 语义索引就绪状态）
+
+交接包（handoff）与 agent 产出文本中的会话指针统一为 `@session:{<sessionId>}`
+引用格式：后继 agent 拿到引用可直接调 `read_session` 深读，
+`repairHandoffReferences()` 对 LLM 常见的缺括号/全角括号畸形做容错修复。
 
 
 给 agent 的工具使用指南(何时用哪个工具、自指防护惯例):[`docs/skills/planofplan/SKILL.md`](docs/skills/planofplan/SKILL.md)。

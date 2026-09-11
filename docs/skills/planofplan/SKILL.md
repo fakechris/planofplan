@@ -22,6 +22,10 @@ triggers:
 - **额度**:"我还剩多少额度" "5H 窗口什么时候重置" → `plan_quota_status`
 - **用量**:"最近烧了多少 token" "这周花了多少钱" → `usage_summary`(注意:本地日志估算,不是账单)
 - **找历史对话**:"之前哪个对话聊过 X" → `session_search`
+- **深读会话**:"那个对话具体聊了什么" → 拿到 id 后用 `read_session` 分页读。
+  页尾的 `Use offset=N to continue` 是机械续读协议——按指示翻页即可;
+  截断告知不是错误。`role=user` 只看用户原话,`role=assistant` 只看模型回复。
+  交接文本里的 `@session:{<id>}` 引用可直接作为 session_id 使用。
 - **repo 脉络**:"这个 repo 最近做了什么" "X 需求落了没有" → `repo_lineage`
 - **需求清单**:"最近提了哪些需求" "哪些还没落" → `requirement_status`
 - **文件动向**:"最近 agent 都在改什么文件" → `recent_edits`
@@ -41,4 +45,7 @@ triggers:
    引用 candidate 级关联时向用户说明是推断。
 4. **中文搜索**:`session_search` 走 trigram,查询词 ≥3 字符;两字词用
    `limit` 放宽并接受更宽的召回。
-5. 工具全部只读;quota 数据来自 daemon 的周期抓取,可能滞后数分钟。
+5. **截断不是错误**:列表工具尾部出现 `(showing X of Y — ...)` 时,按建议
+   改参(提高 limit/收窄查询/缩短天数)重试,而不是报告失败。
+6. 工具全部只读(带 `readOnlyHint` 注解);quota 数据来自 daemon 的周期
+   抓取,可能滞后数分钟。
