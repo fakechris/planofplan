@@ -42,9 +42,16 @@
   │     ├── [ISSUE] INV-185: Swift 原生菜单栏应用与轻量状态监控 (In Review)
   │     └── [ISSUE] INV-195: 系统常驻 launchd 守护进程与平滑热重载 (In Review)
   │
-  └── [MILESTONE] INV-164: M6 便携单二进制打包与免环境部署
-        ├── [ISSUE] INV-207: 单二进制打包与静态资源内嵌 (Backlog / Ready)
-        └── [ISSUE] INV-208: 免 Bun 环境的独立 App Bundle 与 launchd 自包含配置 (Backlog / Ready)
+  ├── [MILESTONE] INV-164: M6 便携单二进制打包与免环境部署
+  │     ├── [ISSUE] INV-207: 单二进制打包与静态资源内嵌 (Backlog / Ready)
+  │     └── [ISSUE] INV-208: 免 Bun 环境的独立 App Bundle 与 launchd 自包含配置 (Backlog / Ready)
+  │
+  ├── [MILESTONE] INV-274: M7 跨 Agent 消息级内容检索与上下文交接引擎 (Candidate)
+  │     ├── [ISSUE] INV-276: SQLite FTS5 消息级增量全文索引与信封过滤清洗 (Candidate)
+  │     └── [ISSUE] INV-277: 跨 Agent 需求意图打包与一键上下文交接机制 (Candidate)
+  │
+  └── [MILESTONE] INV-275: M8 研发经验图谱合成与外部伴侣感知消费 (Candidate)
+
 ```
 
 ---

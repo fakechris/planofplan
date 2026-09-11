@@ -52,3 +52,25 @@
 - Apple Developer ID signing (currently relies on per-machine `Lumen Local Codesign` self-signed cert)
 - Codesign hardening for cross-machine cert portability
 - FDA auto-grant (impossible — macOS requires user in System Settings)
+
+---
+
+## High-Level Roadmap: M7 & M8 (Post M6)
+
+详见研究与对比专论：`docs/four-systems-comparison-and-roadmap.md`
+
+### Milestone M7: 跨 Agent 消息级内容检索与上下文交接引擎 (INV-274)
+- **INV-276 (M7-1)**: SQLite FTS5 消息级增量全文索引与信封过滤清洗
+  - 扩展 `~/.planofplan/index.db`：新增 `session_messages` 与 `messages_fts` (trigram/fts5)
+  - 增量扫描：复用 mtime + 行级游标水位，非阻塞单飞追加
+  - 信封降噪：打标 `is_meta=1` 排除命令信封与 Base64 大图
+  - API 与检索：`/api/session-search` 支持消息级 snippet 高亮回源
+- **INV-277 (M7-2)**: 跨 Agent 需求意图打包与一键上下文交接机制
+  - 自动沉淀目标会话的原始意图、修改文件、测试验证与未竟任务
+  - 生成标准 Handoff Markdown，通过 `/api/sessions/:id/handoff` 与 MCP 工具输出
+
+### Milestone M8: 研发经验图谱合成与外部伴侣感知消费 (INV-275)
+- 基于「Commit 归因 + 文件触碰 + 需求动机」闭环，萃取项目级轻量避坑知识卡片（Policy）
+- MCP 新增 `knowledge_query` 与 `project_guidelines` 工具，向外部 Coding Agent 只读投递经验
+- 4 槽位 `/api/agent-status` 扩展实时事件流（SSE/WS），打通桌面伴侣与硬件桌宠感知
+
