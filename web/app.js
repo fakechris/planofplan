@@ -253,7 +253,7 @@ function renderTierPill(plan, now) {
   </span>`;
 }
 
-/** Claude Code 上次用 `claude-fable-5` 超过 24h 时显示醒目 badge（参考 glm 高峰/低谷 pill）。 */
+/** Claude Code 上次用 fable 系模型（claude-fable 前缀）超过 24h 时显示醒目 badge（参考 glm 高峰/低谷 pill）。 */
 const FABLE_IDLE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
 
 function renderFableIdlePill(plan, now) {
@@ -264,8 +264,8 @@ function renderFableIdlePill(plan, now) {
   const label = idleMs < 48 * 60 * 60 * 1000
     ? `${Math.round(idleMs / (60 * 60 * 1000))}h`
     : `${Math.round(idleMs / (24 * 60 * 60 * 1000))}d`;
-  return `<span class="badge fable-idle" title="fable-5 已 ${escapeHtml(label)} 未使用">
-    <i></i>⚠ fable-5 空闲 ${escapeHtml(label)}
+  return `<span class="badge fable-idle" title="fable 系模型已 ${escapeHtml(label)} 未使用">
+    <i></i>⚠ fable 空闲 ${escapeHtml(label)}
   </span>`;
 }
 

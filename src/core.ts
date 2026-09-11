@@ -49,7 +49,7 @@ function estimateWindowStart(windowId: string, resetAt: number | null): number |
   return null;
 }
 
-/** 闲置阈值：Claude Code 超过这个时长没用 `claude-fable-5`，UI 显示醒目 badge。 */
+/** 闲置阈值：Claude Code 超过这个时长没用 fable 系模型，UI 显示醒目 badge。 */
 export const FABLE_IDLE_THRESHOLD_MS = 24 * 60 * 60 * 1000; // TODO: 配置化
 
 export function isFableIdle(plan: OverviewPlan, now: number): boolean {
@@ -77,7 +77,7 @@ export interface OverviewPlan {
   credentialHint: string | null;
   /** 高峰/低谷注解：仅当 plan 启用 peakPricing 时存在；UI 用来渲染轻量 pill。 */
   tier?: TierState | null;
-  /** 上次在本地 Claude Code 下使用 `claude-fable-5` 的 epoch ms；null 表示从未用过。 */
+  /** 上次在本地 Claude Code 下使用 fable 系模型（claude-fable 前缀）的 epoch ms；null 表示从未用过。 */
   fableLastUsedAt: number | null;
   /** 限流冷却截止(epoch ms,来自 paused_until);null=不在冷却。UI 据此显示
    * 「冷却中」而非故障——限流是预期态不是错误(INV-460/466)。 */
@@ -198,7 +198,8 @@ function buildPlanOverview(store: Store, plan: PlanConfig, now: number): Overvie
     manualKey: adapter != null && adapter.manualKey !== false,
     credentialHint: adapter?.credentialHint ?? null,
     tier,
-    fableLastUsedAt: plan.adapter === 'claude' ? store.lastModelUsed('claude', 'claude-fable-5') : null,
+    // 前缀匹配：模型会随版本演进（claude-fable-5 → claude-fable-5-1 …），精确匹配会让空闲判定误报
+    fableLastUsedAt: plan.adapter === 'claude' ? store.lastModelUsed('claude', 'claude-fable') : null,
     cooldownUntil: state?.paused_until != null && state.paused_until > now ? state.paused_until : null,
   };
 }

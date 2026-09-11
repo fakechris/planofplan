@@ -2,8 +2,11 @@
  * Antigravity CLI (agy) adapter。
  *
  * 调用 `agy -p "/usage" --output-format json` 非交互获取配额（零 token 消耗，
- * 不留会话）。响应 response 字段是 TSV：每组模型两行（Weekly / 5H Limit
- * Remaining），格式 "<group>\t<type>\t<percent>%\t<resetISO>"。
+ * 不留会话）。新版 CLI 在 `command.data.groups[].buckets[]` 提供结构化数据
+ * （remaining_fraction / disabled / reset_time），优先解析；旧版退回
+ * `response` 字段的 TSV：每组模型两行（Weekly / 5H Limit Remaining），
+ * 格式 "<group>\t<type>\t<percent>%\t<resetISO>"。周限额耗尽时 5H 行的
+ * 百分比列输出 "disabled"——渲染为显式「不适用」车道，保证 4 个指标稳定。
  *
  * 凭据：不需要手动 key——agy 自身已通过 Google OAuth 登录，
  * detectCredentials 返回固定 credential 标识"本地 CLI 登录态"。
@@ -22,35 +25,170 @@ import { join } from 'node:path';
 
 const USAGE_TIMEOUT_MS = 45_000;  // 实测 agy 启动+查询 ≈18s;15s 会 kill 导致 context canceled
 
+interface AgyBucket {
+  id?: string;
+  name?: string;
+  window?: string; // 'weekly' | '5h'
+  remaining_fraction?: number; // 0..1
+  reset_time?: string; // ISO
+  disabled?: boolean;
+  description?: string;
+}
+
+interface AgyGroup {
+  name?: string;
+  description?: string;
+  buckets?: AgyBucket[];
+}
+
 interface AgyUsageResponse {
   status?: string;
   response?: string;
   error?: string;
+  command?: { name?: string; data?: { groups?: AgyGroup[] } };
 }
 
-/** TSV 行 → QuotaWindow;解析失败返回 null。 */
+/** 模型组 → 窗口前缀（window 必须全局唯一:latestByPlan 的 SQL 按窗口分区去重）。 */
+function groupWindowSlug(groupName: string): string {
+  if (/gemini/i.test(groupName)) return 'gemini';
+  if (/claude|gpt/i.test(groupName)) return 'claude_gpt';
+  return 'other';
+}
+
+function groupLabel(groupName: string): string {
+  if (/gemini/i.test(groupName)) return 'Gemini';
+  if (/claude|gpt/i.test(groupName)) return 'Claude/GPT';
+  return groupName;
+}
+
+function parseReset(iso: string | undefined): number | null {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  return Number.isFinite(t) ? t : null;
+}
+
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
+/**
+ * 优先解析 `command.data.groups[].buckets[]` 结构化数据（含 remaining_fraction
+ * 与 disabled 标志）；旧版 CLI 无结构化数据时退回 TSV。
+ *
+ * disabled 的 5H 车道（周限额已耗尽时 5H 不适用）必须显式渲染成一条
+ * 「不适用」车道而不是静默丢行——否则 UI 上 4 个指标会变成 2-3 个。
+ */
+function parseStructured(json: AgyUsageResponse): QuotaWindow[] | null {
+  const groups = json.command?.data?.groups;
+  if (!Array.isArray(groups) || groups.length === 0) return null;
+  const out: QuotaWindow[] = [];
+  for (const group of groups) {
+    if (group == null || typeof group !== 'object') continue;
+    const slug = groupWindowSlug(group.name ?? '');
+    const label = groupLabel(group.name ?? '');
+    const buckets = Array.isArray(group.buckets) ? group.buckets : [];
+    const weeklyReset = parseReset(buckets.find((b) => b?.window === 'weekly')?.reset_time);
+    for (const bucket of buckets) {
+      if (bucket == null || typeof bucket !== 'object') continue;
+      const isWeekly = bucket.window === 'weekly';
+      const window = `${slug}_${isWeekly ? 'weekly' : 'rolling_5h'}`;
+      const laneLabel = isWeekly ? `${label} Week` : `${label} 5H`;
+      if (bucket.disabled) {
+        out.push({
+          window,
+          label: laneLabel,
+          used: null,
+          total: null,
+          unit: 'percent',
+          percentage: null,
+          // 5H 不适用时,恢复点取同组周限额的重置时刻(5H 随周限额恢复而重新适用)
+          resetAt: isWeekly ? parseReset(bucket.reset_time) : weeklyReset,
+          startedAt: null,
+          note: '不适用（周限额已耗尽）',
+        });
+        continue;
+      }
+      const rf = bucket.remaining_fraction;
+      if (typeof rf !== 'number' || !Number.isFinite(rf)) continue;
+      const usedPct = round2(Math.min(100, Math.max(0, (1 - rf) * 100)));
+      out.push({
+        window,
+        label: laneLabel,
+        used: usedPct,
+        total: 100,
+        unit: 'percent',
+        percentage: usedPct,
+        resetAt: parseReset(bucket.reset_time),
+        startedAt: null,
+        note: null,
+      });
+    }
+  }
+  return out.length > 0 ? out : null;
+}
+
+/** TSV 行 → QuotaWindow;`disabled` 值显式渲染为不适用车道,其余解析失败返回 null。 */
 function parseQuotaLine(line: string): QuotaWindow | null {
   const [group, type, percentStr, resetIso] = line.split('\t');
   if (!group || !type || !percentStr) return null;
   const pct = parseFloat(percentStr.replace('%', ''));
-  if (!Number.isFinite(pct)) return null;
   const resetAt = resetIso ? Date.parse(resetIso) : NaN;
   const isWeekly = type.includes('Weekly');
   const modelLabel = group.includes('Gemini') ? 'Gemini' : group.includes('Claude') ? 'Claude/GPT' : group;
-  // window 必须全局唯一:latestByPlan 的 SQL 按 window 分区去重,
+  // window 必须全局唯一:latestByPlan 的 SQL 按窗口分区去重,
   // 两组模型共用 'weekly' 会互相覆盖(实测踩过:Gemini 窗口被 Claude 覆盖)
   const windowSlug = group.includes('Gemini') ? 'gemini' : group.includes('Claude') ? 'claude_gpt' : 'other';
+  if (!Number.isFinite(pct)) {
+    // 周限额耗尽时 agy 在百分比列输出 "disabled"(5H 不适用)——渲染为显式车道
+    if (!/disabled/i.test(percentStr)) return null;
+    return {
+      window: `${windowSlug}_${isWeekly ? 'weekly' : 'rolling_5h'}`,
+      label: isWeekly ? `${modelLabel} Week` : `${modelLabel} 5H`,
+      used: null,
+      total: null,
+      unit: 'percent',
+      percentage: null,
+      resetAt: Number.isFinite(resetAt) ? resetAt : null,
+      startedAt: null,
+      note: '不适用（周限额已耗尽）',
+    };
+  }
   return {
     window: `${windowSlug}_${isWeekly ? 'weekly' : 'rolling_5h'}`,
     label: isWeekly ? `${modelLabel} Week` : `${modelLabel} 5H`,
-    used: Math.round((100 - pct) * 100) / 100,
+    used: round2(100 - pct),
     total: 100,
     unit: 'percent',
-    percentage: Math.round((100 - pct) * 100) / 100,
+    percentage: round2(100 - pct),
     resetAt: Number.isFinite(resetAt) ? resetAt : null,
     startedAt: null,
     note: null,
   };
+}
+
+/** agy /usage JSON 输出 → QuotaWindow[]；解析/状态异常抛 AdapterError。 */
+export function parseAgyUsage(raw: string): QuotaWindow[] {
+  let json: AgyUsageResponse;
+  try {
+    json = JSON.parse(raw) as AgyUsageResponse;
+  } catch {
+    throw new AdapterError('parse', `agy 输出不是合法 JSON：${raw.slice(0, 80)}`);
+  }
+  if (json.status !== 'SUCCESS' || typeof json.response !== 'string') {
+    throw new AdapterError('api', `agy 返回异常状态：${json.status ?? json.error ?? 'unknown'}`);
+  }
+  const structured = parseStructured(json);
+  if (structured) return structured;
+  const windows = json.response
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map(parseQuotaLine)
+    .filter((w): w is QuotaWindow => w !== null);
+  if (windows.length === 0) {
+    throw new AdapterError('parse', 'agy 配额响应无可解析行');
+  }
+  return windows;
 }
 
 /** 异步找 agy 二进制(只查文件存在性,不 exec --version——避免阻塞)。 */
@@ -254,24 +392,6 @@ export const agyAdapter: PlanAdapter = {
       }
       throw new AdapterError('api', `agy CLI 调用失败：${msg.slice(0, 120)}`);
     }
-    let json: AgyUsageResponse;
-    try {
-      json = JSON.parse(raw) as AgyUsageResponse;
-    } catch {
-      throw new AdapterError('parse', `agy 输出不是合法 JSON：${raw.slice(0, 80)}`);
-    }
-    if (json.status !== 'SUCCESS' || typeof json.response !== 'string') {
-      throw new AdapterError('api', `agy 返回异常状态：${json.status ?? json.error ?? 'unknown'}`);
-    }
-    const windows = json.response
-      .split('\n')
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .map(parseQuotaLine)
-      .filter((w): w is QuotaWindow => w !== null);
-    if (windows.length === 0) {
-      throw new AdapterError('parse', 'agy 配额响应无可解析行');
-    }
-    return windows;
+    return parseAgyUsage(raw);
   },
 };

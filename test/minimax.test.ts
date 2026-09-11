@@ -169,4 +169,15 @@ describe('normalizeMiniMax 新版不限量套餐（2026-08 实测响应）', () 
     expect(windows.find((w) => w.label === '视频·周')?.total).toBe(21);
     expect(windows.find((w) => w.label === 'Week')?.window).toBe('weekly_unlimited');
   });
+
+  test('video 车道 window slug 与主车道分离，避免 latestByPlan 分区去重吞掉主 5H', () => {
+    const { windows } = normalizeMiniMax(raw, NOW);
+    const windowNames = windows.map((w) => w.window);
+    // 主车道保留标准名（rolling_5h），video 车道用独立前缀
+    expect(windowNames).toContain('rolling_5h');
+    expect(windowNames).toContain('video_rolling_5h');
+    expect(windowNames).toContain('video_weekly');
+    expect(windowNames).toContain('weekly_unlimited');
+    expect(new Set(windowNames).size).toBe(windowNames.length);
+  });
 });
