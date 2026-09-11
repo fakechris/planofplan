@@ -282,3 +282,63 @@ describe('buildOverview window reset normalization', () => {
     expect(weekAfter.percentage).toBe(14);
   });
 });
+
+describe('Scheduler 限流感知退避', () => {
+  test('retryAfterSec 透传:paused_until 推到服务端明示的恢复时刻(而非 1 分钟常规退避)', async () => {
+    const { Scheduler } = await import('../src/core.ts');
+    const { registry } = await import('../src/adapters/index.ts');
+    const { AdapterError } = await import('../src/types.ts');
+    const store = openMemoryDb();
+    const plan = DEFAULT_PLANS.find((item) => item.slug === 'minimax')!;
+    store.syncPlan(plan);
+    const original = registry.minimax;
+    const before = Date.now();
+    registry.minimax = {
+      slug: 'minimax',
+      detectCredentials: async () => ({ kind: 'bearer', value: 'test', source: 'manual' }),
+      fetchUsage: async () => {
+        throw new AdapterError('api', '端点限流(HTTP 429)，服务端提示约 5 分钟后恢复', 300);
+      },
+    };
+    try {
+      const scheduler = new Scheduler(store, { port: 9291, plans: [plan] });
+      const result = await scheduler.refreshPlan('minimax');
+      expect(result.ok).toBe(false);
+      const state = store.getState('minimax');
+      expect(state?.last_error).toContain('限流');
+      // 常规首次失败退避是 60s;服务端提示 300s 必须胜出(含 5~15s 抖动余量)
+      expect(state!.paused_until!).toBeGreaterThanOrEqual(before + 305_000);
+      expect(state!.paused_until!).toBeLessThanOrEqual(before + 320_000);
+    } finally {
+      registry.minimax = original!;
+    }
+  });
+
+  test('无服务端提示时维持原有失败次数退避', async () => {
+    const { Scheduler } = await import('../src/core.ts');
+    const { registry } = await import('../src/adapters/index.ts');
+    const { AdapterError } = await import('../src/types.ts');
+    const store = openMemoryDb();
+    const plan = DEFAULT_PLANS.find((item) => item.slug === 'minimax')!;
+    store.syncPlan(plan);
+    const original = registry.minimax;
+    const before = Date.now();
+    registry.minimax = {
+      slug: 'minimax',
+      detectCredentials: async () => ({ kind: 'bearer', value: 'test', source: 'manual' }),
+      fetchUsage: async () => {
+        throw new AdapterError('api', '普通失败');
+      },
+    };
+    try {
+      const scheduler = new Scheduler(store, { port: 9291, plans: [plan] });
+      await scheduler.refreshPlan('minimax');
+      const state = store.getState('minimax');
+      // 首次失败:60s 退避(与改造前行为一致)
+      expect(state!.paused_until!).toBeGreaterThanOrEqual(before + 60_000);
+      expect(state!.paused_until!).toBeLessThanOrEqual(before + 62_000);
+    } finally {
+      registry.minimax = original!;
+    }
+  });
+});

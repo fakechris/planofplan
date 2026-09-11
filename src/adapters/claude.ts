@@ -15,6 +15,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { AdapterContext, Credential, PlanAdapter, QuotaWindow } from '../types.ts';
 import { AdapterError } from '../types.ts';
+import { fetchQuota } from './http.ts';
 import { clampPct } from './util.ts';
 
 const execFileAsync = promisify(execFile);
@@ -389,7 +390,7 @@ export const claudeAdapter: PlanAdapter = {
 
     const requestUsage = async (): Promise<Response> => {
       try {
-        return await fetch(USAGE_URL, {
+        return await fetchQuota(USAGE_URL, {
           method: 'GET',
           headers: {
             Authorization: `Bearer ${activeToken}`,
@@ -399,6 +400,7 @@ export const claudeAdapter: PlanAdapter = {
           signal: AbortSignal.timeout(15_000),
         });
       } catch (e) {
+        if (e instanceof AdapterError && e.kind === 'api') throw e; // 限流耗尽,带 retryAfterSec 上抛
         if (e instanceof Error && e.name === 'TimeoutError') {
           throw new AdapterError('network', `Claude 请求超时：${USAGE_URL}`);
         }
@@ -406,8 +408,20 @@ export const claudeAdapter: PlanAdapter = {
       }
     };
 
-    let res = await requestUsage();
-    if ((res.status === 401 || res.status === 403 || res.status === 429) && (await refresh())) {
+    // fetchQuota 已就地消化短等待的 429;抛上来的限流错误先试一次换 token
+    // (onWatch 方案:刷新 = 换限流窗口),换完仍限流才把 retryAfterSec 交给调度器。
+    // 401/403 仍以 Response 返回,走原有的换 token 重试。
+    let res: Response;
+    try {
+      res = await requestUsage();
+    } catch (e) {
+      if (e instanceof AdapterError && e.kind === 'api' && cred.refreshToken && (await refresh())) {
+        res = await requestUsage();
+      } else {
+        throw e;
+      }
+    }
+    if ((res.status === 401 || res.status === 403) && (await refresh())) {
       res = await requestUsage();
     }
     if (res.status === 401 || res.status === 403) {
@@ -416,7 +430,6 @@ export const claudeAdapter: PlanAdapter = {
         `Claude OAuth token 被拒绝(HTTP ${res.status})：请运行 \`claude\` 触发凭据刷新后重试`,
       );
     }
-    if (res.status === 429) throw new AdapterError('api', 'Claude usage 端点限流(HTTP 429)，稍后重试');
     if (!res.ok) throw new AdapterError('api', `Claude API 错误(HTTP ${res.status})`);
 
     let json: unknown;

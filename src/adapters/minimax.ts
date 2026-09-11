@@ -14,6 +14,7 @@
  * legacy 套餐通常只有 5h 单车道；weekly 车道仅在 current_weekly_total_count > 0 时渲染。
  */
 import type { AdapterContext, Credential, PlanAdapter, QuotaWindow } from '../types.ts';
+import { fetchQuota } from './http.ts';
 import { AdapterError } from '../types.ts';
 import { clampPct } from './util.ts';
 
@@ -273,7 +274,7 @@ export const minimaxAdapter: PlanAdapter = {
     for (const url of urls) {
       try {
         // 参照 CodexBar：Bearer + accept/json；401/403 → auth；404/405 → 换端点
-        const res = await fetch(url, {
+        const res = await fetchQuota(url, {
           method: 'GET',
           headers: {
             Authorization: `Bearer ${cred.value}`,
