@@ -10,6 +10,14 @@ function backoffSec(failures: number): number {
   return Math.min(30 * 60, 60 * 2 ** Math.min(failures - 1, 8));
 }
 
+/** 调度冷却取两者较大：常规失败退避 vs 服务端明示的恢复时间(+5~15s 抖动)。
+ * sourcebot 实践:限流时听服务端的(x-ratelimit-reset),不要自己猜着撞墙。 */
+function cooldownSec(failures: number, serverHintSec: number | undefined): number {
+  const base = backoffSec(failures);
+  if (!serverHintSec || serverHintSec <= 0) return base;
+  return Math.max(base, serverHintSec + 5 + Math.floor(Math.random() * 10));
+}
+
 function formatDuration(ms: number): string {
   const s = Math.round(ms / 1000);
   if (s < 60) return `${s} 秒`;
@@ -201,12 +209,16 @@ export class Scheduler {
 
   start(): void {
     const plans = this.store.listPlans();
-    for (const plan of plans) {
-      if (!plan.enabled) continue;
+    // 启动轮询错峰:全部 plan 立即齐射会在 daemon 重启/升级时对各家
+    // API 形成瞬时并发打点(限流敏感的端点直接 429),按 500ms/plan 拉开
+    plans.forEach((plan, index) => {
+      if (!plan.enabled) return;
       const adapter = getAdapter(plan.adapter);
-      if (!adapter) continue;
+      if (!adapter) return;
       const intervalSec = plan.pollIntervalSec > 0 ? plan.pollIntervalSec : 60;
-      void this.safeRefresh(plan.slug);
+      setTimeout(() => {
+        void this.safeRefresh(plan.slug);
+      }, index * 500);
       const t = setInterval(() => {
         void this.maybePoll(plan.slug);
       }, intervalSec * 1000);
@@ -215,7 +227,7 @@ export class Scheduler {
       // 若库中已有未来重置时间，预约重置时刻抓取
       const windows = this.store.latestByPlan(plan.slug, true);
       this.scheduleNextResetPoll(plan.slug, windows);
-    }
+    });
   }
 
   /** 调度器入口必须吞错:refreshPlan 的未捕获拒绝(SQLITE_BUSY 等)会把整个 daemon 带崩。 */
@@ -316,7 +328,7 @@ export class Scheduler {
       this.store.setState(slug, {
         consecutive_failures: failures,
         last_error: err.message,
-        paused_until: Date.now() + backoffSec(failures) * 1000,
+        paused_until: Date.now() + cooldownSec(failures, err.retryAfterSec) * 1000,
         auth_status: err.kind === 'auth' || err.kind === 'unknown' ? AUTH_STATUS.INVALID : state?.auth_status ?? AUTH_STATUS.UNKNOWN,
       });
       return { ok: false, slug, error: err.message, auth: err.kind === 'auth' };

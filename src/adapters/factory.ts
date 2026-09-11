@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { AdapterContext, Credential, PlanAdapter, QuotaWindow } from '../types.ts';
+import { fetchQuota } from './http.ts';
 import { AdapterError } from '../types.ts';
 import { clampPct } from './util.ts';
 import { getFactoryBrowserSession, updateFactoryWorkOSSession, clearFactoryBrowserSession } from '../factory-session.ts';
@@ -267,7 +268,7 @@ function headers(credential: Credential): Record<string, string> {
 async function getJSONAt(base: string, path: string, credential: Credential): Promise<unknown> {
   let response: Response;
   try {
-    response = await fetch(`${base}${path}`, {
+    response = await fetchQuota(`${base}${path}`, {
       method: 'GET',
       headers: headers(credential),
       signal: AbortSignal.timeout(12_000),
@@ -340,7 +341,7 @@ async function exchangeWorkOSRefreshToken(
       let lastBody = '';
       for (let i = 0; i < attempts.length; i++) {
         const isForm = i > 0;
-        response = await fetch(`${WORKOS_AUTH_BASE}${WORKOS_AUTH_PATH}`, {
+        response = await fetchQuota(`${WORKOS_AUTH_BASE}${WORKOS_AUTH_PATH}`, {
           method: 'POST',
           headers: {
             accept: 'application/json',

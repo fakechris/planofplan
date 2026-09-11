@@ -597,6 +597,9 @@ export class AdapterError extends Error {
   constructor(
     public kind: 'auth' | 'network' | 'api' | 'parse' | 'unknown',
     message: string,
+    /** 服务端明示的恢复等待（429 的 retry-after / x-ratelimit-reset）。
+     * 调度器据此把 paused_until 推到恢复时刻，而不是按失败次数猜。 */
+    public retryAfterSec?: number,
   ) {
     super(message);
     this.name = 'AdapterError';

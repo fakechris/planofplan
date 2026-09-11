@@ -17,6 +17,7 @@ import { homedir } from 'node:os';
 import { createInterface } from 'node:readline';
 import { spawn } from 'node:child_process';
 import type { AdapterContext, Credential, PlanAdapter, QuotaWindow } from '../types.ts';
+import { fetchQuota } from './http.ts';
 import { AdapterError } from '../types.ts';
 import { clampPct } from './util.ts';
 
@@ -279,7 +280,7 @@ export const grokAdapter: PlanAdapter = {
 
     let res: Response;
     try {
-      res = await fetch(BILLING_URL, {
+      res = await fetchQuota(BILLING_URL, {
         method: 'GET',
         headers,
         signal: AbortSignal.timeout(10_000),
@@ -313,7 +314,7 @@ export const grokAdapter: PlanAdapter = {
 
     // 尽力获取套餐名（2s 内，失败不影响主数据）
     try {
-      const s = await fetch(SETTINGS_URL, {
+      const s = await fetchQuota(SETTINGS_URL, {
         method: 'GET',
         headers,
         signal: AbortSignal.timeout(2_000),

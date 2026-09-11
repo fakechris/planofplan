@@ -31,6 +31,7 @@ import { homedir } from 'node:os';
 import { ensureHome } from '../config.ts';
 import { Database } from 'bun:sqlite';
 import type { AdapterContext, Credential, PlanAdapter, QuotaWindow } from '../types.ts';
+import { fetchQuota } from './http.ts';
 import { AdapterError } from '../types.ts';
 import { clampPct } from './util.ts';
 import {
@@ -175,7 +176,7 @@ async function refreshCliAccessToken(cli: CliCredentialFile): Promise<CliCredent
   if (deviceId) headers['x-msh-device-id'] = deviceId;
   let res: Response;
   try {
-    res = await fetch(`${host}/api/oauth/token`, {
+    res = await fetchQuota(`${host}/api/oauth/token`, {
       method: 'POST',
       headers,
       body: new URLSearchParams({
@@ -581,7 +582,7 @@ export async function refreshKimiWebAccessToken(
 ): Promise<{ accessToken: string; refreshToken: string | null } | null> {
   let res: Response;
   try {
-    res = await fetch(KIMI_AUTH_REFRESH_URL, {
+    res = await fetchQuota(KIMI_AUTH_REFRESH_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -736,7 +737,7 @@ async function fetchWebUsage(
 ): Promise<QuotaWindow[]> {
   let res: Response;
   try {
-    res = await fetch(GET_USAGES_URL, {
+    res = await fetchQuota(GET_USAGES_URL, {
       method: 'POST',
       headers: webHeaders(token, cookieHeader),
       body: '{"scope":["FEATURE_CODING"]}',
@@ -797,7 +798,7 @@ async function fetchWebUsage(
 async function fetchSubscriptionStats(token: string, cookieHeader?: string | null): Promise<QuotaWindow> {
   let res: Response;
   try {
-    res = await fetch(SUBSCRIPTION_STATS_URL, {
+    res = await fetchQuota(SUBSCRIPTION_STATS_URL, {
       method: 'POST',
       headers: webHeaders(token, cookieHeader),
       body: '{}',
@@ -896,7 +897,7 @@ export const kimiAdapter: PlanAdapter = {
 
       let response: Response;
       try {
-        response = await fetch(url, {
+        response = await fetchQuota(url, {
           method: 'GET',
           headers,
           signal: AbortSignal.timeout(10_000),

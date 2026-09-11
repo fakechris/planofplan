@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { readdirSync, statSync, openSync, readSync, closeSync } from 'node:fs';
 import type { AdapterContext, Credential, PlanAdapter, QuotaWindow } from '../types.ts';
+import { fetchQuota } from './http.ts';
 import { AdapterError } from '../types.ts';
 import { clampPct } from './util.ts';
 
@@ -388,7 +389,7 @@ export const codexAdapter: PlanAdapter = {
 
     let res: Response;
     try {
-      res = await fetch(USAGE_URL, {
+      res = await fetchQuota(USAGE_URL, {
         method: 'GET',
         headers,
         signal: AbortSignal.timeout(10_000),

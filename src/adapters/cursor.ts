@@ -19,6 +19,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { Database } from 'bun:sqlite';
 import type { AdapterContext, Credential, PlanAdapter, QuotaWindow } from '../types.ts';
+import { fetchQuota } from './http.ts';
 import { AdapterError } from '../types.ts';
 import { clampPct } from './util.ts';
 
@@ -228,7 +229,7 @@ export const cursorAdapter: PlanAdapter = {
     const url = userId ? `${LEGACY_URL}?user=${encodeURIComponent(userId)}` : LEGACY_URL;
     let legacyWin: QuotaWindow | null = null;
     try {
-      const res = await fetch(url, { method: 'GET', headers: baseHeaders, signal: AbortSignal.timeout(12_000) });
+      const res = await fetchQuota(url, { method: 'GET', headers: baseHeaders, signal: AbortSignal.timeout(12_000) });
       if (res.status === 401 || res.status === 403) {
         // 整体鉴权失败 → 试 USD 再定
         throw new AdapterError('auth', `Cursor 鉴权失败(HTTP ${res.status})：请重新登录 Cursor`);
@@ -245,7 +246,7 @@ export const cursorAdapter: PlanAdapter = {
 
     // ② USD credit 兜底
     try {
-      const res = await fetch(USD_URL, {
+      const res = await fetchQuota(USD_URL, {
         method: 'POST',
         headers: {
           ...baseHeaders,

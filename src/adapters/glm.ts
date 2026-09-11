@@ -20,6 +20,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { AdapterContext, Credential, PlanAdapter, QuotaWindow } from '../types.ts';
+import { fetchQuota } from './http.ts';
 import { AdapterError } from '../types.ts';
 import { clampPct } from './util.ts';
 
@@ -240,7 +241,7 @@ export const glmAdapter: PlanAdapter = {
 
         let res: Response;
         try {
-          res = await fetch(url, {
+          res = await fetchQuota(url, {
             method: 'GET',
             headers,
             signal: AbortSignal.timeout(10_000),

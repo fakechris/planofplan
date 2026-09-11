@@ -15,6 +15,7 @@
  * 处理；本 adapter 只负责返回原始余额窗口。
  */
 import type { AdapterContext, Credential, PlanAdapter, QuotaWindow } from '../types.ts';
+import { fetchQuota } from './http.ts';
 import { AdapterError } from '../types.ts';
 import { formatMoney, round2 } from './util.ts';
 
@@ -121,7 +122,7 @@ export const deepseekAdapter: PlanAdapter = {
   },
 
   async fetchUsage(_ctx: AdapterContext, cred: Credential): Promise<QuotaWindow[]> {
-    const res = await fetch(BALANCE_URL, {
+    const res = await fetchQuota(BALANCE_URL, {
       method: 'GET',
       headers: {
         Authorization: `Bearer ${cred.value}`,
