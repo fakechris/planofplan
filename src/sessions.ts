@@ -940,6 +940,7 @@ function indexSessionFileMessages(
     && state.parserVersion === MESSAGE_PARSER_VERSION
     && !isCompressedLog(readPath)
     && state.parsedBytes > 0
+    && state.parsedBytes <= state.size
     && readSize >= state.size
     && readSize > state.parsedBytes;
   const baseLines = canAppend && state ? state.lines : 0;
@@ -1062,6 +1063,7 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
       && state.parserVersion === MESSAGE_PARSER_VERSION
       && state.mtimeMs >= compositeMtimeMs
       && state.size === compositeSize
+      && state.parsedBytes <= state.size
       && compositeSize > 0;
     if (file.provider !== 'zcode' && existingRows && latestSeen >= compositeMtimeMs && indexFresh) {
       rows.push(...existingRows);

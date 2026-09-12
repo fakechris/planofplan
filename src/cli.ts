@@ -19,7 +19,6 @@ import { existsSync, statSync, renameSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { sessionProject } from './repos.ts';
 import { searchSkills, syncSkillsCatalog } from './skills.ts';
-import { childProcessArgs } from './spawn.ts';
 
 const argv = process.argv.slice(2);
 
@@ -251,32 +250,13 @@ async function serve(): Promise<void> {
   }
 
   // live = 非 demo:启动文件监听,session 目录有写入就自动增量索引(见 server.ts)
-  const server = createServer(store, scheduler, cfg, { live: !f.demo });
+  const server = createServer(store, scheduler, cfg, { live: !f.demo, startupScan: !f.demo });
   // idleTimeout 提到 2 分钟:handoff 的 LLM 摘要合成可能超过默认 10s,
   // Bun.serve 会在 handler 无输出时掐掉请求(线上实测踩过)
   Bun.serve({ port, fetch: server.fetch, idleTimeout: 120 });
   console.log(`planofplan 已启动: http://localhost:${port}${f.demo ? '  (demo 数据，内存库，不落盘)' : ''}`);
   if (f.demo) console.log('提示：demo 模式用内置示例数据预览界面；真实数据请配置 MINIMAX_CODING_API_KEY 后去掉 --demo 启动。');
-  if (!f.demo) {
-    // 启动扫描走子进程(与 watcher spawn 路径一致):进程内的 collectSessionCatalog
-    // 含大量同步 git/zstd/readFileSync 调用,串行累计分钟级阻塞事件循环——
-    // 实测导致 daemon 启动后数分钟 API 无响应(含 /api/build-info)。
-    // childProcessArgs 统一处理解释/编译两种形态的 argv(编译态判定失效会
-    // 让扫描子进程秒退且 exit 0,数据静默停更)。
-    void Bun.spawn(childProcessArgs(['sessions', '--refresh', '--days', '90']), { stdout: 'ignore', stderr: 'inherit' })
-      .exited
-      .then((code) => {
-        if (code === 0) console.log('[sessions] startup scan completed (subprocess)');
-        else console.error(`[sessions] startup scan exit ${code}`);
-      });
 
-    // usage 启动扫描同样走子进程(同步 zstd 解压会阻塞事件循环)
-    void Bun.spawn(childProcessArgs(['tokens', '--days', '3', '--no-official']), { stdout: 'ignore', stderr: 'inherit' })
-      .exited
-      .then((code) => {
-        if (code !== 0) console.error(`[usage] startup scan exit ${code}`);
-      });
-  }
 }
 
 // ── usage ───────────────────────────────────────────────────────────

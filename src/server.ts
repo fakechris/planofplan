@@ -29,6 +29,7 @@ import { registerMcpRoutes } from './mcp.ts';
 import { buildLineageReport } from './lineage-report.ts';
 import { getAgentStatus } from './agent-status.ts';
 import { childProcessArgs } from './spawn.ts';
+import { ScanQueue } from './scan-queue.ts';
 
 // In dev (bun src/cli.ts), import.meta.dir points at src/ and ../web = repo/web.
 // In a bun build --compile binary, import.meta.dir resolves to the executable's
@@ -47,6 +48,9 @@ const WEB_DIR = (() => {
 export interface ServerOptions {
   /** true 时启动文件监听,变更自动触发 session 索引(demo 模式传 false)。 */
   live?: boolean;
+  startupScan?: boolean;
+  /** Injectable process boundary for isolated queue/API tests. */
+  spawnScan?: (args: string[]) => Pick<Bun.Subprocess, 'exited'>;
 }
 
 export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig, options: ServerOptions = {}): Hono {
@@ -80,39 +84,38 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
     }
   };
 
-  let usageRefreshProcess: Bun.Subprocess | null = null;
+  let usageRefreshProcess: Pick<Bun.Subprocess, 'exited'> | null = null;
   let usageRefreshStartedAt: number | null = null;
   let usageRefreshError: string | null = null;
-  let sessionIndexProcess: Bun.Subprocess | null = null;
+  let sessionIndexProcess: Pick<Bun.Subprocess, 'exited'> | null = null;
   // usage 报表缓存：usage_records 只随扫描子进程 / 手动 CLI 写入变化，聚合
   // 十几万行是秒级同步 CPU+IO 工作，前端 30s 一次的轮询不应每次重算。
   // 扫描完成时整体失效；TTL 兜底覆盖外部 CLI 的直写。
   const usageReportCache = new Map<string, { report: ReturnType<typeof buildUsageReport>; at: number }>();
   const USAGE_CACHE_TTL_MS = 60_000;
 
+  const spawnScan = options.spawnScan ?? ((args: string[]) => Bun.spawn(childProcessArgs(args), { stdout: 'ignore', stderr: 'inherit' }));
+  const scanQueue = new ScanQueue(async (request) => {
+    if (request.kind === 'usage') await runUsageRefresh(request.days, request.includeOfficial ?? false);
+    else await runSessionIndex(request.days, request.source);
+  }, (error) => console.error('[scan] failed:', error instanceof Error ? error.message : String(error)));
   const startUsageRefresh = (days: number, includeOfficial: boolean): void => {
-    if (usageRefreshProcess) return;
+    scanQueue.enqueue({ kind: 'usage', days, includeOfficial, source: 'page' });
+  };
+  const runUsageRefresh = async (days: number, includeOfficial: boolean): Promise<void> => {
     usageRefreshError = null;
     usageRefreshStartedAt = Date.now();
-    const scanProcess = Bun.spawn(childProcessArgs(['tokens', '--days', String(days), ...(includeOfficial ? [] : ['--no-official'])]), {
-      stdout: 'ignore',
-      stderr: 'inherit',
-    });
-    usageRefreshProcess = scanProcess;
-    void scanProcess.exited
-      .then((exitCode) => {
-        if (exitCode !== 0) {
-          usageRefreshError = `本地日志扫描失败（exit ${exitCode}）`;
-        }
-      })
-      .catch((error) => {
-        usageRefreshError = error instanceof Error ? error.message : '本地日志扫描失败';
-      })
-      .finally(() => {
-        usageRefreshProcess = null;
-        usageRefreshStartedAt = null;
-        usageReportCache.clear();
-      });
+    try {
+      usageRefreshProcess = spawnScan(['tokens', '--days', String(days), ...(includeOfficial ? [] : ['--no-official'])]);
+      const exitCode = await usageRefreshProcess.exited;
+      if (exitCode !== 0) usageRefreshError = `本地日志扫描失败（exit ${exitCode}）`;
+    } catch (error) {
+      usageRefreshError = error instanceof Error ? error.message : '本地日志扫描失败';
+    } finally {
+      usageRefreshProcess = null;
+      usageRefreshStartedAt = null;
+      usageReportCache.clear();
+    }
   };
 
   app.get('/api/overview', (c) => {
@@ -367,34 +370,35 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
     });
   });
 
-  // session 索引触发(单飞 + trailing 重触发):页面打开与 watcher flush 走同一道闸,
-  // 保证同一时刻只有一个扫描子进程;扫描期间到来的触发记为 pending,结束后补跑一轮。
+  // 启动、页面、watcher 和 usage 共用单一队列，每种扫描最多保留一次 trailing 请求。
   let sessionIndexStartedAt: number | null = null;
-  let sessionIndexPending = false;
   const sessionIndexLast: { at: number | null; source: string | null; changedFiles: number | null } = {
     at: null,
     source: null,
     changedFiles: null,
   };
   const startSessionIndex = (days: number, source = 'page'): void => {
-    if (sessionIndexProcess) {
-      sessionIndexPending = true;
-      return;
-    }
+    scanQueue.enqueue({ kind: 'sessions', days, source });
+  };
+  const runSessionIndex = async (days: number, source: string): Promise<void> => {
     sessionIndexStartedAt = Date.now();
-    sessionIndexProcess = Bun.spawn(childProcessArgs(['sessions', '--refresh', '--days', String(days)]), { stdout: 'ignore', stderr: 'inherit' });
-    broadcastSSE('index', { state: 'running', source, startedAt: sessionIndexStartedAt });
-    void sessionIndexProcess.exited.finally(() => {
+    try {
+      sessionIndexProcess = spawnScan(['sessions', '--refresh', '--days', String(days)]);
+      broadcastSSE('index', { state: 'running', source, startedAt: sessionIndexStartedAt });
+      const exitCode = await sessionIndexProcess.exited;
+      if (exitCode !== 0) {
+        broadcastSSE('index', { state: 'error', source, exitCode });
+        console.error(`[sessions] ${source} scan exit ${exitCode}`);
+      } else {
+        sessionIndexLast.at = Date.now();
+        sessionIndexLast.source = source;
+        broadcastSSE('sessions-indexed', { at: sessionIndexLast.at, source });
+        console.log(`[sessions] ${source} scan completed`);
+      }
+    } finally {
       sessionIndexProcess = null;
       sessionIndexStartedAt = null;
-      sessionIndexLast.at = Date.now();
-      sessionIndexLast.source = source;
-      broadcastSSE('sessions-indexed', { at: sessionIndexLast.at, source });
-      if (sessionIndexPending) {
-        sessionIndexPending = false;
-        startSessionIndex(days, source);
-      }
-    });
+    }
   };
 
   app.get('/api/sessions', (c) => {
@@ -1401,6 +1405,11 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
     if (watcher.roots.length > 0) {
       console.log(`[watcher] watching ${watcher.roots.length} session roots for live indexing`);
     }
+  }
+
+  if (options.startupScan) {
+    startSessionIndex(90, 'startup');
+    startUsageRefresh(3, false);
   }
 
   return app;
