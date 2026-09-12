@@ -115,8 +115,8 @@ describe('mcp handshake', () => {
       tools?: Array<{ name: string; title?: string; inputSchema: unknown; annotations?: Record<string, unknown> }>;
     }).tools) ?? [];
     expect(tools.map((t) => t.name).sort()).toEqual([
-      'lineage_report', 'plan_quota_status', 'planofplan_project_context', 'planofplan_search_skills',
-      'read_session', 'recent_edits', 'repo_lineage', 'requirement_status', 'session_handoff', 'session_search', 'usage_summary',
+      'lineage_report', 'message_search', 'plan_quota_status', 'planofplan_project_context', 'planofplan_search_skills',
+      'read_message', 'read_session', 'recent_edits', 'repo_lineage', 'requirement_status', 'session_handoff', 'session_search', 'usage_summary',
     ]);
     for (const tool of tools) {
       expect(tool.inputSchema).toBeDefined();

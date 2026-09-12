@@ -29,6 +29,7 @@ import { registerMcpRoutes } from './mcp.ts';
 import { buildLineageReport } from './lineage-report.ts';
 import { getAgentStatus } from './agent-status.ts';
 import { childProcessArgs } from './spawn.ts';
+import { registerMessageEvidenceRoutes } from './message-evidence.ts';
 
 // In dev (bun src/cli.ts), import.meta.dir points at src/ and ../web = repo/web.
 // In a bun build --compile binary, import.meta.dir resolves to the executable's
@@ -597,6 +598,8 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
       .map((file) => ({ id: file.id, title: file.title, kind: file.kind, path: file.path }));
     return c.json({ ...session, plans });
   });
+
+  registerMessageEvidenceRoutes(app, store);
 
   app.get('/api/sessions/:id/transcript', async (c) => {
     const id = decodeURIComponent(c.req.param('id'));

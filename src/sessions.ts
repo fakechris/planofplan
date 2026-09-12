@@ -22,7 +22,7 @@ import type { Store } from './db.ts';
 import { buildWorkGraph } from './graph.ts';
 import { repoRefOf, sessionProjectNames } from './repos.ts';
 import { attachRepos, extractSessionRepos, TOUCH_BYTES } from './session-repos.ts';
-import { messagesFromRecord, messagesFromZcodeDb, isClaudeMetaRecord, isClaudeCompactSummary, isCodexMetaUserText } from './transcript.ts';
+import { messagesFromRecord, messagesFromZcodeDb, isClaudeMetaRecord, isClaudeCompactSummary, isCodexMetaUserText, MESSAGE_PARSER_VERSION } from './transcript.ts';
 import { touchesFromRecord } from './file-touches.ts';
 import { commitWitnessesFromRecord, commitWitnessesFromZcodeDb, type WitnessPairing } from './commit-witness.ts';
 import { collectSessionCommits } from './commit-attribution.ts';
@@ -796,7 +796,8 @@ function yieldEventLoop(): Promise<void> {
 // 把历史存量的目击证据一次性挖出来(回溯红利是这层的核心价值)。
 // v6:witness 命令识别修多行 -m 与包装词,重扫补齐 v5 漏掉的目击。
 // v7:witness 覆盖 codex custom_tool_call(exec)形态;zcode 走独立路径随扫随提。
-export const MESSAGE_PARSER_VERSION = 7;
+// v8 retains complete normalized visible message text alongside the bounded FTS excerpt.
+export { MESSAGE_PARSER_VERSION } from './transcript.ts';
 const MSG_BATCH = 400;
 
 interface StreamedLine {
