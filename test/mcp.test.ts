@@ -109,14 +109,14 @@ describe('mcp handshake', () => {
     expect((body.result as { protocolVersion?: string }).protocolVersion).toBe('2025-06-18');
   });
 
-  test('tools/list 暴露十个只读工具,全部带只读注解', async () => {
+  test('tools/list 暴露包含交接导出的只读工具,全部带只读注解', async () => {
     const body = await rpc(app(), 'tools/list', {});
     const tools = ((body.result as {
       tools?: Array<{ name: string; title?: string; inputSchema: unknown; annotations?: Record<string, unknown> }>;
     }).tools) ?? [];
     expect(tools.map((t) => t.name).sort()).toEqual([
       'lineage_report', 'plan_quota_status', 'planofplan_project_context', 'planofplan_search_skills',
-      'read_session', 'recent_edits', 'repo_lineage', 'requirement_status', 'session_search', 'usage_summary',
+      'read_session', 'recent_edits', 'repo_lineage', 'requirement_status', 'session_handoff', 'session_search', 'usage_summary',
     ]);
     for (const tool of tools) {
       expect(tool.inputSchema).toBeDefined();
@@ -164,7 +164,7 @@ describe('mcp tools', () => {
     expect(text).toContain('[declared]');
   });
 
-  test('requirement_status 列出需求与落地状态', async () => {
+  test('requirement_status 列出需求与 commit 关联', async () => {
     const text = await callTool(app(), 'requirement_status', { days: 14 });
     expect(text).toContain('把部署脚本改成幂等的');
     expect(text).toContain('1 commit(s)');
@@ -325,5 +325,3 @@ describe('mcp 隐藏边界贯穿所有出口', () => {
     expect(deniedResult?.content?.[0]?.text).toContain('hidden');
   });
 });
-
-
