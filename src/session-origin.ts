@@ -14,11 +14,14 @@
  * 等于该 pane 在 session.json 里的 cwd。herdr 不存在/解析失败 → 跳过。
  */
 import { existsSync, readFileSync } from 'node:fs';
+import { firstJsonlLine } from './jsonl-stream.ts';
 import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { Store } from './db.ts';
 import type { SessionOrigin } from './types.ts';
+
+export const ORIGIN_BACKFILL_STATE_PATHS = ['__origin_backfill__', '__origin_backfill_dsh_factory__'] as const;
 
 export interface OriginTag {
   origin: SessionOrigin;
@@ -183,7 +186,7 @@ export function backfillSessionOrigins(store: Store): void {
     }
     if (session.provider !== 'codex' || !session.sourceFile || !existsSync(session.sourceFile)) continue;
     try {
-      const firstLine = readFileSync(session.sourceFile, 'utf8').split('\n', 1)[0] ?? '';
+      const firstLine = firstJsonlLine(session.sourceFile) ?? '';
       const record = JSON.parse(firstLine) as { type?: string; payload?: unknown };
       if (record.type !== 'session_meta' || !record.payload || typeof record.payload !== 'object') continue;
       const tag = classifyCodexMeta(record.payload as Record<string, unknown>);
@@ -222,7 +225,7 @@ function readFirstJsonLine(path: string): Record<string, unknown> | null {
       line = execFileSync(zstd, ['-dc', path], { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 })
         .split('\n', 1)[0] ?? '';
     } else {
-      line = readFileSync(path, 'utf8').split('\n', 1)[0] ?? '';
+      line = firstJsonlLine(path) ?? '';
     }
     const record = JSON.parse(line) as unknown;
     return record && typeof record === 'object' ? record as Record<string, unknown> : null;

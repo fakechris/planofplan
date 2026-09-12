@@ -27,6 +27,7 @@ import { touchesFromRecord } from './file-touches.ts';
 import { commitWitnessesFromRecord, commitWitnessesFromZcodeDb, type WitnessPairing } from './commit-witness.ts';
 import { collectSessionCommits } from './commit-attribution.ts';
 import {
+  ORIGIN_BACKFILL_STATE_PATHS,
   applyHerdrOrigin,
   backfillDshFactoryOrigins,
   backfillSessionOrigins,
@@ -1200,7 +1201,8 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
   // 359/1920 行)按存在性清理;消息按保留期裁剪,目录行永久保留。
   try {
     const statePaths = store.listSessionIndexStatePaths();
-    const deadStates = statePaths.filter((path) => !existsSync(path));
+    const migrationMarkers = new Set<string>(ORIGIN_BACKFILL_STATE_PATHS);
+    const deadStates = statePaths.filter((path) => !migrationMarkers.has(path) && !existsSync(path));
     if (deadStates.length > 0) store.deleteSessionIndexStates(deadStates);
     const scanPaths = store.listUsageScanFilePaths();
     const deadScans = scanPaths.filter((path) => !existsSync(path));

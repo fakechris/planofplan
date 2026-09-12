@@ -45,3 +45,15 @@ export function forEachJsonlLine(path: string, fromBytes: number, visit: (text: 
     return consumed; // Incremental callers leave incomplete tails behind the watermark.
   } finally { closeSync(fd); }
 }
+
+/** Stop reading immediately after the header; never load the transcript body. */
+export function firstJsonlLine(path: string): string | null {
+  const found = {};
+  let first: string | null = null;
+  try {
+    forEachJsonlLine(path, 0, (line) => { first = line; throw found; }, true);
+  } catch (error) {
+    if (error !== found) throw error;
+  }
+  return first;
+}
