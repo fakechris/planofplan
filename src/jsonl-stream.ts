@@ -2,7 +2,7 @@ import { closeSync, openSync, readSync } from 'node:fs';
 
 /** Read complete JSONL lines without repeatedly copying/decoding a growing string.
  * Byte offsets belong to L0 bytes, never re-encoded replacement characters. */
-export function forEachJsonlLine(path: string, fromBytes: number, visit: (text: string, end: number) => void): number {
+export function forEachJsonlLine(path: string, fromBytes: number, visit: (text: string, end: number) => void, includeTail = false): number {
   const fd = openSync(path, 'r');
   const buffer = Buffer.allocUnsafe(256 * 1024);
   let position = fromBytes;
@@ -38,6 +38,10 @@ export function forEachJsonlLine(path: string, fromBytes: number, visit: (text: 
         start = newline + 1;
       }
     }
-    return consumed; // An incomplete tail stays behind the committed watermark.
+    if (includeTail && length > 0) {
+      visit(Buffer.concat(pieces, length).toString('utf8'), position);
+      consumed = position;
+    }
+    return consumed; // Incremental callers leave incomplete tails behind the watermark.
   } finally { closeSync(fd); }
 }

@@ -1,4 +1,5 @@
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { forEachJsonlLine } from './jsonl-stream.ts';
+import { existsSync, readdirSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join, relative, sep } from 'node:path';
@@ -337,25 +338,18 @@ function scanJsonlFiles(
 ): UsageRecord[] {
   const result: UsageRecord[] = [];
   for (const file of files) {
-    let lines: string[];
+    let lineIndex = 0;
     try {
-      lines = readFileSync(file, 'utf8').split(/\r?\n/);
-    } catch {
-      continue;
-    }
-    for (let lineIndex = 1; lineIndex <= lines.length; lineIndex += 1) {
-      const line = lines[lineIndex - 1]!;
-      if (!line.trim()) continue;
-      let value: unknown;
-      try {
-        value = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      if (!value || typeof value !== 'object') continue;
-      const item = parse(value as Record<string, unknown>, file, lineIndex);
-      if (item) result.push({ ...item, sourceFile: file });
-    }
+      forEachJsonlLine(file, 0, (line) => {
+        lineIndex += 1;
+        if (!line.trim()) return;
+        let value: unknown;
+        try { value = JSON.parse(line); } catch { return; }
+        if (!value || typeof value !== 'object') return;
+        const item = parse(value as Record<string, unknown>, file, lineIndex);
+        if (item) result.push({ ...item, sourceFile: file });
+      }, true);
+    } catch { /* unreadable or concurrently removed */ }
   }
   return result;
 }
@@ -639,77 +633,68 @@ function scanCodexFile(
   until: number,
   initialCursor: CodexCursor | null = null,
 ): { records: UsageRecord[]; cursor: CodexCursor } {
-  let bytes: Buffer;
+  let fileSize: number;
   try {
-    const fileSize = statSync(file).size;
+    fileSize = statSync(file).size;
     if (fileSize > 500 * 1024 * 1024) return { records: [], cursor: initialCursor ?? emptyCodexCursor() };
-    bytes = readFileSync(file);
-  } catch {
-    return { records: [], cursor: initialCursor ?? emptyCodexCursor() };
-  }
-  const start = initialCursor && initialCursor.parsedBytes <= bytes.length
-    ? initialCursor.parsedBytes
-    : 0;
+  } catch { return { records: [], cursor: initialCursor ?? emptyCodexCursor() }; }
+  const start = initialCursor && initialCursor.parsedBytes <= fileSize ? initialCursor.parsedBytes : 0;
   const cursor = initialCursor && start > 0 ? { ...initialCursor } : emptyCodexCursor();
-  const content = bytes.subarray(start).toString('utf8');
-  const lines = content.split('\n');
-  const completeLines = Math.max(0, lines.length - 1);
   const result: UsageRecord[] = [];
-  let consumed = 0;
-  for (let index = 0; index < completeLines; index += 1) {
-    const line = lines[index]!;
-    consumed += Buffer.byteLength(line, 'utf8') + 1;
-    if (!line.trim()) continue;
-    let rootValue: unknown;
-    try {
-      rootValue = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (!rootValue || typeof rootValue !== 'object') continue;
-    const rootRecord = rootValue as Record<string, unknown>;
-    const payload = rootRecord.payload;
-    if (!payload || typeof payload !== 'object') continue;
-    const payloadRecord = payload as Record<string, unknown>;
-    if (rootRecord.type === 'session_meta') {
-      const session = payloadRecord.session_id ?? payloadRecord.id;
-      if (typeof session === 'string') cursor.sessionId = session;
-    }
-    if (rootRecord.type === 'turn_context') {
-      cursor.model = stableModel(payloadRecord.model);
-      cursor.turnId = typeof payloadRecord.turn_id === 'string' ? payloadRecord.turn_id : null;
-      if (typeof payloadRecord.cwd === 'string' && payloadRecord.cwd.trim()) {
-        cursor.cwd = payloadRecord.cwd.trim();
+  try {
+    forEachJsonlLine(file, start, (line, end) => {
+      cursor.parsedBytes = end;
+      if (!line.trim()) return;
+      let rootValue: unknown;
+      try {
+        rootValue = JSON.parse(line);
+      } catch {
+        return;
       }
-    }
-    if (rootRecord.type !== 'event_msg' || payloadRecord.type !== 'token_count') continue;
-    const info = payloadRecord.info;
-    if (!info || typeof info !== 'object') continue;
-    // total_token_usage 是 session 级累计值（实测文件内单调递增，重复
-    // token_count 事件差分为 0 自然去重）；last_token_usage 是每 turn 完整
-    // 值，不能跨事件做差分。旧 codex 版本缺 total 时退回 last。
-    const infoRecord = info as Record<string, unknown>;
-    const usageValue = infoRecord.total_token_usage ?? infoRecord.last_token_usage;
-    if (!usageValue || typeof usageValue !== 'object') continue;
-    const current = usageFromRecord(usageValue as Record<string, unknown>);
-    const delta = subtractUsage(current, cursor.previous);
-    cursor.previous = current;
-    if (!hasTokens(delta)) continue;
-    const timestamp = parseTimestamp(rootRecord.timestamp, Date.now());
-    if (!inRange(timestamp, since, until)) continue;
-    cursor.eventIndex += 1;
-    result.push(record(
-      `local:codex:${file}:${cursor.eventIndex}`,
-      'codex',
-      cursor.model,
-      timestamp,
-      delta,
-      'local',
-      'measured',
-      { sessionId: cursor.sessionId, project: cursor.cwd, sourceFile: file },
-    ));
-  }
-  cursor.parsedBytes = start + consumed;
+      if (!rootValue || typeof rootValue !== 'object') return;
+      const rootRecord = rootValue as Record<string, unknown>;
+      const payload = rootRecord.payload;
+      if (!payload || typeof payload !== 'object') return;
+      const payloadRecord = payload as Record<string, unknown>;
+      if (rootRecord.type === 'session_meta') {
+        const session = payloadRecord.session_id ?? payloadRecord.id;
+        if (typeof session === 'string') cursor.sessionId = session;
+      }
+      if (rootRecord.type === 'turn_context') {
+        cursor.model = stableModel(payloadRecord.model);
+        cursor.turnId = typeof payloadRecord.turn_id === 'string' ? payloadRecord.turn_id : null;
+        if (typeof payloadRecord.cwd === 'string' && payloadRecord.cwd.trim()) {
+          cursor.cwd = payloadRecord.cwd.trim();
+        }
+      }
+      if (rootRecord.type !== 'event_msg' || payloadRecord.type !== 'token_count') return;
+      const info = payloadRecord.info;
+      if (!info || typeof info !== 'object') return;
+      // total_token_usage 是 session 级累计值（实测文件内单调递增，重复
+      // token_count 事件差分为 0 自然去重）；last_token_usage 是每 turn 完整
+      // 值，不能跨事件做差分。旧 codex 版本缺 total 时退回 last。
+      const infoRecord = info as Record<string, unknown>;
+      const usageValue = infoRecord.total_token_usage ?? infoRecord.last_token_usage;
+      if (!usageValue || typeof usageValue !== 'object') return;
+      const current = usageFromRecord(usageValue as Record<string, unknown>);
+      const delta = subtractUsage(current, cursor.previous);
+      cursor.previous = current;
+      if (!hasTokens(delta)) return;
+      const timestamp = parseTimestamp(rootRecord.timestamp, Date.now());
+      if (!inRange(timestamp, since, until)) return;
+      cursor.eventIndex += 1;
+      result.push(record(
+        `local:codex:${file}:${cursor.eventIndex}`,
+        'codex',
+        cursor.model,
+        timestamp,
+        delta,
+        'local',
+        'measured',
+        { sessionId: cursor.sessionId, project: cursor.cwd, sourceFile: file },
+      ));
+    });
+  } catch { /* preserve successfully consumed prefix */ }
   return { records: result, cursor };
 }
 
@@ -729,58 +714,54 @@ export function scanClaudeLogs(
 ): UsageRecord[] {
   const byMessage = new Map<string, UsageRecord>();
   for (const file of jsonlFiles(root, since)) {
-    let lines: string[];
-    try {
-      lines = readFileSync(file, 'utf8').split(/\r?\n/);
-    } catch {
-      continue;
-    }
     let lineIndex = 0;
-    for (const line of lines) {
-      lineIndex += 1;
-      if (!line.trim()) continue;
-      let rootValue: unknown;
-      try {
-        rootValue = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      if (!rootValue || typeof rootValue !== 'object') continue;
-      const rootRecord = rootValue as Record<string, unknown>;
-      if (rootRecord.type !== 'assistant') continue;
-      const message = rootRecord.message;
-      if (!message || typeof message !== 'object') continue;
-      const messageRecord = message as Record<string, unknown>;
-      const usage = messageRecord.usage;
-      if (!usage || typeof usage !== 'object') continue;
-      const timestamp = parseTimestamp(rootRecord.timestamp, Date.now());
-      if (!inRange(timestamp, since, until)) continue;
-      const usageRecord = usage as Record<string, unknown>;
-      const normalized: NumericUsage = {
-        ...usageFromRecord(usageRecord),
-        totalTokens: finiteNumber(usageRecord.total_tokens)
-          || finiteNumber(usageRecord.input_tokens)
-          + (finiteNumber(usageRecord.cached_input_tokens) || finiteNumber(usageRecord.cache_read_input_tokens))
-          + finiteNumber(usageRecord.cache_creation_input_tokens)
-          + finiteNumber(usageRecord.output_tokens),
-      };
-      if (!hasTokens(normalized)) continue;
-      const messageId = typeof messageRecord.id === 'string' ? messageRecord.id : `line-${lineIndex}`;
-      const requestId = typeof rootRecord.requestId === 'string' ? rootRecord.requestId : '';
-      const dedupeKey = `${messageId}:${requestId}`;
-      const candidate = record(
-        `local:claude:${messageId}:${requestId}`,
-        'claude',
-        stableModel(messageRecord.model),
-        timestamp,
-        normalized,
-        'local',
-        'measured',
-        { project, sourceFile: file, sessionId: file.replace(/^.*[/\\]/, '').replace(/\.jsonl$/i, '') },
-      );
-      const previous = byMessage.get(dedupeKey);
-      if (!previous || candidate.timestamp >= previous.timestamp) byMessage.set(dedupeKey, candidate);
-    }
+    try {
+      forEachJsonlLine(file, 0, (line) => {
+        lineIndex += 1;
+        if (!line.trim()) return;
+        let rootValue: unknown;
+        try {
+          rootValue = JSON.parse(line);
+        } catch {
+          return;
+        }
+        if (!rootValue || typeof rootValue !== 'object') return;
+        const rootRecord = rootValue as Record<string, unknown>;
+        if (rootRecord.type !== 'assistant') return;
+        const message = rootRecord.message;
+        if (!message || typeof message !== 'object') return;
+        const messageRecord = message as Record<string, unknown>;
+        const usage = messageRecord.usage;
+        if (!usage || typeof usage !== 'object') return;
+        const timestamp = parseTimestamp(rootRecord.timestamp, Date.now());
+        if (!inRange(timestamp, since, until)) return;
+        const usageRecord = usage as Record<string, unknown>;
+        const normalized: NumericUsage = {
+          ...usageFromRecord(usageRecord),
+          totalTokens: finiteNumber(usageRecord.total_tokens)
+            || finiteNumber(usageRecord.input_tokens)
+            + (finiteNumber(usageRecord.cached_input_tokens) || finiteNumber(usageRecord.cache_read_input_tokens))
+            + finiteNumber(usageRecord.cache_creation_input_tokens)
+            + finiteNumber(usageRecord.output_tokens),
+        };
+        if (!hasTokens(normalized)) return;
+        const messageId = typeof messageRecord.id === 'string' ? messageRecord.id : `line-${lineIndex}`;
+        const requestId = typeof rootRecord.requestId === 'string' ? rootRecord.requestId : '';
+        const dedupeKey = `${messageId}:${requestId}`;
+        const candidate = record(
+          `local:claude:${messageId}:${requestId}`,
+          'claude',
+          stableModel(messageRecord.model),
+          timestamp,
+          normalized,
+          'local',
+          'measured',
+          { project, sourceFile: file, sessionId: file.replace(/^.*[/\\]/, '').replace(/\.jsonl$/i, '') },
+        );
+        const previous = byMessage.get(dedupeKey);
+        if (!previous || candidate.timestamp >= previous.timestamp) byMessage.set(dedupeKey, candidate);
+      }, true);
+    } catch { /* unreadable or concurrently removed */ }
   }
   return [...byMessage.values()].sort((a, b) => a.timestamp - b.timestamp);
 }
