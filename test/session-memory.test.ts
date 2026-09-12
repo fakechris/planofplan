@@ -12,3 +12,13 @@ test.skipIf(process.platform !== 'darwin')('64MiB tool-result scan stays below 6
   expect(result.messages).toBe(2);
   expect(result.peakBytes).toBeLessThan(640 * 1024 * 1024);
 }, 30_000);
+
+// Repeated files expose cumulative native allocation pressure hidden by a one-file test.
+test.skipIf(process.platform !== 'darwin')('eight 64MiB files release temporary allocations between scans', async () => {
+  const child = Bun.spawn([process.execPath, '--smol', join(import.meta.dir, 'fixtures/session-memory.ts'), '--many-files'], { stdout: 'pipe', stderr: 'pipe' });
+  const [output, error] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()]);
+  expect(await child.exited, error + output).toBe(0);
+  const result = JSON.parse(output.trim());
+  expect(result.messages).toBe(2);
+  expect(result.peakBytes).toBeLessThan(1024 * 1024 * 1024);
+}, 60_000);

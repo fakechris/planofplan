@@ -780,8 +780,12 @@ function readClaudeHistoryTitles(options: SessionCollectOptions): Map<string, st
 
 const CATALOG_YIELD_BATCH = 8;
 
-function yieldEventLoop(): Promise<void> {
-  return new Promise((resolve) => setImmediate(resolve));
+async function yieldEventLoop(): Promise<void> {
+  // A scan can decode gigabytes without going idle. Collect between file groups
+  // after the previous synchronous frames have unwound, including native Buffer
+  // and decompressor allocations that otherwise survive until scanner exit.
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  Bun.gc(true);
 }
 
 // ── 消息级索引:行级续扫 ─────────────────────────────────────────
@@ -1029,6 +1033,7 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
 
   const rows: SessionRecord[] = [];
   let processed = 0;
+  let bytesSinceYield = 0;
   let scanned = 0;
   for (const file of discovered) {
     const existingRows = existingByFile.get(file.path);
@@ -1096,7 +1101,11 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
         });
       });
       processed += 1;
-      if (processed % CATALOG_YIELD_BATCH === 0) await yieldEventLoop();
+      bytesSinceYield += readSize;
+      if (processed % CATALOG_YIELD_BATCH === 0 || bytesSinceYield >= 32 * 1024 * 1024) {
+        bytesSinceYield = 0;
+        await yieldEventLoop();
+      }
       continue;
     }
     scanned += 1;
@@ -1151,7 +1160,11 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
       rows.push(attachRepos(withWork, repos));
     }
     processed += 1;
-    if (processed % CATALOG_YIELD_BATCH === 0) await yieldEventLoop();
+    bytesSinceYield += readSize;
+    if (processed % CATALOG_YIELD_BATCH === 0 || bytesSinceYield >= 32 * 1024 * 1024) {
+      bytesSinceYield = 0;
+      await yieldEventLoop();
+    }
   }
   // 标题补充源,对复用行同样生效:codex 官方线程名覆盖启发式,claude history
   // 兜底无标题 session(信封开头的会话头部解析抽不出标题)
