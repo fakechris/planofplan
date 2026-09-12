@@ -38,6 +38,7 @@ import {
 import { claudeParentOfPath, materializeSessionLinks } from './session-links.ts';
 import { materializeRequirements } from './requirements.ts';
 import { refineRequirements } from './requirement-llm.ts';
+import { forEachJsonlLine } from './jsonl-stream.ts';
 import { loadConfig } from './config.ts';
 import { materializePlanFiles, materializeProgressNotes, materializeTodoSnapshots } from './plans.ts';
 import type { SessionCommit, SessionIndexState, SessionList, SessionRecord, SessionRepo } from './types.ts';
@@ -877,46 +878,34 @@ function streamJsonlFrom(
     return { parsedBytes: size, lines };
   }
 
-  let fd: number | null = null;
   let parsedBytes = fromBytes;
   let lines = 0;
   try {
-    fd = openSync(path, 'r');
     const size = statSync(path).size;
-    let pos = Math.min(fromBytes, size);
-    let remainder = '';
     let batch: StreamedLine[] = [];
-    const buf = Buffer.alloc(256 * 1024);
-    let n = 0;
-    while ((n = readSync(fd, buf, 0, buf.length, pos)) > 0) {
-      pos += n;
-      const chunk = remainder + buf.toString('utf8', 0, n);
-      const parts = chunk.split('\n');
-      remainder = parts.pop() ?? '';
-      for (const line of parts) {
-        const end = parsedBytes + Buffer.byteLength(line, 'utf8') + 1;
-        parsedBytes = end;
-        lines += 1;
-        if (!line.trim()) continue;
+    let batchBytes = 0;
+    parsedBytes = Math.min(fromBytes, size);
+    forEachJsonlLine(path, parsedBytes, (line, end) => {
+      batchBytes += end - parsedBytes;
+      parsedBytes = end;
+      lines += 1;
+      if (line.trim()) {
         try {
           const value = JSON.parse(line) as unknown;
-          if (value && typeof value === 'object') {
-            batch.push({ record: value as Record<string, unknown>, line: baseLines + lines, end });
-          }
+          if (value && typeof value === 'object') batch.push({ record: value as Record<string, unknown>, line: baseLines + lines, end });
         } catch {
-          /* truncated or malformed line */
+          /* malformed line */
         }
       }
-      if (batch.length >= MSG_BATCH) {
+      if (batch.length >= MSG_BATCH || batchBytes >= 2 * 1024 * 1024) {
         onBatch(batch);
         batch = [];
+        batchBytes = 0;
       }
-    }
+    });
     if (batch.length > 0) onBatch(batch);
   } catch {
     /* unreadable */
-  } finally {
-    if (fd != null) closeSync(fd);
   }
   return { parsedBytes, lines };
 }
