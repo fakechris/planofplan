@@ -306,9 +306,10 @@ export const windowsTerminalLauncher: HandoffLauncher = (provider, bin, targetDi
   const ps = (value: string): string => `'${value.replaceAll("'", "''")}'`;
   const psCmd = `Set-Location -LiteralPath ${ps(targetDir)}; & ${ps(bin)} (Get-Content -Raw ${ps(pkgPath)})`;
   const wt = findExecutable(['wt.exe']);
+  // start 的 title 必须带引号,否则该词会被当成要执行的程序
   const argv = wt
     ? ['wt.exe', '-d', targetDir, 'powershell', '-NoProfile', '-Command', psCmd]
-    : ['cmd.exe', '/c', 'start', 'planofplan', 'powershell', '-NoProfile', '-Command', psCmd];
+    : ['cmd.exe', '/c', 'start', '"planofplan"', 'powershell', '-NoProfile', '-Command', psCmd];
   const result = spawnSync(argv[0]!, argv.slice(1), { encoding: 'utf8' });
   if (result.status !== 0) {
     return { ok: false, error: result.stderr?.trim() || '无法打开 Windows Terminal', command: psCmd };

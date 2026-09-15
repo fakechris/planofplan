@@ -346,11 +346,11 @@ function noopOpenScriptName(platform: string): string {
   return platform === 'win32' ? 'open.cmd' : 'open';
 }
 
-function noopOpenScriptContent(platform: string): string {
+export function noopOpenScriptContent(platform: string): string {
   if (platform === 'win32') {
     return [
       '@echo off',
-      'if defined PLANOFPPLAN_OPEN_SENTINEL echo %* >> "%PLANOFPPLAN_OPEN_SENTINEL%"',
+      'if defined PLANOFPLAN_OPEN_SENTINEL echo %* >> "%PLANOFPLAN_OPEN_SENTINEL%"',
       'exit 0',
       '',
     ].join('\r\n');

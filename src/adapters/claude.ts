@@ -330,16 +330,25 @@ export function readClaudeCredentialsFile(home: string = homedir()): Credential 
     expiresAt: record.expiresAt,
     persist: (next) => {
       // L0 只读守则不涉及此文件:它是 Claude Code 自己的凭据存储,
-      // 只在 OAuth 刷新轮换后原位更新,保持 claudeAiOauth 结构。
-      const payload = JSON.stringify({
-        claudeAiOauth: {
-          accessToken: next.accessToken,
-          refreshToken: next.refreshToken,
-          expiresAt: next.expiresAt ?? Date.now() + 8 * 60 * 60 * 1000,
-          ...(record.scopes ? { scopes: record.scopes } : {}),
-        },
-      });
-      writeFileSync(path, payload, { encoding: 'utf8', mode: 0o600 });
+      // 只在 OAuth 刷新轮换后原位更新。读旧文件做字段级合并,保留
+      // subscriptionType / rateLimitTier 等 Claude Code 依赖的既有元数据。
+      let oauth: Record<string, unknown> = {
+        accessToken: next.accessToken,
+        refreshToken: next.refreshToken,
+        expiresAt: next.expiresAt ?? Date.now() + 8 * 60 * 60 * 1000,
+        ...(record.scopes ? { scopes: record.scopes } : {}),
+      };
+      try {
+        const current = JSON.parse(readFileSync(path, 'utf8')) as {
+          claudeAiOauth?: Record<string, unknown>;
+        };
+        if (current.claudeAiOauth && typeof current.claudeAiOauth === 'object') {
+          oauth = { ...current.claudeAiOauth, ...oauth };
+        }
+      } catch {
+        /* 旧文件缺失或损坏:按最小结构重建 */
+      }
+      writeFileSync(path, JSON.stringify({ claudeAiOauth: oauth }), { encoding: 'utf8', mode: 0o600 });
     },
   };
 }

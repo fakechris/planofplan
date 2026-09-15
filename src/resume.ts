@@ -216,7 +216,9 @@ export function findExecutable(names: string[], lookup: BinLookup = {}): string 
   if (binCache.has(cacheKey)) return binCache.get(cacheKey) ?? null;
   const home = lookup.home ?? homedir();
   for (const name of names) {
-    const raw = name.includes('/') || name.startsWith('~') ? expandHome(name, home) : null;
+    // Windows 盘符/反斜杠路径同样按直接路径处理,不进目录拼接
+    const directPath = name.includes('/') || name.includes('\\') || name.startsWith('~') || /^[A-Za-z]:/.test(name);
+    const raw = directPath ? expandHome(name, home) : null;
     if (raw) {
       if (isExecutable(raw)) {
         const healthy = healthyBin(raw, basename(raw), platform);
@@ -384,7 +386,8 @@ export function windowsLaunchArgv(
   if (hasWindowsTerminal) {
     return ['wt.exe', '-d', cwd, 'cmd', '/k', chain];
   }
-  return ['cmd.exe', '/c', 'start', 'planofplan', '/D', cwd, 'cmd', '/k', chain];
+  // start 的 title 必须带引号,否则该词会被当成要执行的程序
+  return ['cmd.exe', '/c', 'start', '"planofplan"', '/D', cwd, 'cmd', '/k', chain];
 }
 
 export function launchResume(

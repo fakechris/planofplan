@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { afterAll, describe, expect, test } from 'bun:test';
 import { cursorDbCandidates } from '../src/adapters/cursor.ts';
 import { claudeCredentialsFilePath, readClaudeCredentialsFile } from '../src/adapters/claude.ts';
-import { parseWin32ProxySettings } from '../src/adapters/agy.ts';
+import { parseWin32ProxySettings, noopOpenScriptContent } from '../src/adapters/agy.ts';
 import {
   WINDOWS_STARTUP_SCRIPT,
   getStartupSettings,
@@ -81,7 +81,10 @@ describe('claude: ~/.claude/.credentials.json 兜底 (INV-563)', () => {
     mkdirSync(join(home, '.claude'), { recursive: true });
     const credPath = claudeCredentialsFilePath(home);
     writeFileSync(credPath, JSON.stringify({
-      claudeAiOauth: { accessToken: 'tok-1', refreshToken: 'r1', expiresAt: 123, scopes: ['user:profile'] },
+      claudeAiOauth: {
+        accessToken: 'tok-1', refreshToken: 'r1', expiresAt: 123, scopes: ['user:profile'],
+        subscriptionType: 'max', rateLimitTier: 't1',
+      },
     }), { encoding: 'utf8' });
 
     const cred = readClaudeCredentialsFile(home);
@@ -97,6 +100,11 @@ describe('claude: ~/.claude/.credentials.json 兜底 (INV-563)', () => {
     expect(rotated!.value).toBe('tok-2');
     expect(rotated!.refreshToken).toBe('r2');
     expect(rotated!.expiresAt).toBe(456);
+    // 回写做字段级合并,Claude Code 依赖的既有元数据不得丢失
+    const raw = JSON.parse(readFileSync(credPath, 'utf8')) as { claudeAiOauth: Record<string, unknown> };
+    expect(raw.claudeAiOauth.subscriptionType).toBe('max');
+    expect(raw.claudeAiOauth.rateLimitTier).toBe('t1');
+    expect(raw.claudeAiOauth.scopes).toEqual(['user:profile']);
   });
 
   test('文件缺失或结构不符返回 null', () => {
@@ -136,6 +144,13 @@ describe('agy: Windows 注册表代理解析 (INV-563)', () => {
   test('未启用(0x0)或输出为空 → 空 env', () => {
     expect(parseWin32ProxySettings('ProxyEnable    REG_DWORD    0x0')).toEqual({});
     expect(parseWin32ProxySettings('')).toEqual({});
+  });
+
+  test('noop open.cmd 引用的 sentinel 变量名与 execAsync 设置的一致', () => {
+    // 回归:曾经误写成 PLANOFPPLAN_OPEN_SENTINEL(多一个 P),sentinel 永不触发
+    const content = noopOpenScriptContent('win32');
+    expect(content).toContain('PLANOFPLAN_OPEN_SENTINEL');
+    expect(content).not.toContain('PLANOFPPLAN_OPEN_SENTINEL');
   });
 });
 
@@ -214,6 +229,21 @@ describe('resume: Windows 二进制定位与终端启动 (INV-563)', () => {
     expect(findExecutable(['claude'], lookup)).toBe(shim);
   });
 
+  test('win32 反斜杠绝对路径按直接路径处理,不做目录拼接', () => {
+    // darwin 文件名可含反斜杠:在 cwd 下建同名文件,模拟直接路径命中
+    const winPath = 'C:\\Program Files\\Claude\\claude.exe';
+    const literal = join(process.cwd(), winPath);
+    writeFileSync(literal, 'binary');
+    chmodSync(literal, 0o755);
+    try {
+      _clearBinCache();
+      // 命中时原样返回(真实 Windows 上为绝对路径);若误走目录拼接则返回 null
+      expect(findExecutable([winPath], { platform: 'win32' })).toBe(winPath);
+    } finally {
+      rmSync(literal, { force: true });
+    }
+  });
+
   test('windowsLaunchArgv:优先 wt,退回 cmd start;env 以 set 注入', () => {
     const command = { argv: ['/usr/bin/claude', '--resume', 's1'], env: { FOO: 'bar' } };
     const withWt = windowsLaunchArgv(command, { cwd: 'C:\\work' }, true);
@@ -223,7 +253,9 @@ describe('resume: Windows 二进制定位与终端启动 (INV-563)', () => {
     expect(withWt.at(-1)).toContain('--resume s1');
 
     const withoutWt = windowsLaunchArgv(command, { cwd: null }, false);
-    expect(withoutWt.slice(0, 4)).toEqual(['cmd.exe', '/c', 'start', 'planofplan']);
+    // start 的 title 必须带引号,否则会被当成程序名
+    expect(withoutWt.slice(0, 4)).toEqual(['cmd.exe', '/c', 'start', '"planofplan"']);
+    expect(withoutWt).toContain('/D');
     expect(withoutWt).toContain('.');
   });
 
