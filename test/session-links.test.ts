@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { openDb, openMemoryDb } from '../src/db.ts';
+import { openDb, openMemoryDb , SCHEMA_VERSION } from '../src/db.ts';
 import { claudeParentOfPath, materializeSessionLinks } from '../src/session-links.ts';
 import { createServer } from '../src/server.ts';
 import { DEFAULT_PLANS } from '../src/config.ts';
@@ -214,10 +214,10 @@ describe('v6 迁移幂等', () => {
       // ALTER 抛错被吞)+ backfillLaunchLinks 重跑,v7 需求物化空库幂等
       s1.setUserVersion(5);
       const s2 = openDb(dbPath);
-      expect(s2.getUserVersion()).toBe(13);
+      expect(s2.getUserVersion()).toBe(SCHEMA_VERSION);
       expect(s2.listSessionLinks()).toHaveLength(1);
       const s3 = openDb(dbPath);
-      expect(s3.getUserVersion()).toBe(13);
+      expect(s3.getUserVersion()).toBe(SCHEMA_VERSION);
       expect(s3.listSessionLinks()).toHaveLength(1);
       rmSync(dir, { recursive: true, force: true });
     } catch (error) {

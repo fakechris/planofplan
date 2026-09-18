@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Database } from 'bun:sqlite';
-import { openDb, openMemoryDb, projectEntityId } from '../src/db.ts';
+import { openDb, openMemoryDb, projectEntityId , SCHEMA_VERSION } from '../src/db.ts';
 import { materializeRequirements } from '../src/requirements.ts';
 import { createServer } from '../src/server.ts';
 import { DEFAULT_PLANS } from '../src/config.ts';
@@ -111,7 +111,7 @@ describe('materializeProjects', () => {
       raw.close();
       const store = openDb(dbPath);
       // 迁移链 v4 → … → v11(Launch 边 · 需求实体 · 计划态 · FTS 瘦身)
-      expect(store.getUserVersion()).toBe(13);
+      expect(store.getUserVersion()).toBe(SCHEMA_VERSION);
       const projects = store.listProjects();
       expect(projects).toHaveLength(1);
       expect(projects[0]).toMatchObject({ url: URL_A, name: 'alpha' });

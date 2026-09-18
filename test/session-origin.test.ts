@@ -14,7 +14,7 @@ import {
   parseHerdrLog,
 } from '../src/session-origin.ts';
 import { materializeSessionLinks } from '../src/session-links.ts';
-import { openMemoryDb } from '../src/db.ts';
+import { openMemoryDb , SCHEMA_VERSION } from '../src/db.ts';
 import type { SessionRecord } from '../src/types.ts';
 
 function session(partial: Partial<SessionRecord> & Pick<SessionRecord, 'id' | 'provider' | 'nativeId'>): SessionRecord {
@@ -196,7 +196,7 @@ describe('backfillSessionOrigins', () => {
   test('getUserVersion/setUserVersion 语义(重复 ALTER 容错)', () => {
     // openMemoryDb 走新 SCHEMA + 全部迁移;真实老库迁移由 v1→…→v11 链覆盖
     const store = openMemoryDb();
-    expect(store.getUserVersion()).toBe(13);
+    expect(store.getUserVersion()).toBe(SCHEMA_VERSION);
     expect(() => store.setUserVersion(4)).not.toThrow();
     expect(store.getUserVersion()).toBe(4);
   });

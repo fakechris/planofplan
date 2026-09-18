@@ -38,6 +38,27 @@ export function projectEntityId(url: string): string {
   return createHash('sha1').update(url).digest('hex').slice(0, 12);
 }
 
+/** 配额快照保留期:纯时序数据,过期即清,否则每天 ~2 万行无限累积。 */
+export const SNAPSHOT_RETENTION_DAYS = 90;
+
+/** 当前 schema 迁移天花板:迁移链每级 `PRAGMA user_version = N` 的最大值。
+ *  测试断言迁移完成度时引用本常量,不要硬编码,避免每次加迁移破一片。 */
+export const SCHEMA_VERSION = 15;
+
+/** 消息行的内容指纹:id + 全部业务列。库内侧与写入侧必须同构,
+ *  NULL 与 undefined 归一为空串。 */
+function messageFingerprint(
+  id: string, seq: number, role: string, kind: string,
+  toolName: string | null, text: string | null, timestamp: number | null,
+  model: string | null, inputTokens: number | null, outputTokens: number | null,
+  fullText: string | null, parserVersion: number | null,
+): string {
+  return [
+    id, seq, role, kind, toolName, text, timestamp, model,
+    inputTokens, outputTokens, fullText, parserVersion,
+  ].map((value) => (value ?? '\u0001')).join('\u0000');
+}
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS plans (
   slug TEXT PRIMARY KEY,
@@ -174,11 +195,14 @@ CREATE TRIGGER IF NOT EXISTS session_messages_fts_ad AFTER DELETE ON session_mes
   INSERT INTO session_messages_fts(session_messages_fts, rowid, text)
   VALUES ('delete', old.rowid, old.text);
 END;
-CREATE TRIGGER IF NOT EXISTS session_messages_fts_au AFTER UPDATE ON session_messages
-  WHEN old.kind != 'tool_use' BEGIN
+CREATE TRIGGER IF NOT EXISTS session_messages_fts_au AFTER UPDATE ON session_messages BEGIN
+  -- 逐语句条件(不能用单个 WHEN):kind 双向迁移都要保持索引与内容表一致。
+  -- 单看 old.kind 的旧版触发器会把「text→tool_use」的行留在索引里(量不大
+  -- 但真实存在);索引膨胀的大头是重扫 churn 的死段,靠 v14 重建+optimize 回收。
   INSERT INTO session_messages_fts(session_messages_fts, rowid, text)
-  VALUES ('delete', old.rowid, old.text);
-  INSERT INTO session_messages_fts(rowid, text) VALUES (new.rowid, new.text);
+  SELECT 'delete', old.rowid, old.text WHERE old.kind != 'tool_use';
+  INSERT INTO session_messages_fts(rowid, text)
+  SELECT new.rowid, new.text WHERE new.kind != 'tool_use';
 END;
 -- 消息级行级续扫水位（字节偏移 + 行号 + 解析器版本）。
 CREATE TABLE IF NOT EXISTS session_index_state (
@@ -580,6 +604,51 @@ export class Store {
         if (!columns.has('parser_version')) db.exec('ALTER TABLE session_messages ADD COLUMN parser_version INTEGER');
         db.exec('PRAGMA user_version = 13');
       });
+    }
+    // v14:FTS 重建 + 触发器修复。外部内容表的 delete+insert churn 从不
+    // 回收,死 segment 把 fts_data 养到 317MB(小时级可见增长);DROP 重建
+    // 一次性归零,旧 au 触发器漏掉的 kind 迁移行(单看 old.kind)随之清除,
+    // 新触发器逐语句条件化保证四种迁移组合都不再错;VACUUM 连同 churn
+    // 死页一起回收。重建后由调度器每日 'optimize' 防止死段再积累。
+    if (version < 14) {
+      db.exec('DROP TRIGGER IF EXISTS session_messages_fts_ai');
+      db.exec('DROP TRIGGER IF EXISTS session_messages_fts_ad');
+      db.exec('DROP TRIGGER IF EXISTS session_messages_fts_au');
+      db.exec('DROP TABLE IF EXISTS session_messages_fts');
+      db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS session_messages_fts USING fts5(
+        text, content=session_messages, content_rowid=rowid, tokenize='trigram')`);
+      db.exec(`INSERT INTO session_messages_fts(rowid, text)
+        SELECT rowid, text FROM session_messages WHERE kind != 'tool_use' AND text IS NOT NULL`);
+      db.exec(`CREATE TRIGGER session_messages_fts_ai AFTER INSERT ON session_messages
+        WHEN new.kind != 'tool_use' BEGIN
+        INSERT INTO session_messages_fts(rowid, text) VALUES (new.rowid, new.text);
+      END`);
+      db.exec(`CREATE TRIGGER session_messages_fts_ad AFTER DELETE ON session_messages
+        WHEN old.kind != 'tool_use' BEGIN
+        INSERT INTO session_messages_fts(session_messages_fts, rowid, text)
+        VALUES ('delete', old.rowid, old.text);
+      END`);
+      db.exec(`CREATE TRIGGER session_messages_fts_au AFTER UPDATE ON session_messages BEGIN
+        INSERT INTO session_messages_fts(session_messages_fts, rowid, text)
+        SELECT 'delete', old.rowid, old.text WHERE old.kind != 'tool_use';
+        INSERT INTO session_messages_fts(rowid, text)
+        SELECT new.rowid, new.text WHERE new.kind != 'tool_use';
+      END`);
+      // 列表兜底的部分索引:user 文本行只占全表零头,窗口过滤走这个小索引
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_session_messages_user_text
+        ON session_messages(session_id, seq) WHERE role = 'user' AND kind = 'text'`);
+      try {
+        db.exec('VACUUM');
+      } catch {
+        /* VACUUM 失败(磁盘满/锁)不阻塞启动,空间留待下次 */
+      }
+      db.exec('PRAGMA user_version = 14');
+    }
+    // v15:snapshots 保留期回填。配额快照是纯时序数据,此前无限增长
+    //(52.7 万行/日增 2 万),90 天之外的行一次性清掉;此后由调度器日清。
+    if (version < 15) {
+      this.pruneSnapshotsBefore(Date.now() - SNAPSHOT_RETENTION_DAYS * 86_400_000);
+      db.exec('PRAGMA user_version = 15');
     }
   }
 
@@ -1139,6 +1208,25 @@ export class Store {
       .run(cutoff);
     this.db.query(`DELETE FROM usage_records WHERE timestamp < ?`).run(cutoff);
     return Number(r.changes);
+  }
+
+  /** 只清配额快照(不动 usage_records:/api/usage 对外承诺 365 天窗口)。
+   *  迁移回填与调度器日清共用。 */
+  pruneSnapshotsBefore(cutoffMs: number): number {
+    const r = this.db
+      .query(`DELETE FROM snapshots WHERE fetched_at < ?`)
+      .run(cutoffMs);
+    return Number(r.changes);
+  }
+
+  /** FTS5 死段合并:外部内容表的 delete+insert churn 会积累死 segment,
+   *  只有 'optimize' 能原地回收。调度器低频调用,失败不阻塞。 */
+  optimizeSearchIndex(): void {
+    try {
+      this.db.exec(`INSERT INTO session_messages_fts(session_messages_fts, 'optimize')`);
+    } catch {
+      /* 索引尚未建/库忙时跳过,下轮再试 */
+    }
   }
 
   upsertUsageRecords(records: UsageRecord[]): void {
@@ -1812,8 +1900,10 @@ export class Store {
     }));
   }
 
-  upsertSessionMessages(rows: SessionMessageRow[]): void {
-    if (rows.length === 0) return;
+  /** 写入消息行。返回实际执行的 INSERT/UPDATE 行数:内容未变的重扫行
+   *  直接跳过(零写),调用方可据此观测 churn。 */
+  upsertSessionMessages(rows: SessionMessageRow[]): number {
+    if (rows.length === 0) return 0;
     const stmt = this.db.query(
       `INSERT INTO session_messages (
          id, session_id, seq, role, kind, tool_name, text, timestamp, model, input_tokens, output_tokens, full_text, parser_version
@@ -1831,8 +1921,18 @@ export class Store {
          full_text = excluded.full_text,
          parser_version = excluded.parser_version`,
     );
+    // 挑出内容真有变化的行:DO UPDATE 即便值相同也会执行,每次重扫都会
+    // 触发一轮 UPDATE(连带 FTS delete+insert churn、WAL 噪音)。未变行直接
+    // 跳过,重扫趋近零写。
+    const unchanged = this.existingMessageFingerprints(rows);
+    const changed = rows.filter((row) => !unchanged.has(messageFingerprint(
+      row.id, row.seq, row.role, row.kind, row.toolName, row.text,
+      row.timestamp, row.model, row.inputTokens, row.outputTokens,
+      row.fullText ?? null, row.parserVersion ?? null,
+    )));
+    if (changed.length === 0) return 0;
     this.withTransaction(() => {
-      for (const row of rows) {
+      for (const row of changed) {
         stmt.run(
           row.id,
           row.sessionId,
@@ -1850,6 +1950,35 @@ export class Store {
         );
       }
     });
+    return changed.length;
+  }
+
+  /** 库内已有行的内容指纹(id+全部业务列),供重扫去 churn。分块走主键索引。 */
+  private existingMessageFingerprints(rows: SessionMessageRow[]): Set<string> {
+    const fingerprints = new Set<string>();
+    const ids = [...new Set(rows.map((row) => row.id))];
+    for (let i = 0; i < ids.length; i += 500) {
+      const chunk = ids.slice(i, i + 500);
+      const placeholders = chunk.map(() => '?').join(', ');
+      const stored = this.db.query(
+        `SELECT id, seq, role, kind, tool_name, text, timestamp, model,
+                input_tokens, output_tokens, full_text, parser_version
+         FROM session_messages WHERE id IN (${placeholders})`,
+      ).all(...chunk) as Array<{
+        id: string; seq: number; role: string; kind: string;
+        tool_name: string | null; text: string | null; timestamp: number | null;
+        model: string | null; input_tokens: number | null; output_tokens: number | null;
+        full_text: string | null; parser_version: number | null;
+      }>;
+      for (const row of stored) {
+        fingerprints.add(messageFingerprint(
+          row.id, row.seq, row.role, row.kind, row.tool_name, row.text,
+          row.timestamp, row.model, row.input_tokens, row.output_tokens,
+          row.full_text, row.parser_version,
+        ));
+      }
+    }
+    return fingerprints;
   }
 
   deleteSessionMessages(sessionId: string): void {
