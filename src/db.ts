@@ -2153,6 +2153,31 @@ export class Store {
     return map;
   }
 
+  /**
+   * 指定 session 的有序用户文本:列表兜底按需取,空集直接返回。
+   * IN 分块走既有 (session_id, seq) 索引,避免全表扫描(session_messages
+   * 十万行量级时全量版每次要数秒,列表接口高频轮询下即常驻 CPU)。
+   */
+  listSessionUserTextsFor(sessionIds: string[]): Map<string, string[]> {
+    const map = new Map<string, string[]>();
+    for (let i = 0; i < sessionIds.length; i += 500) {
+      const chunk = sessionIds.slice(i, i + 500);
+      const placeholders = chunk.map(() => '?').join(', ');
+      const rows = this.db.query(
+        `SELECT session_id, text FROM session_messages
+         WHERE session_id IN (${placeholders}) AND role = 'user' AND kind = 'text'
+         ORDER BY seq`,
+      ).all(...chunk) as Array<{ session_id: string; text: string | null }>;
+      for (const row of rows) {
+        if (!row.text) continue;
+        const list = map.get(row.session_id) ?? [];
+        list.push(row.text);
+        map.set(row.session_id, list);
+      }
+    }
+    return map;
+  }
+
   /** 全部用户消息行(seq 升序,带时间戳),需求实体推导的原料。 */
   listUserMessageRows(): Array<{ sessionId: string; seq: number; ts: number | null; text: string }> {
     return this.db.query(

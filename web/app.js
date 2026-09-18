@@ -3430,24 +3430,16 @@ applyRoute();
 
 // ── SSE 实时刷新 ────────────────────────────────────────────────────
 // daemon 侧 watcher 监听本机 session 目录,索引完成广播 sessions-indexed。
-// 这里节流 5s 触发一次全量 render():连续扫描(活跃 session 持续写入)不会
-// 把界面刷得抖动,30s 的兜底轮询仍在(render 的 setInterval 不动)。
+// 事件驱动重拉合并到 30s 一档(与下方 setInterval 轮询同节奏):连续扫描
+// 不会把界面刷得抖动,也不会反过来制造请求风暴,轮询本身就是兜底。
 let lastEventRenderAt = 0;
-let eventRenderTimer = null;
 
 function refreshFromLiveEvent() {
   const now = Date.now();
-  if (now - lastEventRenderAt >= 5000) {
+  if (now - lastEventRenderAt >= 30_000) {
     lastEventRenderAt = now;
     void render();
-    return;
   }
-  if (eventRenderTimer != null) return;
-  eventRenderTimer = setTimeout(() => {
-    eventRenderTimer = null;
-    lastEventRenderAt = Date.now();
-    void render();
-  }, 5000 - (now - lastEventRenderAt));
 }
 
 function initLiveEvents() {

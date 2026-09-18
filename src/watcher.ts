@@ -33,6 +33,35 @@ export interface FlushScheduler {
   stop(): void;
 }
 
+/**
+ * 最小间隔闸门:冷却期内只保留一个 trailing 触发,到点补一次。
+ * watcher 的行级水位让单次增量扫描便宜,但子进程 spawn + 目录行走是
+ * 固定开销,活跃写入下 5s 防抖仍然背靠背——闸门把触发频率压到 minGapMs。
+ */
+export function createRateGate(
+  minGapMs: number,
+  fire: () => void,
+  scheduleTimeout: (fn: () => void, ms: number) => unknown = setTimeout,
+): (now?: number) => void {
+  let lastAt = 0;
+  let pending: unknown = null;
+  return (now: number = Date.now()): void => {
+    const wait = lastAt + minGapMs - now;
+    if (wait <= 0) {
+      if (pending != null) return; // trailing 已排队,冷却从排队那次起算
+      lastAt = now;
+      fire();
+      return;
+    }
+    if (pending != null) return;
+    pending = scheduleTimeout(() => {
+      pending = null;
+      lastAt = Date.now();
+      fire();
+    }, wait);
+  };
+}
+
 export function createFlushScheduler(
   onFlush: (paths: string[]) => void,
   quietMs = QUIET_MS,
