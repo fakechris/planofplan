@@ -244,6 +244,43 @@ describe('collectSessionCatalog message indexing', () => {
     }
   });
 
+  test('索引孤儿清理保留迁移哨兵，避免每轮重新扫描全部原日志', async () => {
+    const root = tempRoot();
+    const store = openMemoryDb();
+    const markers = ['__origin_backfill__', '__origin_backfill_dsh_factory__'];
+    const missing = join(root, 'deleted.jsonl');
+    try {
+      for (const path of [...markers, missing]) store.upsertSessionIndexState({ path, mtimeMs: 123, size: 0, parsedBytes: 0, lines: 0, parserVersion: 0 });
+      await collectSessionCatalog(store, makeRoots(root));
+      await collectSessionCatalog(store, makeRoots(root));
+      for (const path of markers) expect(store.getSessionIndexState(path)?.mtimeMs).toBe(123);
+      expect(store.getSessionIndexState(missing)).toBeNull();
+    } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test('旧版越界字节水位即使 mtime 未变也重建修复', async () => {
+    const root = tempRoot();
+    const store = openMemoryDb();
+    const dir = join(root, 'claude');
+    const file = join(dir, `${claudeId}.jsonl`);
+    try {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(file, jsonl([
+        { type: 'user', uuid: 'u1', message: { content: [{ type: 'text', text: '中文水位修复' }] }, cwd: '/tmp/demo' },
+      ]));
+      await collectSessionCatalog(store, makeRoots(root));
+      const state = store.getSessionIndexState(file)!;
+      store.upsertSessionIndexState({ ...state, parsedBytes: state.size + 3 });
+      expect(await collectSessionCatalog(store, makeRoots(root))).toBe(1);
+      expect(store.getSessionIndexState(file)?.parsedBytes).toBe(state.size);
+      expect(store.countSessionMessages(sessionKey('claude', claudeId))).toBe(1);
+      expect(await collectSessionCatalog(store, makeRoots(root))).toBe(0);
+    } finally {
+      store.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test('mtime 未变时整体跳过(不重建消息)', async () => {
     const root = tempRoot();
     const store = openMemoryDb();

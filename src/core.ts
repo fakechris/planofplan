@@ -1,5 +1,6 @@
 import type { AppConfig } from './config.ts';
 import type { Store } from './db.ts';
+import { SNAPSHOT_RETENTION_DAYS } from './db.ts';
 import { getAdapter } from './adapters/index.ts';
 import type { AdapterContext, PlanConfig, QuotaWindow } from './types.ts';
 import { AdapterError, AUTH_STATUS } from './types.ts';
@@ -234,6 +235,23 @@ export class Scheduler {
       const windows = this.store.latestByPlan(plan.slug, true);
       this.scheduleNextResetPoll(plan.slug, windows);
     });
+    this.startHousekeeping();
+  }
+
+  /** 每日家务:过期配额快照清理 + FTS 死段合并。启动即跑一次(错峰 3s),
+   *  之后 24h 一轮;任何失败只记日志,绝不拖垮调度器。 */
+  private startHousekeeping(): void {
+    const run = (): void => {
+      try {
+        const pruned = this.store.pruneSnapshotsBefore(Date.now() - SNAPSHOT_RETENTION_DAYS * 86_400_000);
+        if (pruned > 0) console.log(`[housekeeping] pruned ${pruned} snapshots older than ${SNAPSHOT_RETENTION_DAYS}d`);
+        this.store.optimizeSearchIndex();
+      } catch (error) {
+        console.error('[housekeeping] failed:', error);
+      }
+    };
+    setTimeout(run, 3_000);
+    this.timers.set('__housekeeping__', setInterval(run, 24 * 3_600_000));
   }
 
   /** 调度器入口必须吞错:refreshPlan 的未捕获拒绝(SQLITE_BUSY 等)会把整个 daemon 带崩。 */

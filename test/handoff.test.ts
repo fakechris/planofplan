@@ -88,6 +88,24 @@ Phase 2 — in_progress
 `;
 
 describe('buildHandoffPackage', () => {
+  test('planfile 包排除隐藏会话的总结、引用及关联提交', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'planofplan-handoff-hidden-plan-'));
+    const store = await (async () => {
+      writeFileSync(join(root, 'task_plan.md'), TASK_PLAN);
+      return seededStore(root);
+    })();
+    try {
+      store.setSessionHidden('claude:h1', true);
+      const plan = store.listPlanFiles()[0]!;
+      const pkg = buildHandoffPackage(store, 'planfile', plan.id, LINK)!;
+      expect(pkg.markdown).not.toContain('deadbeef');
+      expect(pkg.markdown).not.toContain('claude:h1');
+      expect(pkg.markdown).not.toContain('剩余旧样式删除与验收截图');
+    } finally {
+      store.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
   test('session 源:目标/计划快照/Todo/尾总结/commit/deep link 全进包', async () => {
     const root = mkdtempSync(join(tmpdir(), 'planofplan-handoff-'));
     try {

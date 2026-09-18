@@ -62,7 +62,7 @@ swift build --package-path "$PACKAGE" -c release
 
 # Compile the Bun daemon into the bundle as a standalone executable. No runtime
 # dependency on bun or the source checkout — the .app becomes portable.
-( cd "$ROOT" && bun build --compile src/cli.ts --outfile "$STAGED_APP/Contents/MacOS/planofplan-daemon" )
+( cd "$ROOT" && bun build --compile --compile-exec-argv=--smol src/cli.ts --outfile "$STAGED_APP/Contents/MacOS/planofplan-daemon" )
 mkdir -p "$STAGED_APP/Contents/MacOS"
 
 mkdir -p "$STAGED_APP/Contents/MacOS" "$STAGED_APP/Contents/Resources"

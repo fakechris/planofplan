@@ -22,11 +22,12 @@ import type { Store } from './db.ts';
 import { buildWorkGraph } from './graph.ts';
 import { repoRefOf, sessionProjectNames } from './repos.ts';
 import { attachRepos, extractSessionRepos, TOUCH_BYTES } from './session-repos.ts';
-import { messagesFromRecord, messagesFromZcodeDb, isClaudeMetaRecord, isClaudeCompactSummary, isCodexMetaUserText } from './transcript.ts';
+import { messagesFromRecord, messagesFromZcodeDb, isClaudeMetaRecord, isClaudeCompactSummary, isCodexMetaUserText, MESSAGE_PARSER_VERSION } from './transcript.ts';
 import { touchesFromRecord } from './file-touches.ts';
 import { commitWitnessesFromRecord, commitWitnessesFromZcodeDb, type WitnessPairing } from './commit-witness.ts';
 import { collectSessionCommits } from './commit-attribution.ts';
 import {
+  ORIGIN_BACKFILL_STATE_PATHS,
   applyHerdrOrigin,
   backfillDshFactoryOrigins,
   backfillSessionOrigins,
@@ -38,6 +39,7 @@ import {
 import { claudeParentOfPath, materializeSessionLinks } from './session-links.ts';
 import { materializeRequirements } from './requirements.ts';
 import { refineRequirements } from './requirement-llm.ts';
+import { forEachJsonlLine } from './jsonl-stream.ts';
 import { loadConfig } from './config.ts';
 import { materializePlanFiles, materializeProgressNotes, materializeTodoSnapshots } from './plans.ts';
 import type { SessionCommit, SessionIndexState, SessionList, SessionRecord, SessionRepo } from './types.ts';
@@ -779,8 +781,12 @@ function readClaudeHistoryTitles(options: SessionCollectOptions): Map<string, st
 
 const CATALOG_YIELD_BATCH = 8;
 
-function yieldEventLoop(): Promise<void> {
-  return new Promise((resolve) => setImmediate(resolve));
+async function yieldEventLoop(): Promise<void> {
+  // A scan can decode gigabytes without going idle. Collect between file groups
+  // after the previous synchronous frames have unwound, including native Buffer
+  // and decompressor allocations that otherwise survive until scanner exit.
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  Bun.gc(true);
 }
 
 // ── 消息级索引:行级续扫 ─────────────────────────────────────────
@@ -796,7 +802,8 @@ function yieldEventLoop(): Promise<void> {
 // 把历史存量的目击证据一次性挖出来(回溯红利是这层的核心价值)。
 // v6:witness 命令识别修多行 -m 与包装词,重扫补齐 v5 漏掉的目击。
 // v7:witness 覆盖 codex custom_tool_call(exec)形态;zcode 走独立路径随扫随提。
-export const MESSAGE_PARSER_VERSION = 7;
+// v8 retains complete normalized visible message text alongside the bounded FTS excerpt.
+export { MESSAGE_PARSER_VERSION } from './transcript.ts';
 const MSG_BATCH = 400;
 
 interface StreamedLine {
@@ -877,46 +884,34 @@ function streamJsonlFrom(
     return { parsedBytes: size, lines };
   }
 
-  let fd: number | null = null;
   let parsedBytes = fromBytes;
   let lines = 0;
   try {
-    fd = openSync(path, 'r');
     const size = statSync(path).size;
-    let pos = Math.min(fromBytes, size);
-    let remainder = '';
     let batch: StreamedLine[] = [];
-    const buf = Buffer.alloc(256 * 1024);
-    let n = 0;
-    while ((n = readSync(fd, buf, 0, buf.length, pos)) > 0) {
-      pos += n;
-      const chunk = remainder + buf.toString('utf8', 0, n);
-      const parts = chunk.split('\n');
-      remainder = parts.pop() ?? '';
-      for (const line of parts) {
-        const end = parsedBytes + Buffer.byteLength(line, 'utf8') + 1;
-        parsedBytes = end;
-        lines += 1;
-        if (!line.trim()) continue;
+    let batchBytes = 0;
+    parsedBytes = Math.min(fromBytes, size);
+    forEachJsonlLine(path, parsedBytes, (line, end) => {
+      batchBytes += end - parsedBytes;
+      parsedBytes = end;
+      lines += 1;
+      if (line.trim()) {
         try {
           const value = JSON.parse(line) as unknown;
-          if (value && typeof value === 'object') {
-            batch.push({ record: value as Record<string, unknown>, line: baseLines + lines, end });
-          }
+          if (value && typeof value === 'object') batch.push({ record: value as Record<string, unknown>, line: baseLines + lines, end });
         } catch {
-          /* truncated or malformed line */
+          /* malformed line */
         }
       }
-      if (batch.length >= MSG_BATCH) {
+      if (batch.length >= MSG_BATCH || batchBytes >= 2 * 1024 * 1024) {
         onBatch(batch);
         batch = [];
+        batchBytes = 0;
       }
-    }
+    });
     if (batch.length > 0) onBatch(batch);
   } catch {
     /* unreadable */
-  } finally {
-    if (fd != null) closeSync(fd);
   }
   return { parsedBytes, lines };
 }
@@ -951,6 +946,7 @@ function indexSessionFileMessages(
     && state.parserVersion === MESSAGE_PARSER_VERSION
     && !isCompressedLog(readPath)
     && state.parsedBytes > 0
+    && state.parsedBytes <= state.size
     && readSize >= state.size
     && readSize > state.parsedBytes;
   const baseLines = canAppend && state ? state.lines : 0;
@@ -1039,6 +1035,7 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
 
   const rows: SessionRecord[] = [];
   let processed = 0;
+  let bytesSinceYield = 0;
   let scanned = 0;
   for (const file of discovered) {
     const existingRows = existingByFile.get(file.path);
@@ -1073,6 +1070,7 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
       && state.parserVersion === MESSAGE_PARSER_VERSION
       && state.mtimeMs >= compositeMtimeMs
       && state.size === compositeSize
+      && state.parsedBytes <= state.size
       && compositeSize > 0;
     if (file.provider !== 'zcode' && existingRows && latestSeen >= compositeMtimeMs && indexFresh) {
       rows.push(...existingRows);
@@ -1105,7 +1103,11 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
         });
       });
       processed += 1;
-      if (processed % CATALOG_YIELD_BATCH === 0) await yieldEventLoop();
+      bytesSinceYield += readSize;
+      if (processed % CATALOG_YIELD_BATCH === 0 || bytesSinceYield >= 32 * 1024 * 1024) {
+        bytesSinceYield = 0;
+        await yieldEventLoop();
+      }
       continue;
     }
     scanned += 1;
@@ -1160,7 +1162,11 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
       rows.push(attachRepos(withWork, repos));
     }
     processed += 1;
-    if (processed % CATALOG_YIELD_BATCH === 0) await yieldEventLoop();
+    bytesSinceYield += readSize;
+    if (processed % CATALOG_YIELD_BATCH === 0 || bytesSinceYield >= 32 * 1024 * 1024) {
+      bytesSinceYield = 0;
+      await yieldEventLoop();
+    }
   }
   // 标题补充源,对复用行同样生效:codex 官方线程名覆盖启发式,claude history
   // 兜底无标题 session(信封开头的会话头部解析抽不出标题)
@@ -1196,7 +1202,8 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
   // 359/1920 行)按存在性清理;消息按保留期裁剪,目录行永久保留。
   try {
     const statePaths = store.listSessionIndexStatePaths();
-    const deadStates = statePaths.filter((path) => !existsSync(path));
+    const migrationMarkers = new Set<string>(ORIGIN_BACKFILL_STATE_PATHS);
+    const deadStates = statePaths.filter((path) => !migrationMarkers.has(path) && !existsSync(path));
     if (deadStates.length > 0) store.deleteSessionIndexStates(deadStates);
     const scanPaths = store.listUsageScanFilePaths();
     const deadScans = scanPaths.filter((path) => !existsSync(path));

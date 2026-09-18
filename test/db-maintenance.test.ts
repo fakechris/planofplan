@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { openDb, openMemoryDb } from '../src/db.ts';
+import { openDb, openMemoryDb , SCHEMA_VERSION } from '../src/db.ts';
 import { collectSessionCatalog } from '../src/sessions.ts';
 import type { SessionMessageRow } from '../src/types.ts';
 
@@ -68,7 +68,7 @@ describe('v11 FTS 瘦身迁移(模拟旧库)', () => {
       // 重开:迁移 v11 执行——消息保留,索引只含 text 行
       const upgraded = openDb(dbPath);
       const version = (upgraded.db.query('PRAGMA user_version').get() as { user_version: number }).user_version;
-      expect(version).toBe(12);
+      expect(version).toBe(SCHEMA_VERSION);
       expect(upgraded.countSessionMessages()).toBe(2); // 消息不清,免重扫
       expect(upgraded.searchSessionMessages('旧库正文')).toHaveLength(1);
       expect(upgraded.searchSessionMessages('旧库工具')).toHaveLength(0); // 工具入参退出索引

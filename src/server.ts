@@ -24,11 +24,13 @@ import type { PlanConfig, ProjectAgentStat, ProjectListItem, RequirementRecord }
 import { readTranscript } from './transcript.ts';
 import { launchResume } from './resume.ts';
 import { getStartupSettings, setLaunchOnStartup } from './startup.ts';
-import { startSessionWatcher } from './watcher.ts';
+import { startSessionWatcher, createRateGate } from './watcher.ts';
 import { registerMcpRoutes } from './mcp.ts';
 import { buildLineageReport } from './lineage-report.ts';
 import { getAgentStatus } from './agent-status.ts';
 import { childProcessArgs } from './spawn.ts';
+import { ScanQueue } from './scan-queue.ts';
+import { registerMessageEvidenceRoutes } from './message-evidence.ts';
 
 // In dev (bun src/cli.ts), import.meta.dir points at src/ and ../web = repo/web.
 // In a bun build --compile binary, import.meta.dir resolves to the executable's
@@ -47,6 +49,9 @@ const WEB_DIR = (() => {
 export interface ServerOptions {
   /** true 时启动文件监听,变更自动触发 session 索引(demo 模式传 false)。 */
   live?: boolean;
+  startupScan?: boolean;
+  /** Injectable process boundary for isolated queue/API tests. */
+  spawnScan?: (args: string[]) => Pick<Bun.Subprocess, 'exited'>;
 }
 
 export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig, options: ServerOptions = {}): Hono {
@@ -80,39 +85,38 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
     }
   };
 
-  let usageRefreshProcess: Bun.Subprocess | null = null;
+  let usageRefreshProcess: Pick<Bun.Subprocess, 'exited'> | null = null;
   let usageRefreshStartedAt: number | null = null;
   let usageRefreshError: string | null = null;
-  let sessionIndexProcess: Bun.Subprocess | null = null;
+  let sessionIndexProcess: Pick<Bun.Subprocess, 'exited'> | null = null;
   // usage 报表缓存：usage_records 只随扫描子进程 / 手动 CLI 写入变化，聚合
   // 十几万行是秒级同步 CPU+IO 工作，前端 30s 一次的轮询不应每次重算。
   // 扫描完成时整体失效；TTL 兜底覆盖外部 CLI 的直写。
   const usageReportCache = new Map<string, { report: ReturnType<typeof buildUsageReport>; at: number }>();
   const USAGE_CACHE_TTL_MS = 60_000;
 
+  const spawnScan = options.spawnScan ?? ((args: string[]) => Bun.spawn(childProcessArgs(args), { stdout: 'ignore', stderr: 'inherit' }));
+  const scanQueue = new ScanQueue(async (request) => {
+    if (request.kind === 'usage') await runUsageRefresh(request.days, request.includeOfficial ?? false);
+    else await runSessionIndex(request.days, request.source);
+  }, (error) => console.error('[scan] failed:', error instanceof Error ? error.message : String(error)));
   const startUsageRefresh = (days: number, includeOfficial: boolean): void => {
-    if (usageRefreshProcess) return;
+    scanQueue.enqueue({ kind: 'usage', days, includeOfficial, source: 'page' });
+  };
+  const runUsageRefresh = async (days: number, includeOfficial: boolean): Promise<void> => {
     usageRefreshError = null;
     usageRefreshStartedAt = Date.now();
-    const scanProcess = Bun.spawn(childProcessArgs(['tokens', '--days', String(days), ...(includeOfficial ? [] : ['--no-official'])]), {
-      stdout: 'ignore',
-      stderr: 'inherit',
-    });
-    usageRefreshProcess = scanProcess;
-    void scanProcess.exited
-      .then((exitCode) => {
-        if (exitCode !== 0) {
-          usageRefreshError = `本地日志扫描失败（exit ${exitCode}）`;
-        }
-      })
-      .catch((error) => {
-        usageRefreshError = error instanceof Error ? error.message : '本地日志扫描失败';
-      })
-      .finally(() => {
-        usageRefreshProcess = null;
-        usageRefreshStartedAt = null;
-        usageReportCache.clear();
-      });
+    try {
+      usageRefreshProcess = spawnScan(['tokens', '--days', String(days), ...(includeOfficial ? [] : ['--no-official'])]);
+      const exitCode = await usageRefreshProcess.exited;
+      if (exitCode !== 0) usageRefreshError = `本地日志扫描失败（exit ${exitCode}）`;
+    } catch (error) {
+      usageRefreshError = error instanceof Error ? error.message : '本地日志扫描失败';
+    } finally {
+      usageRefreshProcess = null;
+      usageRefreshStartedAt = null;
+      usageReportCache.clear();
+    }
   };
 
   app.get('/api/overview', (c) => {
@@ -367,34 +371,62 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
     });
   });
 
-  // session 索引触发(单飞 + trailing 重触发):页面打开与 watcher flush 走同一道闸,
-  // 保证同一时刻只有一个扫描子进程;扫描期间到来的触发记为 pending,结束后补跑一轮。
+  // 启动、页面、watcher 和 usage 共用单一队列，每种扫描最多保留一次 trailing 请求。
   let sessionIndexStartedAt: number | null = null;
-  let sessionIndexPending = false;
   const sessionIndexLast: { at: number | null; source: string | null; changedFiles: number | null } = {
     at: null,
     source: null,
     changedFiles: null,
   };
   const startSessionIndex = (days: number, source = 'page'): void => {
-    if (sessionIndexProcess) {
-      sessionIndexPending = true;
-      return;
-    }
+    scanQueue.enqueue({ kind: 'sessions', days, source });
+  };
+  const runSessionIndex = async (days: number, source: string): Promise<void> => {
     sessionIndexStartedAt = Date.now();
-    sessionIndexProcess = Bun.spawn(childProcessArgs(['sessions', '--refresh', '--days', String(days)]), { stdout: 'ignore', stderr: 'inherit' });
-    broadcastSSE('index', { state: 'running', source, startedAt: sessionIndexStartedAt });
-    void sessionIndexProcess.exited.finally(() => {
+    try {
+      sessionIndexProcess = spawnScan(['sessions', '--refresh', '--days', String(days)]);
+      broadcastSSE('index', { state: 'running', source, startedAt: sessionIndexStartedAt });
+      const exitCode = await sessionIndexProcess.exited;
+      if (exitCode !== 0) {
+        broadcastSSE('index', { state: 'error', source, exitCode });
+        console.error(`[sessions] ${source} scan exit ${exitCode}`);
+      } else {
+        sessionIndexLast.at = Date.now();
+        sessionIndexLast.source = source;
+        broadcastSSE('sessions-indexed', { at: sessionIndexLast.at, source });
+        console.log(`[sessions] ${source} scan completed`);
+      }
+    } finally {
       sessionIndexProcess = null;
       sessionIndexStartedAt = null;
-      sessionIndexLast.at = Date.now();
-      sessionIndexLast.source = source;
-      broadcastSSE('sessions-indexed', { at: sessionIndexLast.at, source });
-      if (sessionIndexPending) {
-        sessionIndexPending = false;
-        startSessionIndex(days, source);
-      }
-    });
+      // 扫描可能改写了行目录,作废旧底料,让 SSE 后的重拉拿到新数据
+      invalidateSessionsBase();
+    }
+  };
+
+  // /api/sessions 的底料缓存(行目录+用户元数据+实体+commits):UI 30s 轮询
+  // 加扫描后 SSE 重拉,高频请求都重复跑同一批查询。3s TTL 足以把轮询风暴
+  // 压成一次,又不会让星标/隐藏/索引结果可感知地过期;写路径直接失效。
+  let sessionsBaseCache: {
+    at: number;
+    allRows: ReturnType<Store['listSessionRows']>;
+    userMeta: ReturnType<Store['getSessionUserMetaMap']>;
+    firstRequirements: ReturnType<Store['firstRequirementBySession']>;
+    commits: ReturnType<Store['listSessionCommits']>;
+  } | null = null;
+  const sessionsBase = (): NonNullable<typeof sessionsBaseCache> => {
+    if (sessionsBaseCache && Date.now() - sessionsBaseCache.at < 3_000) return sessionsBaseCache;
+    sessionsBaseCache = {
+      at: Date.now(),
+      allRows: store.listSessionRows(),
+      userMeta: store.getSessionUserMetaMap(),
+      firstRequirements: store.firstRequirementBySession(),
+      commits: store.listSessionCommits(),
+    };
+    return sessionsBaseCache;
+  };
+  const invalidateSessionsBase = (): void => {
+    sessionsBaseCache = null;
   };
 
   app.get('/api/sessions', (c) => {
@@ -407,11 +439,16 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
     const includeHidden = c.req.query('hidden') === '1';
     const now = Date.now();
     const since = now - days * 86_400_000;
-    const allRows = store.listSessionRows();
+    // 需求(§1.5 实体化):user session 读 requirements 表(首条,显式
+    // 优先,带 origin 分级);user 会话没有实体就保持 null——不再现场
+    // pickRequirement 兜底,它没有噪音规则,注入类消息会绕过实体层直接
+    // 进图谱。非 user(subagent 派工 prompt 等)保持现场抽取,列表行展示用。
+    // 兜底只发生在「无实体且非 user 来源」的行(通常寥寥几个),文本按需
+    // 取——全量 listSessionUserTexts 是十万行级扫描,曾把本接口拖到 2.6s/次。
+    const base = sessionsBase();
+    const allRows = base.allRows;
+    const userMeta = base.userMeta;
     if (refresh || allRows.length === 0) startSessionIndex(days);
-    // 用户数据层联入:星标/隐藏标志。hidden 默认排除(图谱/列表都不吃),
-    // 「显示已隐藏」显式带 hidden=1 才包含;墓碑 session 已不在库,天然不出现。
-    const userMeta = store.getSessionUserMetaMap();
     let rows = allRows.filter((row) => includeHidden || !userMeta.get(row.id)?.hidden)
       .map((row) => {
         const meta = userMeta.get(row.id);
@@ -442,8 +479,11 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
     // 优先,带 origin 分级);user 会话没有实体就保持 null——不再现场
     // pickRequirement 兜底,它没有噪音规则,注入类消息会绕过实体层直接
     // 进图谱。非 user(subagent 派工 prompt 等)保持现场抽取,列表行展示用
-    const firstRequirements = store.firstRequirementBySession();
-    const userTexts = store.listSessionUserTexts();
+    const firstRequirements = base.firstRequirements;
+    const fallbackIds = rows
+      .filter((row) => !firstRequirements.get(row.id) && (row.origin ?? 'user') !== 'user')
+      .map((row) => row.id);
+    const userTexts = store.listSessionUserTextsFor(fallbackIds);
     const requirements = new Map<string, string>();
     const requirementLevels = new Map<string, string>();
     rows = rows.map((row) => {
@@ -464,7 +504,7 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
       generatedAt: now,
       requirements,
       requirementLevels,
-      commits: store.listSessionCommits(),
+      commits: base.commits,
       includeSubagents,
     });
     return c.json({
@@ -558,6 +598,7 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
     const parsed = await readBoolBody(c, 'starred');
     if ('error' in parsed) return c.json({ ok: false, error: parsed.error }, 400);
     store.setSessionStar(id, parsed.value!);
+    invalidateSessionsBase();
     broadcastSSE('sessions-changed', { kind: 'star', id, on: parsed.value });
     return c.json({ ok: true, starred: parsed.value });
   });
@@ -567,6 +608,7 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
     const parsed = await readBoolBody(c, 'hidden');
     if ('error' in parsed) return c.json({ ok: false, error: parsed.error }, 400);
     store.setSessionHidden(id, parsed.value!);
+    invalidateSessionsBase();
     broadcastSSE('sessions-changed', { kind: 'hide', id, on: parsed.value });
     return c.json({ ok: true, hidden: parsed.value });
   });
@@ -575,6 +617,7 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
     const id = decodeURIComponent(c.req.param('id'));
     const session = store.getSession(id);
     store.tombstoneSession(id, session?.sourceFile ?? null);
+    invalidateSessionsBase();
     broadcastSSE('sessions-changed', { kind: 'deleted', id });
     return c.json({ ok: true });
   });
@@ -582,6 +625,7 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
   app.post('/api/sessions/:id/restore', (c) => {
     const id = decodeURIComponent(c.req.param('id'));
     store.restoreSession(id);
+    invalidateSessionsBase();
     // 墓碑已清,立刻补一轮扫描把 session 扫回来
     startSessionIndex(30, 'restore');
     broadcastSSE('sessions-changed', { kind: 'restored', id });
@@ -597,6 +641,8 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
       .map((file) => ({ id: file.id, title: file.title, kind: file.kind, path: file.path }));
     return c.json({ ...session, plans });
   });
+
+  registerMessageEvidenceRoutes(app, store);
 
   app.get('/api/sessions/:id/transcript', async (c) => {
     const id = decodeURIComponent(c.req.param('id'));
@@ -1394,13 +1440,21 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
   // 行级水位保证未变文件近零成本;与页面触发的单飞闸门互斥。
   // PLANOFPLAN_DISABLE_WATCHER=1 是运维逃生门:watcher 异常时不用回滚代码。
   if (options.live && process.env.PLANOFPLAN_DISABLE_WATCHER !== '1') {
+    // watch 触发最小间隔:活跃 agent 持续写 session 文件时,防抖窗(≤5s)
+    // 仍会让扫描子进程背靠背。行级水位保证不丢更新,60s 一轮足够新鲜。
+    const watchScan = createRateGate(60_000, () => startSessionIndex(30, 'watch'));
     const watcher = startSessionWatcher((paths) => {
       sessionIndexLast.changedFiles = paths.length;
-      startSessionIndex(30, 'watch');
+      watchScan();
     });
     if (watcher.roots.length > 0) {
       console.log(`[watcher] watching ${watcher.roots.length} session roots for live indexing`);
     }
+  }
+
+  if (options.startupScan) {
+    startSessionIndex(90, 'startup');
+    startUsageRefresh(3, false);
   }
 
   return app;

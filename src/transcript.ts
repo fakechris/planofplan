@@ -304,10 +304,12 @@ export async function readTranscript(session: SessionRecord): Promise<SessionTra
 // ── 消息级索引抽取（session_messages 表）─────────────────────────
 // 与上面的 turnsFromX 共享同一份已 parse 的 records。体积控制（见
 // docs/obelisk-session-research.md 8.3）:只入 user/assistant 可见文本与
-// tool_use 入参（截 2K),tool_result 正文不入库;text 统一截 10K。
+// tool_use 入参（截 2K),tool_result 正文不入库。text 保留 10K 搜索摘要;
+// v8 起 full_text 另存规范化可见正文供稳定引用续读，不复制原始日志文件。
 
 export const MESSAGE_TEXT_MAX = 10_000;
 export const TOOL_INPUT_MAX = 2_000;
+export const MESSAGE_PARSER_VERSION = 8;
 
 function clipField(text: string, max = MESSAGE_TEXT_MAX): string {
   return text.length > max ? `${text.slice(0, max)}…` : text;
@@ -362,7 +364,8 @@ export function textRow(
   if (!trimmed) return null;
   return {
     id, sessionId, seq, role, kind: 'text', toolName: null,
-    text: clipField(trimmed), timestamp, model, inputTokens, outputTokens,
+    text: clipField(trimmed), fullText: trimmed, parserVersion: MESSAGE_PARSER_VERSION,
+    timestamp, model, inputTokens, outputTokens,
   };
 }
 
@@ -376,7 +379,8 @@ export function toolRow(
 ): SessionMessageRow {
   return {
     id, sessionId, seq, role: 'tool', kind: 'tool_use', toolName,
-    text: toolInputText(input), timestamp, model: null, inputTokens: null, outputTokens: null,
+    text: toolInputText(input), parserVersion: MESSAGE_PARSER_VERSION,
+    timestamp, model: null, inputTokens: null, outputTokens: null,
   };
 }
 
@@ -395,7 +399,7 @@ function messagesFromClaudeRecord(sessionId: string, record: Record<string, unkn
     if (!text) return [];
     return [{
       id: `${sessionId}:${uuid}`, sessionId, seq, role: 'system', kind: 'summary',
-      toolName: null, text: clipField(text), timestamp: tsOf(record.timestamp),
+      toolName: null, text: clipField(text), fullText: text, parserVersion: MESSAGE_PARSER_VERSION, timestamp: tsOf(record.timestamp),
       model: null, inputTokens: null, outputTokens: null,
     }];
   }
