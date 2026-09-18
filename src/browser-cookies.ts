@@ -310,7 +310,17 @@ function decodeItemValue(value: Uint8Array): string | null {
   }
 }
 
-export async function readBrowserKimiAuth(browser: KimiBrowser = 'safari'): Promise<BrowserCookieResult> {  const cached = browserResultCache.get(browser);
+export async function readBrowserKimiAuth(browser: KimiBrowser = 'safari'): Promise<BrowserCookieResult> {
+  // 浏览器凭据链依赖 macOS Keychain(Safe Storage/Safari binary cookies);
+  // Windows 的 Chromium Cookie 走 DPAPI,需原生解密,暂不支持——显式降级而非静默空结果。
+  if (process.platform !== 'darwin') {
+    return {
+      token: null,
+      source: null,
+      warnings: ['浏览器 Cookie 提取目前仅支持 macOS;Windows 请用 `planofplan auth set kimi --key <token>` 手动配置'],
+    };
+  }
+  const cached = browserResultCache.get(browser);
   if (cached && Date.now() - cached.at < BROWSER_RESULT_CACHE_TTL_MS) return cached.result;
 
   const save = (result: BrowserCookieResult): BrowserCookieResult => {

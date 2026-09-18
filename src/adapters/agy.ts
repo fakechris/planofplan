@@ -208,7 +208,71 @@ function findAgyBinary(): string | null {
 /** 缓存系统代理探测结果(1 分钟)。 */
 let cachedProxyEnv: { env: Record<string, string>; expiresAt: number } | null = null;
 
-/** 检测系统代理(优先继承 process.env,兜底读取 macOS scutil --proxy)。 */
+const WIN32_INTERNET_SETTINGS_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings';
+
+/**
+ * 解析 `reg query ... /v ProxyEnable|ProxyServer` 输出为代理 URL env。
+ * ProxyServer 兼容两种写法:"host:port" 与 "http=...;https=...;socks=..."。
+ */
+export function parseWin32ProxySettings(output: string): Record<string, string> {
+  const env: Record<string, string> = {};
+  const regTypeAndValue = (name: string): string | null => {
+    const m = output.match(new RegExp(`^\\s*${name}\\s+REG_(?:SZ|DWORD)\\s+(\\S[^\\r\\n]*)$`, 'mi'));
+    return m ? m[1]!.trim() : null;
+  };
+  const enabled = regTypeAndValue('ProxyEnable');
+  if (enabled !== '0x1') return env;
+  const server = regTypeAndValue('ProxyServer');
+  if (!server) return env;
+
+  const push = (url: string): void => {
+    if (url.startsWith('socks')) {
+      env.ALL_PROXY = url;
+      env.all_proxy = url;
+    } else {
+      env.HTTP_PROXY = url;
+      env.http_proxy = url;
+      env.HTTPS_PROXY = url;
+      env.https_proxy = url;
+    }
+  };
+
+  if (server.includes('=')) {
+    // per-protocol 形式:http=host:port;https=host:port;socks=host:port
+    // 各协议独立赋值;http/https 代理统一写 http:// scheme(代理自身走 HTTP CONNECT)
+    for (const pair of server.split(';')) {
+      const [proto, addr] = pair.split('=').map((s) => s?.trim());
+      if (!proto || !addr) continue;
+      if (proto === 'socks') {
+        env.ALL_PROXY = `socks5://${addr}`;
+        env.all_proxy = env.ALL_PROXY;
+      } else if (proto === 'https') {
+        env.HTTPS_PROXY = `http://${addr}`;
+        env.https_proxy = env.HTTPS_PROXY;
+      } else if (proto === 'http') {
+        env.HTTP_PROXY = `http://${addr}`;
+        env.http_proxy = env.HTTP_PROXY;
+      }
+    }
+  } else {
+    push(`http://${server}`);
+  }
+  return env;
+}
+
+function win32ProxyFromRegistry(): Record<string, string> {
+  try {
+    const out = execSync(`reg query "${WIN32_INTERNET_SETTINGS_KEY}"`, {
+      encoding: 'utf8',
+      timeout: 1500,
+    });
+    return parseWin32ProxySettings(out);
+  } catch {
+    return {};
+  }
+}
+
+/** 检测系统代理(优先继承 process.env,兜底读 macOS scutil / Windows 注册表)。 */
 function getProxyEnv(): Record<string, string> {
   const explicit =
     process.env.HTTPS_PROXY ??
@@ -230,7 +294,7 @@ function getProxyEnv(): Record<string, string> {
     return cachedProxyEnv.env;
   }
 
-  const env: Record<string, string> = {};
+  let env: Record<string, string> = {};
   if (process.platform === 'darwin') {
     try {
       const out = execSync('/usr/sbin/scutil --proxy', { encoding: 'utf8', timeout: 1500 });
@@ -262,6 +326,8 @@ function getProxyEnv(): Record<string, string> {
     } catch {
       // 静默容错
     }
+  } else if (process.platform === 'win32') {
+    env = win32ProxyFromRegistry();
   }
 
   cachedProxyEnv = { env, expiresAt: now + 60_000 };
@@ -274,31 +340,54 @@ function getProxyEnv(): Record<string, string> {
  * 将 dummy open 脚本置于 PATH 最前端并设置 BROWSER 环境变量:
  * 1) 彻底阻断弹窗骚扰用户;
  * 2) 捕获 OAuth 请求并快速中断进程,避免白等 45s 超时。
+ * Windows 无 shebang 机制,写 open.cmd 由 cmd 解析,语义一致。
  */
-function ensureNoopOpenBin(): string {
-  const binDir = join(process.env.HOME ?? '', '.planofplan', 'bin');
-  const openScript = join(binDir, 'open');
-  if (!existsSync(openScript)) {
-    mkdirSync(binDir, { recursive: true });
-    const scriptContent = [
-      '#!/bin/sh',
-      'if [ -n "$PLANOFPLAN_OPEN_SENTINEL" ]; then',
-      '  echo "$@" > "$PLANOFPLAN_OPEN_SENTINEL"',
-      'fi',
+function noopOpenScriptName(platform: string): string {
+  return platform === 'win32' ? 'open.cmd' : 'open';
+}
+
+export function noopOpenScriptContent(platform: string): string {
+  if (platform === 'win32') {
+    return [
+      '@echo off',
+      'if defined PLANOFPLAN_OPEN_SENTINEL echo %* >> "%PLANOFPLAN_OPEN_SENTINEL%"',
       'exit 0',
       '',
-    ].join('\n');
-    writeFileSync(openScript, scriptContent, { mode: 0o755 });
+    ].join('\r\n');
   }
-  return binDir;
+  return [
+    '#!/bin/sh',
+    'if [ -n "$PLANOFPLAN_OPEN_SENTINEL" ]; then',
+    '  echo "$@" > "$PLANOFPLAN_OPEN_SENTINEL"',
+    'fi',
+    'exit 0',
+    '',
+  ].join('\n');
+}
+
+function ensureNoopOpenBin(): { dir: string; script: string } {
+  const platform = process.platform;
+  const home = process.env.HOME ?? process.env.USERPROFILE ?? '';
+  const dir = join(home, '.planofplan', 'bin');
+  const script = join(dir, noopOpenScriptName(platform));
+  if (!existsSync(script)) {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(script, noopOpenScriptContent(platform), {
+      encoding: 'utf8',
+      ...(platform === 'win32' ? {} : { mode: 0o755 }),
+    });
+  }
+  return { dir, script };
 }
 
 /** 异步执行命令并取 stdout;超时杀进程。 */
 async function execAsync(bin: string, args: string[], timeoutMs: number): Promise<string> {
   // daemon 的 launchd PATH 只有 /usr/bin:/bin — agy 需要更完整的环境
   // 启动子进程(language server 等)。补齐常见路径 + 继承 HOME。
-  const home = process.env.HOME ?? '';
-  const noopBinDir = ensureNoopOpenBin();
+  const platform = process.platform;
+  const win32 = platform === 'win32';
+  const home = process.env.HOME ?? process.env.USERPROFILE ?? '';
+  const noopBin = ensureNoopOpenBin();
   const proxyEnv = getProxyEnv();
   const sentinelPath = join(tmpdir(), `pop-agy-sentinel-${process.pid}-${Math.random().toString(36).slice(2)}.tmp`);
 
@@ -306,16 +395,15 @@ async function execAsync(bin: string, args: string[], timeoutMs: number): Promis
     ...process.env,
     ...proxyEnv,
     HOME: home,
-    BROWSER: join(noopBinDir, 'open'),
+    BROWSER: noopBin.script,
     PLANOFPLAN_OPEN_SENTINEL: sentinelPath,
     PATH: [
-      noopBinDir,
-      `${home}/.local/bin`,
-      `${home}/.bun/bin`,
-      '/opt/homebrew/bin',
-      '/usr/local/bin',
+      noopBin.dir,
+      join(home, '.local', 'bin'),
+      join(home, '.bun', 'bin'),
+      ...(win32 ? [join(home, 'AppData', 'Roaming', 'npm')] : ['/opt/homebrew/bin', '/usr/local/bin']),
       process.env.PATH ?? '',
-    ].filter(Boolean).join(':'),
+    ].filter(Boolean).join(win32 ? ';' : ':'),
   };
 
   const proc = Bun.spawn([bin, ...args], {

@@ -22,16 +22,29 @@ import type { AdapterContext, Credential, PlanAdapter, QuotaWindow } from '../ty
 import { fetchQuota } from './http.ts';
 import { AdapterError } from '../types.ts';
 import { clampPct } from './util.ts';
+import { appDataDir } from '../platform.ts';
 
 const LEGACY_URL = 'https://cursor.com/api/usage';
 const USD_URL = 'https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage';
 
+/** state.vscdb 候选路径:macOS Application Support / Windows %APPDATA% / Linux ~/.config。 */
+export function cursorDbCandidates(
+  platform: string = process.platform,
+  home: string = homedir(),
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
+  if (platform === 'darwin') {
+    return [join(home, 'Library', 'Application Support', 'Cursor', 'User', 'globalStorage', 'state.vscdb')];
+  }
+  if (platform === 'win32') {
+    const appData = appDataDir(env, platform, home) ?? home;
+    return [join(appData, 'Cursor', 'User', 'globalStorage', 'state.vscdb')];
+  }
+  return [join(home, '.config', 'Cursor', 'User', 'globalStorage', 'state.vscdb')];
+}
+
 function cursorDbPath(): string | null {
-  const home = homedir();
-  const candidates =
-    process.platform === 'darwin'
-      ? [join(home, 'Library', 'Application Support', 'Cursor', 'User', 'globalStorage', 'state.vscdb')]
-      : [join(home, '.config', 'Cursor', 'User', 'globalStorage', 'state.vscdb')];
+  const candidates = cursorDbCandidates();
   return candidates.find((p) => existsSync(p)) ?? null;
 }
 

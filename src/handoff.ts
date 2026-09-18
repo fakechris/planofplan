@@ -303,6 +303,34 @@ export const terminalLauncher: HandoffLauncher = (provider, bin, targetDir, pkgP
   return { ok: true, command: `cd ${targetDir} && ${cmd}` };
 };
 
+/** Windows launcher:PowerShell 注入包为首条消息,优先 Windows Terminal。 */
+export const windowsTerminalLauncher: HandoffLauncher = (provider, bin, targetDir, pkgPath) => {
+  const names = HANDOFF_BINS[provider];
+  if (!names) return { ok: false, error: `${provider} 不支持注入启动` };
+  // PowerShell 单引号字面量只有 '' 一个转义;CLI 经 .cmd shim 也能被 & 正确解析
+  const ps = (value: string): string => `'${value.replaceAll("'", "''")}'`;
+  const psCmd = `Set-Location -LiteralPath ${ps(targetDir)}; & ${ps(bin)} (Get-Content -Raw ${ps(pkgPath)})`;
+  const wt = findExecutable(['wt.exe']);
+  // start 的 title 必须带引号,否则该词会被当成要执行的程序
+  const argv = wt
+    ? ['wt.exe', '-d', targetDir, 'powershell', '-NoProfile', '-Command', psCmd]
+    : ['cmd.exe', '/c', 'start', '"planofplan"', 'powershell', '-NoProfile', '-Command', psCmd];
+  const result = spawnSync(argv[0]!, argv.slice(1), { encoding: 'utf8' });
+  if (result.status !== 0) {
+    return { ok: false, error: result.stderr?.trim() || '无法打开 Windows Terminal', command: psCmd };
+  }
+  return { ok: true, command: psCmd };
+};
+
+/** 按平台选默认注入 launcher;仅 darwin/win32 支持,其余显式报错。 */
+export function defaultHandoffLauncher(
+  platform: string = process.platform,
+): HandoffLauncher {
+  if (platform === 'win32') return windowsTerminalLauncher;
+  if (platform === 'darwin') return terminalLauncher;
+  return () => ({ ok: false, error: '注入启动目前支持 macOS Terminal 与 Windows Terminal' });
+}
+
 /**
  * 交付并记录。mode:'file' 导出 .md 到目标目录(默认 ~/Downloads);
  * 'agent' 落包后注入启动新会话。每次交付写 handoffs 一行。
@@ -322,7 +350,7 @@ export function deliverHandoff(
     if (!bin) {
       result = { ok: false, path: pkgPath, error: `未找到 ${provider} CLI,包已导出:${pkgPath}` };
     } else {
-      const launched = (options.launcher ?? terminalLauncher)(provider, bin, targetDir, pkgPath);
+      const launched = (options.launcher ?? defaultHandoffLauncher())(provider, bin, targetDir, pkgPath);
       result = { ...launched, path: pkgPath };
     }
   } else {

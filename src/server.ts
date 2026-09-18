@@ -11,7 +11,6 @@ import { writeCredential, deleteCredential, readAllCredentialIds } from './auth.
 import { acceptKimiBrowserCookies, refreshKimiBrowserSession } from './adapters/kimi.ts';
 import { KIMI_BROWSER, KIMI_BROWSERS, type KimiBrowser } from './browser-cookies.ts';
 import { acceptFactoryBrowserCookies } from './factory-session.ts';
-import { spawnSync } from 'node:child_process';
 import { getBuildInfo } from './build-info.ts';
 import { buildUsageReport } from './usage.ts';
 import { buildSessionList, searchSessions } from './sessions.ts';
@@ -23,6 +22,7 @@ import { loadConfig, saveLlmConfig, savePlansConfig } from './config.ts';
 import type { PlanConfig, ProjectAgentStat, ProjectListItem, RequirementRecord } from './types.ts';
 import { readTranscript } from './transcript.ts';
 import { launchResume } from './resume.ts';
+import { revealInFileManager } from './reveal.ts';
 import { getStartupSettings, setLaunchOnStartup } from './startup.ts';
 import { startSessionWatcher, createRateGate } from './watcher.ts';
 import { registerMcpRoutes } from './mcp.ts';
@@ -1145,13 +1145,8 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
     const session = store.getSession(id);
     if (!session) return c.json({ ok: false, error: 'unknown session' }, 404);
     if (!session.sourceFile) return c.json({ ok: false, error: 'session has no source_file' }, 404);
-    if (process.platform !== 'darwin') {
-      return c.json({ ok: false, error: 'Finder reveal is macOS-only' }, 501);
-    }
-    const result = spawnSync('open', ['-R', session.sourceFile], { encoding: 'utf8' });
-    if (result.status !== 0) {
-      return c.json({ ok: false, error: result.stderr.trim() || 'open -R failed' }, 500);
-    }
+    const result = revealInFileManager(session.sourceFile);
+    if (!result.ok) return c.json({ ok: false, error: result.error }, 500);
     return c.json({ ok: true, path: session.sourceFile });
   });
 

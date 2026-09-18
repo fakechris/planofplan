@@ -13,6 +13,9 @@
  */
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import type { AdapterContext, Credential, PlanAdapter, QuotaWindow } from '../types.ts';
 import { AdapterError } from '../types.ts';
 import { fetchQuota } from './http.ts';
@@ -300,6 +303,56 @@ function atobSafe(v: string): string {
   }
 }
 
+/**
+ * ~/.claude/.credentials.json 读取(Linux/Windows 上 Claude Code 的标准凭据位置,
+ * 内容与 Keychain 相同的 claudeAiOauth JSON)。darwin 上 Keychain 拒绝授权时也可兜底。
+ */
+export function claudeCredentialsFilePath(home: string = homedir()): string {
+  return join(home, '.claude', '.credentials.json');
+}
+
+export function readClaudeCredentialsFile(home: string = homedir()): Credential | null {
+  const path = claudeCredentialsFilePath(home);
+  if (!existsSync(path)) return null;
+  let blob: string;
+  try {
+    blob = readFileSync(path, 'utf8');
+  } catch {
+    return null;
+  }
+  const record = parseClaudeOAuthRecord(blob.trim());
+  if (!record) return null;
+  return {
+    kind: 'bearer',
+    value: record.accessToken,
+    source: 'auto',
+    refreshToken: record.refreshToken,
+    expiresAt: record.expiresAt,
+    persist: (next) => {
+      // L0 只读守则不涉及此文件:它是 Claude Code 自己的凭据存储,
+      // 只在 OAuth 刷新轮换后原位更新。读旧文件做字段级合并,保留
+      // subscriptionType / rateLimitTier 等 Claude Code 依赖的既有元数据。
+      let oauth: Record<string, unknown> = {
+        accessToken: next.accessToken,
+        refreshToken: next.refreshToken,
+        expiresAt: next.expiresAt ?? Date.now() + 8 * 60 * 60 * 1000,
+        ...(record.scopes ? { scopes: record.scopes } : {}),
+      };
+      try {
+        const current = JSON.parse(readFileSync(path, 'utf8')) as {
+          claudeAiOauth?: Record<string, unknown>;
+        };
+        if (current.claudeAiOauth && typeof current.claudeAiOauth === 'object') {
+          oauth = { ...current.claudeAiOauth, ...oauth };
+        }
+      } catch {
+        /* 旧文件缺失或损坏:按最小结构重建 */
+      }
+      writeFileSync(path, JSON.stringify({ claudeAiOauth: oauth }), { encoding: 'utf8', mode: 0o600 });
+    },
+  };
+}
+
 export const claudeAdapter: PlanAdapter = {
   slug: 'claude',
   credentialHint: '缺少凭据：运行 `claude` 登录（OAuth 进 Keychain），或 planofplan auth set claude --key <token>',
@@ -322,7 +375,9 @@ export const claudeAdapter: PlanAdapter = {
         refreshToken: process.env.CLAUDE_CODE_OAUTH_REFRESH_TOKEN?.trim() || null,
       };
     }
-    return readKeychainCredential();
+    // Keychain 仅 darwin;失败或非 darwin 再试 ~/.claude/.credentials.json
+    // (Windows/Linux 的标准凭据位置,darwin 上作 Keychain 拒授权兜底)。
+    return (await readKeychainCredential()) ?? readClaudeCredentialsFile();
   },
 
   async fetchUsage(_ctx: AdapterContext, cred: Credential): Promise<QuotaWindow[]> {

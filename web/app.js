@@ -504,7 +504,7 @@ function renderSessions(list) {
       const id = event.currentTarget.getAttribute('data-reveal');
       try {
         await request(`/api/sessions/${encodeURIComponent(id)}/reveal`, { method: 'POST' });
-        showToast('已在 Finder 中显示日志');
+        showToast('已在文件管理器中显示日志');
       } catch (error) {
         showToast(error.message, true);
       }
@@ -2253,7 +2253,7 @@ function sessionDetailHtml(session, pool) {
       <button class="secondary-btn" type="button" data-star="${escapeHtml(session.id)}" data-on="${session.starred ? '0' : '1'}">${session.starred ? '取消星标' : '星标'}</button>
       <button class="secondary-btn" type="button" data-hide="${escapeHtml(session.id)}" data-on="${session.hidden ? '0' : '1'}">${session.hidden ? '取消隐藏' : '隐藏'}</button>
       <button class="secondary-btn" type="button" data-delete="${escapeHtml(session.id)}">删除</button>
-      ${session.sourceFile ? `<button class="secondary-btn" type="button" data-reveal="${escapeHtml(session.id)}">在 Finder 中显示</button>` : ''}
+      ${session.sourceFile ? `<button class="secondary-btn" type="button" data-reveal="${escapeHtml(session.id)}">在文件管理器中显示</button>` : ''}
     </div>
     <div id="sessionFiles" class="session-attrs"></div>
     <div id="sessionCommits" class="session-attrs"></div>
