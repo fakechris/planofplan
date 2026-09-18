@@ -183,6 +183,9 @@ export interface SessionMessageRow {
   model: string | null;
   inputTokens: number | null;
   outputTokens: number | null;
+  /** Complete normalized visible text; absent for legacy excerpts and tool inputs. */
+  fullText?: string | null;
+  parserVersion?: number | null;
 }
 
 /** 一次内容搜索命中的会话聚合：命中条数 + 最佳片段。snippet 里 \u0001/\u0002 包住命中词。 */
@@ -642,4 +645,3 @@ export interface SkillHit {
   triggers?: string[];
   score?: number;
 }
-

@@ -573,6 +573,14 @@ export class Store {
       }
       db.exec('PRAGMA user_version = 12');
     }
+    if (version < 13) {
+      this.withTransaction(() => {
+        const columns = new Set((db.query('PRAGMA table_info(session_messages)').all() as Array<{ name: string }>).map((row) => row.name));
+        if (!columns.has('full_text')) db.exec('ALTER TABLE session_messages ADD COLUMN full_text TEXT');
+        if (!columns.has('parser_version')) db.exec('ALTER TABLE session_messages ADD COLUMN parser_version INTEGER');
+        db.exec('PRAGMA user_version = 13');
+      });
+    }
   }
 
   getUserVersion(): number {
@@ -1808,8 +1816,8 @@ export class Store {
     if (rows.length === 0) return;
     const stmt = this.db.query(
       `INSERT INTO session_messages (
-         id, session_id, seq, role, kind, tool_name, text, timestamp, model, input_tokens, output_tokens
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         id, session_id, seq, role, kind, tool_name, text, timestamp, model, input_tokens, output_tokens, full_text, parser_version
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          seq = excluded.seq,
          role = excluded.role,
@@ -1819,7 +1827,9 @@ export class Store {
          timestamp = excluded.timestamp,
          model = excluded.model,
          input_tokens = excluded.input_tokens,
-         output_tokens = excluded.output_tokens`,
+         output_tokens = excluded.output_tokens,
+         full_text = excluded.full_text,
+         parser_version = excluded.parser_version`,
     );
     this.withTransaction(() => {
       for (const row of rows) {
@@ -1835,6 +1845,8 @@ export class Store {
           row.model,
           row.inputTokens,
           row.outputTokens,
+          row.fullText ?? null,
+          row.parserVersion ?? null,
         );
       }
     });
