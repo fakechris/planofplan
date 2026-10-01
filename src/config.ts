@@ -2,6 +2,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import type { PlanConfig, ResumeConfig } from './types.ts';
+import { DEFAULT_ALERT_SETTINGS, type AlertSettings } from './quota-alerts.ts';
 
 export interface AppConfig {
   port: number;
@@ -9,6 +10,8 @@ export interface AppConfig {
   resume?: ResumeConfig;
   /** planofplan 自用的 LLM(handoff 摘要等);provider 必须是已配置 key 的。 */
   llm?: LlmConfig;
+  /** 额度告警阈值(INV-922);缺省用量 80%、余额关闭。 */
+  alerts?: AlertSettings;
 }
 
 /** LLM 选择:provider = 已配置凭据的 provider;model 自由填;baseUrl 可覆写端点。 */
@@ -156,7 +159,38 @@ export function loadConfig(): AppConfig {
     plans,
     resume: { ...DEFAULT_RESUME, ...(user.resume ?? {}) },
     llm: user.llm && typeof user.llm === 'object' ? user.llm : undefined,
+    alerts: normalizeAlertSettings(user.alerts),
   };
+}
+
+/** config.json 的 alerts 段:非法值回落默认,null 表示关闭。 */
+export function normalizeAlertSettings(raw: unknown): AlertSettings {
+  const doc = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
+  const usage = doc.usagePercent === undefined ? DEFAULT_ALERT_SETTINGS.usagePercent : doc.usagePercent;
+  const balance = doc.balance === undefined ? DEFAULT_ALERT_SETTINGS.balance : doc.balance;
+  return {
+    usagePercent: usage === null ? null
+      : typeof usage === 'number' && Number.isFinite(usage) && usage >= 1 && usage <= 100 ? usage : DEFAULT_ALERT_SETTINGS.usagePercent,
+    balance: balance === null ? null
+      : typeof balance === 'number' && Number.isFinite(balance) && balance >= 0 ? balance : DEFAULT_ALERT_SETTINGS.balance,
+  };
+}
+
+/** 持久化 alerts 段(与 config.json 现有内容合并,不动其它键)。 */
+export function saveAlertsConfig(settings: AlertSettings): void {
+  const file = configPath();
+  let doc: Record<string, unknown> = {};
+  if (existsSync(file)) {
+    try {
+      doc = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
+    } catch {
+      doc = {};
+    }
+  }
+  doc.alerts = { usagePercent: settings.usagePercent, balance: settings.balance };
+  mkdirSync(ensureHome(), { recursive: true });
+  writeFileSync(file, JSON.stringify(doc, null, 2) + '\n', { mode: 0o600 });
+  chmodSync(file, 0o600);
 }
 
 /** 持久化 llm 配置段(与 config.json 现有内容合并,不动其它键)。 */

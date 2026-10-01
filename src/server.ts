@@ -20,7 +20,7 @@ import { pickRequirement } from './motivation.ts';
 import { nameOfUrl, sessionProjectNames } from './repos.ts';
 import { buildHandoffPackage, deliverHandoff, handoffProviders } from './handoff.ts';
 import { LLM_PROVIDERS, llmKeyFor, llmProviderStatus, synthesizeHandoffSummary, withSummary } from './llm.ts';
-import { loadConfig, saveLlmConfig, savePlansConfig } from './config.ts';
+import { loadConfig, saveAlertsConfig, saveLlmConfig, savePlansConfig } from './config.ts';
 import type { PlanConfig, ProjectAgentStat, ProjectListItem, RequirementRecord } from './types.ts';
 import { readTranscript } from './transcript.ts';
 import { launchResume } from './resume.ts';
@@ -32,6 +32,7 @@ import { getAgentStatus } from './agent-status.ts';
 import { childProcessArgs } from './spawn.ts';
 import { ScanQueue } from './scan-queue.ts';
 import { registerMessageEvidenceRoutes } from './message-evidence.ts';
+import { checkQuotaAlerts, DEFAULT_ALERT_SETTINGS } from './quota-alerts.ts';
 
 // In dev (bun src/cli.ts), import.meta.dir points at src/ and ../web = repo/web.
 // In a bun build --compile binary, import.meta.dir resolves to the executable's
@@ -183,6 +184,56 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
       sseClients.delete(stream);
     }
   }));
+
+  // ── 额度告警(INV-922):daemon 判定,菜单栏 app 发系统通知 ───────────
+  // 通知能力在 app 侧;它每次 check 时报告授权状态,设置页据此提示。
+  let notifier: { status: string; reportedAt: number } | null = null;
+  const NOTIFIER_STATUSES = new Set(['authorized', 'denied', 'not_determined', 'unavailable']);
+  const alertSettings = () => cfg.alerts ?? DEFAULT_ALERT_SETTINGS;
+
+  app.get('/api/alerts', (c) => c.json({
+    settings: alertSettings(),
+    notifier,
+    pending: store.pendingQuotaAlerts(),
+    recent: store.recentQuotaAlerts(20),
+  }));
+
+  app.post('/api/alerts/check', async (c) => {
+    const body = await c.req.json().catch(() => ({})) as { notifier?: unknown };
+    if (body.notifier !== undefined) {
+      if (typeof body.notifier !== 'string' || !NOTIFIER_STATUSES.has(body.notifier)) {
+        return c.json({ ok: false, error: `notifier must be one of ${[...NOTIFIER_STATUSES].join(', ')}` }, 400);
+      }
+      notifier = { status: body.notifier, reportedAt: Date.now() };
+    }
+    const now = Date.now();
+    const plans = buildOverview(store, cfg.plans, now).plans;
+    return c.json({ pending: checkQuotaAlerts(store, plans, alertSettings(), now), settings: alertSettings() });
+  });
+
+  app.post('/api/alerts/ack', async (c) => {
+    const body = await c.req.json().catch(() => ({})) as { keys?: unknown };
+    if (!Array.isArray(body.keys) || body.keys.some((key) => typeof key !== 'string')) {
+      return c.json({ ok: false, error: 'keys must be an array of alert keys' }, 400);
+    }
+    store.ackQuotaAlerts(body.keys as string[], Date.now());
+    return c.json({ ok: true });
+  });
+
+  app.put('/api/alerts/settings', async (c) => {
+    const body = await c.req.json().catch(() => null) as { usagePercent?: unknown; balance?: unknown } | null;
+    const usage = body?.usagePercent;
+    const balance = body?.balance;
+    const usageOk = usage === null || (typeof usage === 'number' && Number.isFinite(usage) && usage >= 1 && usage <= 100);
+    const balanceOk = balance === null || (typeof balance === 'number' && Number.isFinite(balance) && balance >= 0);
+    if (!body || !usageOk || !balanceOk) {
+      return c.json({ ok: false, error: 'usagePercent must be 1..100 or null; balance must be >= 0 or null' }, 400);
+    }
+    const next = { usagePercent: usage as number | null, balance: balance as number | null };
+    saveAlertsConfig(next);
+    cfg.alerts = next;
+    return c.json({ ok: true, settings: next });
+  });
 
   app.get('/api/settings', (c) => {
     return c.json(getStartupSettings());

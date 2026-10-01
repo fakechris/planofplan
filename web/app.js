@@ -3171,7 +3171,59 @@ async function refreshSettings() {
     latestSettings = null;
   }
   renderSettings();
+  void refreshAlertSettings();
 }
+
+// ── 额度告警(INV-922)────────────────────────────────────────────
+const NOTIFIER_TEXT = {
+  authorized: '菜单栏 app 已获得通知权限',
+  denied: '通知权限被拒绝：告警不会弹出，请在 系统设置 › 通知 › planofplan 中允许',
+  not_determined: '菜单栏 app 尚未请求通知权限',
+  unavailable: '菜单栏 app 无法使用系统通知',
+};
+
+async function refreshAlertSettings() {
+  const usageInput = document.getElementById('alertUsageInput');
+  if (!usageInput) return;
+  let data;
+  try {
+    data = await request('/api/alerts');
+  } catch {
+    return;
+  }
+  const balanceInput = document.getElementById('alertBalanceInput');
+  if (document.activeElement !== usageInput) usageInput.value = data.settings.usagePercent ?? '';
+  if (balanceInput && document.activeElement !== balanceInput) balanceInput.value = data.settings.balance ?? '';
+  const hint = document.getElementById('alertNotifierHint');
+  if (hint) {
+    hint.textContent = data.notifier
+      ? (NOTIFIER_TEXT[data.notifier.status] || data.notifier.status)
+      : '尚未收到菜单栏 app 的状态：未运行菜单栏 app 时不会弹出通知';
+  }
+  const list = document.getElementById('alertRecentList');
+  if (list) {
+    list.innerHTML = (data.recent || []).slice(0, 5).map((alert) => (
+      `<div>${escapeHtml(new Date(alert.createdAt).toLocaleString('zh-CN', { hour12: false }))} · ${escapeHtml(alert.message)}${alert.deliveredAt ? '' : '(待通知)'}</div>`
+    )).join('');
+  }
+}
+
+document.getElementById('saveAlertsBtn')?.addEventListener('click', async () => {
+  const read = (id) => {
+    const raw = document.getElementById(id)?.value?.trim();
+    return raw === '' || raw == null ? null : Number(raw);
+  };
+  try {
+    await request('/api/alerts/settings', {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ usagePercent: read('alertUsageInput'), balance: read('alertBalanceInput') }),
+    });
+    showToast('额度告警阈值已保存');
+    void refreshAlertSettings();
+  } catch (error) {
+    showToast(`保存失败:${error.message}`, true);
+  }
+});
 
 function renderSettings() {
   const listEl = document.getElementById('settingsPlanList');
