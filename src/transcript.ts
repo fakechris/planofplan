@@ -309,7 +309,8 @@ export async function readTranscript(session: SessionRecord): Promise<SessionTra
 
 export const MESSAGE_TEXT_MAX = 10_000;
 export const TOOL_INPUT_MAX = 2_000;
-export const MESSAGE_PARSER_VERSION = 8;
+// v9: 入库前脱敏(INV-898),全量重扫以清除存量明文密钥
+export const MESSAGE_PARSER_VERSION = 9;
 
 function clipField(text: string, max = MESSAGE_TEXT_MAX): string {
   return text.length > max ? `${text.slice(0, max)}…` : text;

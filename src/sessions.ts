@@ -5,6 +5,7 @@
  * and upserts `sessions` rows. Token totals are filled from usage_records.
  * L0 files are never copied. See docs/work-graph-design.md.
  */
+import { REDACT_BACKFILL_STATE_PATH } from './db.ts';
 import {
   closeSync,
   existsSync,
@@ -1202,7 +1203,7 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
   // 359/1920 行)按存在性清理;消息按保留期裁剪,目录行永久保留。
   try {
     const statePaths = store.listSessionIndexStatePaths();
-    const migrationMarkers = new Set<string>(ORIGIN_BACKFILL_STATE_PATHS);
+    const migrationMarkers = new Set<string>([...ORIGIN_BACKFILL_STATE_PATHS, REDACT_BACKFILL_STATE_PATH]);
     const deadStates = statePaths.filter((path) => !migrationMarkers.has(path) && !existsSync(path));
     if (deadStates.length > 0) store.deleteSessionIndexStates(deadStates);
     const scanPaths = store.listUsageScanFilePaths();
