@@ -102,6 +102,11 @@ async function fetchGrokCliBillingOnce(): Promise<QuotaWindow[] | null> {
   });
   const stdout = child.stdout;
   if (!stdout || !child.stdin) return null;
+  // grok 可能先于我们写完就退出:写 stdin 得到 EPIPE、spawn 失败得到 error 事件。
+  // 不挂监听就是未处理的 error 事件(Bun 1.4 起会抛出),会带崩宿主进程;
+  // 失败已由 readResponse 的超时/stdout 关闭兜住。
+  child.on('error', () => {});
+  child.stdin.on('error', () => {});
   const readline = createInterface({ input: stdout });
   const lines = readline[Symbol.asyncIterator]();
   let nextId = 1;
