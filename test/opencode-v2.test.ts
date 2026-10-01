@@ -122,4 +122,27 @@ describe('OpenCode 2 (session_v2 / session_message)', () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  test('a session whose v2 rows are all filtered does not fall back to legacy parts', () => {
+    const root = mkdtempSync(join(tmpdir(), 'pop-opencode-v2-'));
+    const dbPath = join(root, 'opencode.db');
+    try {
+      seedV2(dbPath);
+      const db = new Database(dbPath);
+      db.exec(`
+        CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
+        CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+      `);
+      db.query('INSERT INTO message VALUES (?, ?, ?, ?)').run('m_old', 'ses_old', 1, JSON.stringify({ role: 'user' }));
+      db.query('INSERT INTO part VALUES (?, ?, ?, ?, ?)').run('p_old', 'm_old', 'ses_old', 1, JSON.stringify({ type: 'text', text: 'legacy copy' }));
+      db.query('INSERT INTO session_message (id, session_id, type, seq, time_created, data) VALUES (?, ?, ?, ?, ?, ?)')
+        .run('msg_sys', 'ses_old', 'system', 1, 1, JSON.stringify({ text: 'injected' }));
+      db.close();
+
+      expect(messagesFromOpencodeDb(dbPath, 'ses_old', 'opencode:ses_old')).toEqual([]);
+      expect(turnsFromOpencodeDb(dbPath, 'ses_old')).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

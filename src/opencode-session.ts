@@ -78,12 +78,15 @@ interface V2Entry {
 /**
  * OpenCode 2 的 session_message,按 seq 展开。reasoning 与 system/synthetic(注入文本)、
  * skill/compaction/切换类消息不入索引;shell 消息按 bash 工具调用处理。
+ * 该会话没有 session_message 行时返回 null(走 v1 的 message/part);有行但全被过滤时
+ * 返回空数组,不回退到旧表。
  */
-function v2Entries(db: Database, nativeId: string): V2Entry[] {
-  if (!hasTable(db, 'session_message')) return [];
+function v2Entries(db: Database, nativeId: string): V2Entry[] | null {
+  if (!hasTable(db, 'session_message')) return null;
   const rows = db.query(
     'SELECT id, type, data, time_created FROM session_message WHERE session_id = ? ORDER BY seq',
   ).all(nativeId) as Array<{ id: string; type: string; data: string; time_created: number | null }>;
+  if (rows.length === 0) return null;
   const entries: V2Entry[] = [];
   for (const row of rows) {
     let data: Record<string, unknown>;
@@ -166,7 +169,7 @@ export function messagesFromOpencodeDb(path: string, nativeId: string, sessionId
     db = new Database(path, { readonly: true });
 
     const v2 = v2Entries(db, nativeId);
-    if (v2.length > 0) {
+    if (v2) {
       v2.forEach((entry, index) => {
         const id = `${sessionId}:${entry.id}`;
         if (entry.role === 'tool') {
@@ -245,7 +248,7 @@ export function touchesFromOpencodeDb(
   try {
     db = new Database(path, { readonly: true });
     const v2 = v2Entries(db, nativeId);
-    if (v2.length > 0) {
+    if (v2) {
       v2.forEach((entry, index) => {
         if (entry.role !== 'tool' || !entry.toolName) return;
         const op = opOfTool(entry.toolName);
@@ -408,7 +411,7 @@ export function turnsFromOpencodeDb(path: string, nativeId: string): TranscriptT
   try {
     db = new Database(path, { readonly: true });
     const v2 = v2Entries(db, nativeId);
-    if (v2.length > 0) {
+    if (v2) {
       for (const entry of v2) {
         if (entry.role === 'tool') {
           const summary = entry.input && typeof entry.input === 'object'
