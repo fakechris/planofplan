@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { bearerMatches } from './bind.ts';
 import { streamSSE, type SSEStreamingApi } from 'hono/streaming';
 import { dirname, resolve, isAbsolute } from 'node:path';
 import { existsSync } from 'node:fs';
@@ -52,14 +53,18 @@ export interface ServerOptions {
   startupScan?: boolean;
   /** Injectable process boundary for isolated queue/API tests. */
   spawnScan?: (args: string[]) => Pick<Bun.Subprocess, 'exited'>;
+  /** When set, every request must send `Authorization: Bearer <token>` (INV-897, see bind.ts). */
+  authToken?: string | null;
 }
 
 export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig, options: ServerOptions = {}): Hono {
   const app = new Hono();
 
-  // DNS rebinding 防护(参照 agentsview):服务只绑 loopback,但攻击者可把
-  // 自己的域名解析到 127.0.0.1 让浏览器携带外域 Host 打进来。只信任本机
+  // DNS rebinding 防护(参照 agentsview):服务默认只绑 127.0.0.1(cli.ts 经 bind.ts),
+  // 但攻击者可把自己的域名解析到 127.0.0.1 让浏览器携带外域 Host 打进来。只信任本机
   // Host;SSH 端口转发/反向代理场景用 PLANOFPLAN_ALLOWED_HOSTS 显式放行。
+  // Host 校验不是鉴权:能连上端口的人都能伪造 Host。绑到非回环地址时必须配
+  // PLANOFPLAN_TOKEN,下面的中间件逐请求校验(INV-897)。
   const allowedHosts = (process.env.PLANOFPLAN_ALLOWED_HOSTS ?? '')
     .split(',')
     .map((host) => host.trim().toLowerCase())
@@ -74,6 +79,16 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
     }
     await next();
   });
+
+  const authToken = options.authToken ?? null;
+  if (authToken != null) {
+    app.use('*', async (c, next) => {
+      if (!bearerMatches(c.req.header('authorization'), authToken)) {
+        return c.json({ ok: false, error: 'missing or wrong bearer token' }, 401);
+      }
+      await next();
+    });
+  }
 
   // SSE 客户端池:/api/events 的活跃订阅者,索引状态变化时广播
   const sseClients = new Set<SSEStreamingApi>();
