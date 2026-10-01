@@ -55,6 +55,17 @@ if ! security find-identity -v -p codesigning 2>/dev/null | grep -F "\"$IDENTITY
   exit 1
 fi
 
+# Bun 1.3.x 编译出的 daemon 在 90 天启动扫描里稳定段错误(INV-906),
+# 1.4.2 起不崩。低于下限拒绝打包;全局 bun 未升级时用 PLANOFPLAN_BUILD_BUN 指定。
+MIN_BUN_VERSION=1.4.2
+BUN="${PLANOFPLAN_BUILD_BUN:-bun}"
+BUN_VERSION=$("$BUN" --version 2>/dev/null || echo 0)
+if ! printf '%s\n%s\n' "$MIN_BUN_VERSION" "$BUN_VERSION" | sort -V -C; then
+  echo "Refusing to build with Bun $BUN_VERSION ($BUN): need >= $MIN_BUN_VERSION." >&2
+  echo "Run 'bun upgrade', or set PLANOFPLAN_BUILD_BUN to a newer bun binary." >&2
+  exit 1
+fi
+
 STAGING_ROOT=$(mktemp -d "/Applications/.planofplan-build.XXXXXX")
 STAGED_APP="$STAGING_ROOT/planofplan.app"
 
@@ -62,7 +73,7 @@ swift build --package-path "$PACKAGE" -c release
 
 # Compile the Bun daemon into the bundle as a standalone executable. No runtime
 # dependency on bun or the source checkout — the .app becomes portable.
-( cd "$ROOT" && bun build --compile --compile-exec-argv=--smol src/cli.ts --outfile "$STAGED_APP/Contents/MacOS/planofplan-daemon" )
+( cd "$ROOT" && "$BUN" build --compile --compile-exec-argv=--smol src/cli.ts --outfile "$STAGED_APP/Contents/MacOS/planofplan-daemon" )
 mkdir -p "$STAGED_APP/Contents/MacOS"
 
 mkdir -p "$STAGED_APP/Contents/MacOS" "$STAGED_APP/Contents/Resources"
