@@ -2,6 +2,7 @@
  * Read-only transcript rendering for WG-M4.
  * Streams JSONL with byte/turn caps so a 1GB Codex rollout cannot fill RAM.
  */
+import { commandOfToolInput, isSearchableTool } from './message-query.ts';
 import { createReadStream, existsSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { spawn } from 'node:child_process';
@@ -313,8 +314,8 @@ export async function readTranscript(session: SessionRecord): Promise<SessionTra
 export const MESSAGE_TEXT_MAX = 10_000;
 export const TOOL_INPUT_MAX = 2_000;
 // v9: 入库前脱敏(INV-898),全量重扫以清除存量明文密钥
-// v10: grok backend_tool_call 的工具名与参数(INV-902)
-export const MESSAGE_PARSER_VERSION = 10;
+// v11: shell 类工具的命令作为可检索正文(INV-900)
+export const MESSAGE_PARSER_VERSION = 11;
 
 function clipField(text: string, max = MESSAGE_TEXT_MAX): string {
   return text.length > max ? `${text.slice(0, max)}…` : text;
@@ -382,6 +383,17 @@ export function toolRow(
   input: unknown,
   timestamp: number | null,
 ): SessionMessageRow {
+  // Shell-like tools (INV-900): the searchable text is the command itself, and the
+  // whole input is kept as full_text so read_message still returns everything.
+  const command = isSearchableTool(toolName) ? commandOfToolInput(input) : null;
+  if (command != null) {
+    const full = typeof input === 'string' ? input : JSON.stringify(input ?? '');
+    return {
+      id, sessionId, seq, role: 'tool', kind: 'tool_use', toolName,
+      text: clipField(command, TOOL_INPUT_MAX), fullText: full, parserVersion: MESSAGE_PARSER_VERSION,
+      timestamp, model: null, inputTokens: null, outputTokens: null,
+    };
+  }
   return {
     id, sessionId, seq, role: 'tool', kind: 'tool_use', toolName,
     text: toolInputText(input), parserVersion: MESSAGE_PARSER_VERSION,

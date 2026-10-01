@@ -1,5 +1,5 @@
 import { Database } from 'bun:sqlite';
-import { likeAllTerms, likeClauses, likeSnippet, planMessageQuery } from './message-query.ts';
+import { likeAllTerms, likeClauses, likeSnippet, planMessageQuery, searchableRowSql } from './message-query.ts';
 import { redactNullable } from './redact.ts';
 import { createHash } from 'node:crypto';
 import type {
@@ -62,6 +62,34 @@ function messageFingerprint(
     id, seq, role, kind, toolName, text, timestamp, model,
     inputTokens, outputTokens, fullText, parserVersion,
   ].map((value) => (value ?? '\u0001')).join('\u0000');
+}
+
+/**
+ * The FTS triggers, generated from searchableRowSql so the index, message_search and the
+ * web API agree on which rows are searchable (INV-900). ensureSearchTriggers compares the
+ * stored definitions with these on every open and rebuilds when they differ, so a change
+ * here reaches existing databases without a user_version gate.
+ */
+function ftsTriggerSql(ifNotExists: boolean): string[] {
+  const create = `CREATE TRIGGER ${ifNotExists ? 'IF NOT EXISTS ' : ''}`;
+  return [
+    `${create}session_messages_fts_ai AFTER INSERT ON session_messages
+  WHEN ${searchableRowSql('new')} BEGIN
+  INSERT INTO session_messages_fts(rowid, text) VALUES (new.rowid, new.text);
+END`,
+    `${create}session_messages_fts_ad AFTER DELETE ON session_messages
+  WHEN ${searchableRowSql('old')} BEGIN
+  INSERT INTO session_messages_fts(session_messages_fts, rowid, text)
+  VALUES ('delete', old.rowid, old.text);
+END`,
+    // 逐语句条件(不能用单个 WHEN):可检索性双向变化都要保持索引与内容表一致
+    `${create}session_messages_fts_au AFTER UPDATE ON session_messages BEGIN
+  INSERT INTO session_messages_fts(session_messages_fts, rowid, text)
+  SELECT 'delete', old.rowid, old.text WHERE ${searchableRowSql('old')};
+  INSERT INTO session_messages_fts(rowid, text)
+  SELECT new.rowid, new.text WHERE ${searchableRowSql('new')};
+END`,
+  ];
 }
 
 const SCHEMA = `
@@ -187,28 +215,11 @@ CREATE TABLE IF NOT EXISTS session_messages (
 );
 CREATE INDEX IF NOT EXISTS idx_session_messages_session ON session_messages(session_id, seq);
 -- trigram：中文子串搜索的最短查询是 3 字符，更短的查询由 Store 回退 LIKE。
--- 只索引用户可见文本(kind != 'tool_use'):tool_use 入参 JSON 是搜索噪音也是
--- 体积大头(实测 915MB 索引里六成来自 156k 行工具入参)。
+-- 只索引用户可见文本与 shell 类工具的命令(searchableRowSql,INV-900):其余工具
+-- 入参 JSON 是搜索噪音也是体积大头(实测 915MB 索引里六成来自 156k 行工具入参)。
 CREATE VIRTUAL TABLE IF NOT EXISTS session_messages_fts USING fts5(
   text, content=session_messages, content_rowid=rowid, tokenize='trigram');
-CREATE TRIGGER IF NOT EXISTS session_messages_fts_ai AFTER INSERT ON session_messages
-  WHEN new.kind != 'tool_use' BEGIN
-  INSERT INTO session_messages_fts(rowid, text) VALUES (new.rowid, new.text);
-END;
-CREATE TRIGGER IF NOT EXISTS session_messages_fts_ad AFTER DELETE ON session_messages
-  WHEN old.kind != 'tool_use' BEGIN
-  INSERT INTO session_messages_fts(session_messages_fts, rowid, text)
-  VALUES ('delete', old.rowid, old.text);
-END;
-CREATE TRIGGER IF NOT EXISTS session_messages_fts_au AFTER UPDATE ON session_messages BEGIN
-  -- 逐语句条件(不能用单个 WHEN):kind 双向迁移都要保持索引与内容表一致。
-  -- 单看 old.kind 的旧版触发器会把「text→tool_use」的行留在索引里(量不大
-  -- 但真实存在);索引膨胀的大头是重扫 churn 的死段,靠 v14 重建+optimize 回收。
-  INSERT INTO session_messages_fts(session_messages_fts, rowid, text)
-  SELECT 'delete', old.rowid, old.text WHERE old.kind != 'tool_use';
-  INSERT INTO session_messages_fts(rowid, text)
-  SELECT new.rowid, new.text WHERE new.kind != 'tool_use';
-END;
+${ftsTriggerSql(true).join(';\n')};
 -- 消息级行级续扫水位（字节偏移 + 行号 + 解析器版本）。
 CREATE TABLE IF NOT EXISTS session_index_state (
   path TEXT PRIMARY KEY,
@@ -655,6 +666,7 @@ export class Store {
       this.pruneSnapshotsBefore(Date.now() - SNAPSHOT_RETENTION_DAYS * 86_400_000);
       db.exec('PRAGMA user_version = 15');
     }
+    this.ensureSearchTriggers();
     // 存量脱敏(INV-898)。解析器版本 +1 只会重扫源文件仍在的会话;源文件已删除而
     // 索引保留的会话靠这里原地脱敏。完成标记用 session_index_state 哨兵行,不用
     // user_version:实测本机库已被未知构建推到 16,编号门会被永久关掉(与
@@ -671,6 +683,29 @@ export class Store {
         path: REDACT_BACKFILL_STATE_PATH, mtimeMs: Date.now(), size: 0, parsedBytes: 0, lines: changed, parserVersion: 0,
       });
     }
+  }
+
+  /**
+   * Bring the FTS triggers to the current definition and, when they changed, rebuild the
+   * index from the rows that are searchable now (INV-900). Compared by text, not gated
+   * by user_version. Returns whether a rebuild ran.
+   */
+  ensureSearchTriggers(): boolean {
+    const normalize = (sql: string) => sql.replace(/IF NOT EXISTS /i, '').replace(/\s+/g, ' ').trim();
+    const want = ftsTriggerSql(false);
+    const names = ['session_messages_fts_ai', 'session_messages_fts_ad', 'session_messages_fts_au'];
+    const have = new Map((this.db.query(
+      `SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name IN (${names.map(() => '?').join(', ')})`,
+    ).all(...names) as Array<{ name: string; sql: string }>).map((row) => [row.name, normalize(row.sql)]));
+    if (names.every((name, i) => have.get(name) === normalize(want[i]!))) return false;
+    this.withTransaction(() => {
+      for (const name of names) this.db.exec(`DROP TRIGGER IF EXISTS ${name}`);
+      for (const sql of want) this.db.exec(sql);
+      this.db.exec(`INSERT INTO session_messages_fts(session_messages_fts) VALUES ('delete-all')`);
+      this.db.exec(`INSERT INTO session_messages_fts(rowid, text)
+        SELECT rowid, text FROM session_messages m WHERE ${searchableRowSql('m')} AND text IS NOT NULL`);
+    });
+    return true;
   }
 
   /** 原地脱敏已入库的消息正文与会话标题;返回改动行数。分块按 rowid 走,避免一次读全表。 */
@@ -3081,7 +3116,7 @@ export class Store {
     const rows = this.db.query(
       `SELECT session_id AS sessionId, text
        FROM session_messages m
-       WHERE ${likeClauses('m.text', patterns.length)}
+       WHERE ${searchableRowSql('m')} AND ${likeClauses('m.text', patterns.length)}
        ORDER BY timestamp DESC
        LIMIT ?`,
     ).all(...patterns, limit) as Array<{ sessionId: string; text: string | null }>;
