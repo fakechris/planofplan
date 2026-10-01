@@ -1014,10 +1014,19 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
     return { pkg: withSummary(pkg, summary), summaryError: null };
   };
 
+  /** 交接"最近对话"段的预算(INV-916):显式给出才加,范围同 MCP。 */
+  const handoffTailChars = (value: unknown): number | undefined | null => {
+    if (value === undefined || value === null || value === '') return undefined;
+    const n = Number(value);
+    return Number.isInteger(n) && n >= 2_000 && n <= 16_000 ? n : null;
+  };
+
   app.get('/api/handoff/:type/:id', async (c) => {
     const type = c.req.param('type') as 'session' | 'requirement' | 'planfile';
     const id = decodeURIComponent(c.req.param('id'));
-    const raw = buildHandoffPackage(store, type, id, handoffLink(type, id));
+    const tailChars = handoffTailChars(c.req.query('tail_chars'));
+    if (tailChars === null) return c.json({ ok: false, error: 'tail_chars must be an integer 2000..16000' }, 400);
+    const raw = buildHandoffPackage(store, type, id, handoffLink(type, id), { tailChars });
     if (!raw) return c.json({ ok: false, error: 'unknown source' }, 404);
     const { pkg, summaryError } = await withLlmSummary(raw);
     return c.json({
@@ -1033,11 +1042,13 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
   app.post('/api/handoff/:type/:id/deliver', async (c) => {
     const type = c.req.param('type') as 'session' | 'requirement' | 'planfile';
     const id = decodeURIComponent(c.req.param('id'));
-    const raw = buildHandoffPackage(store, type, id, handoffLink(type, id));
-    if (!raw) return c.json({ ok: false, error: 'unknown source' }, 404);
     const body = await c.req.json().catch(() => ({})) as {
-      mode?: 'file' | 'agent'; provider?: string; targetDir?: string;
+      mode?: 'file' | 'agent'; provider?: string; targetDir?: string; tailChars?: number;
     };
+    const tailChars = handoffTailChars(body.tailChars);
+    if (tailChars === null) return c.json({ ok: false, error: 'tailChars must be an integer 2000..16000' }, 400);
+    const raw = buildHandoffPackage(store, type, id, handoffLink(type, id), { tailChars });
+    if (!raw) return c.json({ ok: false, error: 'unknown source' }, 404);
     const { pkg, summaryError } = await withLlmSummary(raw);
     const mode = body.mode === 'agent' ? 'agent' : 'file';
     const result = deliverHandoff(store, pkg, {

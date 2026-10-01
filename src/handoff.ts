@@ -16,8 +16,14 @@ import type { Store } from './db.ts';
 import { findExecutable } from './resume.ts';
 import type { PlanFileRecord, ProgressNoteRecord, SessionCommit, SessionRecord, TodoSnapshotRecord } from './types.ts';
 import { readRequirementEvidence } from './requirement-evidence.ts';
+import { buildConversationTail, type TailMessage } from './handoff-tail.ts';
 
 export type HandoffSourceType = 'session' | 'requirement' | 'planfile';
+
+export interface HandoffOptions {
+  /** 追加"最近对话"段的字符预算;不给则不加(INV-916)。 */
+  tailChars?: number;
+}
 
 export interface HandoffPackage {
   title: string;
@@ -115,7 +121,15 @@ function planBlock(plans: PlanFileRecord[], store: Store): string {
 
 function fileBlock(store: Store, sessionId: string, fromSeq = 0, toSeq: number | null = null): string {
   const touches = store.spanTouches(sessionId, fromSeq, toSeq);
-  if (touches.length === 0) return '';
+  if (touches.length === 0) {
+    // 无触碰 ≠ 没改文件:索引里有工具调用才能说"无记录",一条都没有只能说 Unknown
+    const tools = (store.db.query(
+      `SELECT count(*) AS n FROM session_messages WHERE session_id = ? AND kind = 'tool_use' AND seq >= ?${toSeq == null ? '' : ' AND seq < ?'}`,
+    ).get(...(toSeq == null ? [sessionId, fromSeq] : [sessionId, fromSeq, toSeq])) as { n: number }).n;
+    return tools > 0
+      ? `\n## 涉及文件\n无记录(该范围索引到 ${tools} 次工具调用,未发现文件路径)\n`
+      : '\n## 涉及文件\nUnknown(该范围索引中没有工具调用,来源格式可能不记录文件操作)\n';
+  }
   const count = new Map<string, number>();
   for (const touch of touches) count.set(touch.filePath, (count.get(touch.filePath) ?? 0) + 1);
   const lines = [...count.entries()]
@@ -123,6 +137,24 @@ function fileBlock(store: Store, sessionId: string, fromSeq = 0, toSeq: number |
     .slice(0, 15)
     .map(([path, n]) => `- ${path} ×${n}`);
   return `\n## 涉及文件(按触碰次数,top 15)\n${lines.join('\n')}\n`;
+}
+
+/** 交接的"最近对话"段:按 read_session 的页序编号,只取 [fromSeq, toSeq) 范围内的消息。 */
+function tailBlock(store: Store, sessionId: string, tailChars: number | undefined, fromSeq = 0, toSeq: number | null = null): string {
+  if (!tailChars) return '';
+  const rows = store.db.query(
+    'SELECT seq, role, tool_name AS toolName, text FROM session_messages WHERE session_id = ? ORDER BY seq, id',
+  ).all(sessionId) as Array<{ seq: number; role: string; toolName: string | null; text: string }>;
+  const messages: TailMessage[] = [];
+  rows.forEach((row, index) => {
+    if (row.seq < fromSeq || (toSeq != null && row.seq >= toSeq)) return;
+    messages.push({ ordinal: index + 1, role: row.role, toolName: row.toolName, text: row.text });
+  });
+  return `\n${buildConversationTail(messages, { charBudget: tailChars, sessionId }).markdown}`;
+}
+
+export function sessionTail(store: Store, sessionId: string, tailChars: number): string {
+  return tailBlock(store, sessionId, tailChars).trimStart();
 }
 
 function subagentBlock(store: Store, sessionId: string): string {
@@ -144,6 +176,7 @@ function assemble(args: {
   progressSection: string;
   commitSection: string;
   fileSection: string;
+  tailSection?: string;
   sessionLine: string;
   subagentNote: string;
   defaultDir: string | null;
@@ -160,7 +193,7 @@ function assemble(args: {
 ## 目标
 
 ${args.goal}
-${args.planSection}${args.progressSection}${args.commitSection}${args.fileSection}
+${args.planSection}${args.progressSection}${args.commitSection}${args.fileSection}${args.tailSection ?? ''}
 ## 相关会话
 
 ${args.sessionLine}${args.subagentNote}
@@ -183,6 +216,7 @@ export function buildHandoffPackage(
   type: HandoffSourceType,
   id: string,
   deepLink: string,
+  options: HandoffOptions = {},
 ): HandoffPackage | null {
   const unavailable = new Set([...store.getSessionUserMetaMap()]
     .filter(([, meta]) => meta.hidden || meta.deletedAt != null).map(([sid]) => sid));
@@ -190,7 +224,7 @@ export function buildHandoffPackage(
     if (unavailable.has(id)) return null;
     const session = store.getSession(id);
     if (!session) return null;
-    return sessionPackage(store, session, deepLink);
+    return sessionPackage(store, session, deepLink, options);
   }
   if (type === 'requirement') {
     const req = store.requirementById(id);
@@ -208,6 +242,7 @@ export function buildHandoffPackage(
       progressSection: `${todoBlock(evidence.todos)}${noteBlock(evidence.notes)}`,
       commitSection: `${commitBlock(evidence.commits)}${evidence.warnings.length ? `\n## 信息缺口\n${evidence.warnings.join('\n')}\n` : ''}`,
       fileSection: req.seq < 0 ? '' : fileBlock(store, req.sessionId, req.seq, next ? next.seq : null),
+      tailSection: req.seq < 0 ? '' : tailBlock(store, req.sessionId, options.tailChars, req.seq, next ? next.seq : null),
       sessionLine: `- ${session.provider} · ${session.title || session.id}(${fmtTs(session.updatedAt)}) · ${sessionRef(session.id)}`,
       subagentNote: subagentBlock(store, req.sessionId),
       defaultDir: session.cwd,
@@ -229,6 +264,7 @@ export function buildHandoffPackage(
       progressSection: latestSession ? `${todoBlock(store.todoSnapshotsForSession(latestSession.id))}${noteBlock(store.progressNotesForSession(latestSession.id))}` : '',
       commitSection: commitBlock(store.commitsForPath(plan.path).filter((commit) => !unavailable.has(commit.sessionId))),
       fileSection: latestSession ? fileBlock(store, latestSession.id) : '',
+      tailSection: latestSession ? tailBlock(store, latestSession.id, options.tailChars) : '',
       sessionLine: sessions.length > 0
         ? sessions.slice(0, 5).map((s) => `- ${s.provider} · ${s.title || s.id}(${fmtTs(s.updatedAt)}) · ${sessionRef(s.id)}`).join('\n')
         : '(窗口内没有 session 触碰过该文件)',
@@ -241,7 +277,7 @@ export function buildHandoffPackage(
   return null;
 }
 
-function sessionPackage(store: Store, session: SessionRecord, deepLink: string): HandoffPackage {
+function sessionPackage(store: Store, session: SessionRecord, deepLink: string, options: HandoffOptions): HandoffPackage {
   const requirements = store.listRequirements().filter((req) => req.sessionId === session.id);
   return assemble({
     title: requirementText(store, session.id) || session.title || session.id,
@@ -253,6 +289,7 @@ function sessionPackage(store: Store, session: SessionRecord, deepLink: string):
     progressSection: `\n> 以下为会话级最新自报，不代表上面每条需求均已完成。需要单个需求的状态请按 requirement_id 导出。\n${todoBlock(store.todoSnapshotsForSession(session.id))}${noteBlock(store.progressNotesForSession(session.id))}`,
     commitSection: commitBlock(store.listSessionCommits(session.id)),
     fileSection: fileBlock(store, session.id),
+    tailSection: tailBlock(store, session.id, options.tailChars),
     sessionLine: `- ${session.provider} · ${session.title || session.id}(${fmtTs(session.updatedAt)}) · cwd ${session.cwd || '--'} · ${sessionRef(session.id)}`,
     subagentNote: subagentBlock(store, session.id),
     defaultDir: session.cwd,
