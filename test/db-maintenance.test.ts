@@ -223,3 +223,60 @@ describe('库维护:孤儿水位与保留期', () => {
     }
   });
 });
+
+describe('写入失败不推进水位(INV-903)', () => {
+  test('一个文件的消息写入失败:水位不前进、其余文件照常入库,下一轮补齐', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'pop-writefail-'));
+    try {
+      const dir = join(root, 'claude', 'projects', '-Users-test-demo');
+      mkdirSync(dir, { recursive: true });
+      const write = (uuid: string, text: string): string => {
+        const file = join(dir, `${uuid}.jsonl`);
+        writeFileSync(file, `${JSON.stringify({ type: 'user', uuid: `${uuid}-u1`, timestamp: new Date().toISOString(), message: { content: [{ type: 'text', text }] } })}\n`);
+        return file;
+      };
+      const failing = '11111111-1111-4111-8111-111111111111';
+      const healthy = '22222222-2222-4222-8222-222222222222';
+      const failingFile = write(failing, '写入会失败的会话');
+      const healthyFile = write(healthy, '正常入库的会话');
+      const store = openMemoryDb();
+      const roots = {
+        claudeRoots: [join(root, 'claude', 'projects')],
+        codexRoot: join(root, 'codex'), grokRoot: join(root, 'grok'), dshRoot: join(root, 'dsh'),
+        kimiRoot: join(root, 'kimi'), droidRoot: join(root, 'factory'), zcodeRoot: join(root, 'zcode'),
+        antigravityRoot: join(root, 'antigravity'), opencodeRoot: join(root, 'opencode'), ampRoot: join(root, 'amp'),
+        since: Date.now() - 86_400_000, until: Date.now() + 86_400_000,
+      };
+
+      const upsert = store.upsertSessionMessages.bind(store);
+      let failOnce = true;
+      store.upsertSessionMessages = (rows) => {
+        if (failOnce && rows.some((row) => row.sessionId === `claude:${failing}`)) {
+          failOnce = false;
+          throw new Error('SQLITE_BUSY: database is locked');
+        }
+        return upsert(rows);
+      };
+      const errors: string[] = [];
+      const consoleError = console.error;
+      console.error = (...args: unknown[]) => { errors.push(args.join(' ')); };
+      try {
+        await collectSessionCatalog(store, roots);
+      } finally {
+        console.error = consoleError;
+      }
+
+      expect(store.getSessionIndexState(failingFile)).toBeNull();
+      expect(store.countSessionMessages(`claude:${failing}`)).toBe(0);
+      expect(store.countSessionMessages(`claude:${healthy}`)).toBeGreaterThan(0);
+      expect(store.getSessionIndexState(healthyFile)).not.toBeNull();
+      expect(errors.some((line) => line.includes(failingFile) && line.includes('SQLITE_BUSY'))).toBe(true);
+
+      await collectSessionCatalog(store, roots);
+      expect(store.countSessionMessages(`claude:${failing}`)).toBeGreaterThan(0);
+      expect(store.getSessionIndexState(failingFile)).not.toBeNull();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
