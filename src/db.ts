@@ -1,4 +1,5 @@
 import { Database } from 'bun:sqlite';
+import { likeAllTerms, likeClauses, likeSnippet, planMessageQuery } from './message-query.ts';
 import { redactNullable } from './redact.ts';
 import { createHash } from 'node:crypto';
 import type {
@@ -3052,14 +3053,12 @@ export class Store {
    * snippet 里用 \u0001/\u0002 包住命中词，由展示层转高亮标签。
    */
   searchSessionMessages(query: string, limit = 80): SessionMessageHit[] {
-    const q = query.trim();
-    if (!q) return [];
-    if ([...q.replace(/\s+/g, '')].length < 3) {
-      return this.searchSessionMessagesLike(q, limit);
-    }
-    const ftsQuery = q.split(/\s+/).filter(Boolean)
-      .map((token) => `"${token.replaceAll('"', '""')}"`)
-      .join(' ');
+    const plan = planMessageQuery(query);
+    if (plan.terms.length === 0) return [];
+    // Every term is required (INV-899, message-query.ts): long terms through FTS,
+    // short ones as LIKE in the same statement; all-short queries are LIKE only.
+    if (plan.match == null) return this.searchSessionMessagesLike(plan.likes, plan.terms, limit);
+    const shortTerms = plan.likes.length > 0 ? ` AND ${likeClauses('m.text', plan.likes.length)}` : '';
     try {
       const rows = this.db.query(
         `SELECT m.session_id AS sessionId,
@@ -3067,36 +3066,26 @@ export class Store {
                 bm25(session_messages_fts) AS rank
          FROM session_messages_fts
          JOIN session_messages m ON m.rowid = session_messages_fts.rowid
-         WHERE session_messages_fts MATCH ?
+         WHERE session_messages_fts MATCH ?${shortTerms}
          ORDER BY rank
          LIMIT ?`,
-      ).all(ftsQuery, limit) as Array<{ sessionId: string; snippet: string; rank: number }>;
+      ).all(plan.match, ...plan.likes, limit) as Array<{ sessionId: string; snippet: string; rank: number }>;
       return aggregateMessageHits(rows.map((row) => ({ sessionId: row.sessionId, snippet: row.snippet })));
     } catch {
       // FTS 语法错误（特殊字符等）兜底到 LIKE
-      return this.searchSessionMessagesLike(q, limit);
+      return this.searchSessionMessagesLike(likeAllTerms(plan), plan.terms, limit);
     }
   }
 
-  private searchSessionMessagesLike(query: string, limit: number): SessionMessageHit[] {
-    const pattern = `%${query.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
+  private searchSessionMessagesLike(patterns: string[], terms: string[], limit: number): SessionMessageHit[] {
     const rows = this.db.query(
       `SELECT session_id AS sessionId, text
-       FROM session_messages
-       WHERE text LIKE ? ESCAPE '\\'
+       FROM session_messages m
+       WHERE ${likeClauses('m.text', patterns.length)}
        ORDER BY timestamp DESC
        LIMIT ?`,
-    ).all(pattern, limit) as Array<{ sessionId: string; text: string | null }>;
-    const needle = query.toLowerCase();
-    return aggregateMessageHits(rows.map((row) => {
-      const text = row.text ?? '';
-      const at = text.toLowerCase().indexOf(needle);
-      const start = Math.max(0, at - 24);
-      const snippet = at < 0
-        ? text.slice(0, 48)
-        : `${start > 0 ? '…' : ''}${text.slice(start, at)}\u0001${text.slice(at, at + query.length)}\u0002${text.slice(at + query.length, at + query.length + 24)}${at + query.length + 24 < text.length ? '…' : ''}`;
-      return { sessionId: row.sessionId, snippet };
-    }));
+    ).all(...patterns, limit) as Array<{ sessionId: string; text: string | null }>;
+    return aggregateMessageHits(rows.map((row) => ({ sessionId: row.sessionId, snippet: likeSnippet(row.text ?? '', terms) })));
   }
 }
 

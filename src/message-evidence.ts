@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { likeAllTerms, likeClauses, likeSnippet, planMessageQuery } from './message-query.ts';
 import { statSync } from 'node:fs';
 import type { Store } from './db.ts';
 import type { Hono } from 'hono';
@@ -139,37 +140,36 @@ export function searchMessageEvidence(store: Store, args: Record<string, unknown
   const params: Array<string | number> = [];
   const where = whereFilters(args, params);
   const offset = integer(args.offset, 0, 0, 1_000_000);
-  const pattern = `%${q.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
-  const like = () => store.db.query(`SELECT ${COLUMNS} FROM session_messages m
-    JOIN sessions s ON s.id=m.session_id WHERE ${where} AND m.kind != 'tool_use' AND m.text LIKE ? ESCAPE '\\'
-    ORDER BY m.timestamp DESC, m.session_id, m.seq, m.id LIMIT ? OFFSET ?`).all(...params, pattern, limit + 1, offset) as MessageEvidenceRow[];
+  const plan = planMessageQuery(q);
+  // Every term is required (INV-899): long terms through FTS, short ones as LIKE in the same statement.
+  const like = (patterns: string[]) => store.db.query(`SELECT ${COLUMNS} FROM session_messages m
+    JOIN sessions s ON s.id=m.session_id WHERE ${where} AND m.kind != 'tool_use' AND ${likeClauses('m.text', patterns.length)}
+    ORDER BY m.timestamp DESC, m.session_id, m.seq, m.id LIMIT ? OFFSET ?`).all(...params, ...patterns, limit + 1, offset) as MessageEvidenceRow[];
   let rows: Array<MessageEvidenceRow & { snippet?: string }>;
-  let searchMode = 'fts5';
-  if ([...q.replace(/\s+/g, '')].length < 3) {
-    rows = like();
+  let searchMode = plan.likes.length > 0 ? 'fts5+like' : 'fts5';
+  if (plan.match == null) {
+    rows = like(plan.likes);
     searchMode = 'like_short_query';
   } else {
-    const ftsQuery = q.split(/\s+/).map((token) => `"${token.replaceAll('"', '""')}"`).join(' ');
+    const shortTerms = plan.likes.length > 0 ? ` AND ${likeClauses('m.text', plan.likes.length)}` : '';
     try {
       // FTS5's rank column supports its ranked scan; a separate bm25 + tie sort
       // forces SQLite to sort all common-term matches before applying LIMIT.
       rows = store.db.query(`SELECT ${COLUMNS}, snippet(session_messages_fts, 0, char(1), char(2), '…', 48) AS snippet
         FROM session_messages_fts JOIN session_messages m ON m.rowid=session_messages_fts.rowid
         JOIN sessions s ON s.id=m.session_id
-        WHERE ${where} AND m.kind != 'tool_use' AND session_messages_fts MATCH ?
+        WHERE ${where} AND m.kind != 'tool_use' AND session_messages_fts MATCH ?${shortTerms}
         ORDER BY session_messages_fts.rank LIMIT ? OFFSET ?`)
-        .all(...params, ftsQuery, limit + 1, offset) as Array<MessageEvidenceRow & { snippet: string }>;
+        .all(...params, plan.match, ...plan.likes, limit + 1, offset) as Array<MessageEvidenceRow & { snippet: string }>;
     } catch {
-      rows = like();
+      rows = like(likeAllTerms(plan));
       searchMode = 'like_fallback';
     }
   }
   return {
     items: rows.slice(0, limit).map((row) => {
-      const at = row.text.toLowerCase().indexOf(q.toLowerCase());
-      const start = Math.max(0, at - 60);
       return { source_ref: sourceRef(row), role: row.role, kind: row.kind,
-        timestamp: row.timestamp, snippet: row.snippet ?? row.text.slice(start, start + 240), content_complete: row.fullText != null,
+        timestamp: row.timestamp, snippet: row.snippet ?? likeSnippet(row.text, plan.terms, 60), content_complete: row.fullText != null,
         source_status: sourceStatus(store, row), indexed_at: row.indexedAt };
     }),
     truncated: rows.length > limit,
@@ -179,7 +179,7 @@ export function searchMessageEvidence(store: Store, args: Record<string, unknown
     warnings: [
       'Search covers the existing indexed text excerpt (visible text up to 10000 characters); read_message can recover retained full text.',
       'Search pagination is a live view; SourceRef pins message content, not the result list.',
-      ...(searchMode === 'fts5' ? [] : ['LIKE fallback may scan more rows; narrow project/provider/time for large histories.']),
+      ...(searchMode === 'fts5' || searchMode === 'fts5+like' ? [] : ['LIKE fallback may scan more rows; narrow project/provider/time for large histories.']),
     ],
   };
 }
