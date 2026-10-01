@@ -888,6 +888,17 @@ function streamJsonlFrom(
 
   let parsedBytes = fromBytes;
   let lines = 0;
+  // 只吞读文件的错误;onBatch(入库)的错误必须抛出,否则调用方会把已越过的
+  // parsedBytes 当水位写下,失败批次的消息永久缺失(INV-903)
+  let batchError: { error: unknown } | null = null;
+  const flush = (batch: StreamedLine[]): void => {
+    try {
+      onBatch(batch);
+    } catch (error) {
+      batchError = { error };
+      throw error;
+    }
+  };
   try {
     const size = statSync(path).size;
     let batch: StreamedLine[] = [];
@@ -906,13 +917,14 @@ function streamJsonlFrom(
         }
       }
       if (batch.length >= MSG_BATCH || batchBytes >= 2 * 1024 * 1024) {
-        onBatch(batch);
+        flush(batch);
         batch = [];
         batchBytes = 0;
       }
     });
-    if (batch.length > 0) onBatch(batch);
+    if (batch.length > 0) flush(batch);
   } catch {
+    if (batchError) throw (batchError as { error: unknown }).error;
     /* unreadable */
   }
   return { parsedBytes, lines };
@@ -936,6 +948,12 @@ function mergeSessionRepos(existing: SessionRepo[], fresh: SessionRepo[]): Sessi
  * 和 repo touch 提取(records 保留前 TOUCH_BYTES,与旧行为一致)。
  * 返回该 session 最终的 repos。
  */
+/** 单个源文件的索引写入失败:事务已回滚、水位未前进,记录后继续扫其余文件。 */
+function logIndexFailure(path: string, error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(`[sessions] index failed for ${path}: ${message} (will retry next scan)`);
+}
+
 function indexSessionFileMessages(
   store: Store,
   session: SessionRecord,
@@ -977,13 +995,10 @@ function indexSessionFileMessages(
       const witnesses = lines.flatMap(({ record }) => (
         commitWitnessesFromRecord(session.provider, session.id, record, witnessPairing)
       ));
-      try {
-        store.upsertSessionMessages(messages);
-        store.upsertSessionTouches(touches);
-        store.upsertSessionCommitWitnesses(witnesses);
-      } catch {
-        /* 单批写入失败不拖垮整趟目录扫描 */
-      }
+      // 写入失败直接抛出:整个文件的事务回滚,水位不前进,下一轮重试(INV-903)
+      store.upsertSessionMessages(messages);
+      store.upsertSessionTouches(touches);
+      store.upsertSessionCommitWitnesses(witnesses);
       for (const { record, end } of lines) {
         if (session.provider === 'claude'
           && record.type === 'ai-title'
@@ -1096,29 +1111,33 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
     if (file.provider === 'opencode') {
       scanned += 1;
       const dbRows = extractSessionRecords(file.provider, file.path, file.mtimeMs);
-      store.withTransaction(() => {
-        for (const row of dbRows) {
-          if (tombstones.ids.has(row.id)) continue;
-          const withWork = attachGit(row);
-          try {
+      const opencodeRows: SessionRecord[] = [];
+      try {
+        store.withTransaction(() => {
+          for (const row of dbRows) {
+            if (tombstones.ids.has(row.id)) continue;
+            const withWork = attachGit(row);
             store.upsertSessionMessages(messagesFromOpencodeDb(file.path, row.nativeId, row.id));
             store.upsertSessionTouches(touchesFromOpencodeDb(file.path, row.nativeId, row.id, row.cwd));
             store.upsertSessionCommitWitnesses(commitWitnessesFromOpencodeDb(file.path, row.nativeId, row.id));
-          } catch {
-            /* ignore single session error */
+            const repos = extractSessionRepos(withWork, { records: recordsFromOpencodeDb(file.path, row.nativeId) });
+            opencodeRows.push(attachRepos(withWork, repos));
           }
-          const repos = extractSessionRepos(withWork, { records: recordsFromOpencodeDb(file.path, row.nativeId) });
-          rows.push(attachRepos(withWork, repos));
-        }
-        store.upsertSessionIndexState({
-          path: readPath,
-          mtimeMs: compositeMtimeMs,
-          size: compositeSize,
-          parsedBytes: compositeSize,
-          lines: dbRows.length,
-          parserVersion: MESSAGE_PARSER_VERSION,
+          store.upsertSessionIndexState({
+            path: readPath,
+            mtimeMs: compositeMtimeMs,
+            size: compositeSize,
+            parsedBytes: compositeSize,
+            lines: dbRows.length,
+            parserVersion: MESSAGE_PARSER_VERSION,
+          });
         });
-      });
+        rows.push(...opencodeRows);
+      } catch (error) {
+        // 整库回滚、水位不前进;目录行沿用上一轮的,下一轮重试(INV-903)
+        logIndexFailure(readPath, error);
+        if (existingRows) rows.push(...existingRows);
+      }
       processed += 1;
       bytesSinceYield += readSize;
       if (processed % CATALOG_YIELD_BATCH === 0 || bytesSinceYield >= 32 * 1024 * 1024) {
@@ -1145,25 +1164,25 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
         repos = extractSessionRepos(withWork);
       } else if (file.provider === 'amp') {
         if (!indexFresh && readSize > 0) {
-          store.withTransaction(() => {
-            store.deleteSessionMessages(row.id);
-            store.deleteSessionTouches(row.id);
-            try {
+          try {
+            store.withTransaction(() => {
+              store.deleteSessionMessages(row.id);
+              store.deleteSessionTouches(row.id);
               store.upsertSessionMessages(messagesFromAmpThread(file.path, row.nativeId, row.id));
               store.upsertSessionTouches(touchesFromAmpThread(file.path, row.nativeId, row.id, row.cwd));
               store.upsertSessionCommitWitnesses(commitWitnessesFromAmpThread(file.path, row.nativeId, row.id));
-            } catch {
-              /* ignore */
-            }
-            store.upsertSessionIndexState({
-              path: readPath,
-              mtimeMs: readMtimeMs,
-              size: readSize,
-              parsedBytes: readSize,
-              lines: 1,
-              parserVersion: MESSAGE_PARSER_VERSION,
+              store.upsertSessionIndexState({
+                path: readPath,
+                mtimeMs: readMtimeMs,
+                size: readSize,
+                parsedBytes: readSize,
+                lines: 1,
+                parserVersion: MESSAGE_PARSER_VERSION,
+              });
             });
-          });
+          } catch (error) {
+            logIndexFailure(readPath, error);
+          }
         }
         repos = extractSessionRepos(withWork, { records: recordsFromAmpThread(file.path) });
       } else if (indexFresh) {
@@ -1172,9 +1191,14 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
         // 照常 upsert,repos 复用已存的,不做全量重扫。
         repos = store.listSessionRepos(row.id);
       } else if (readSize > 0) {
-        const indexed = indexSessionFileMessages(store, withWork, readPath, readMtimeMs, readSize, state);
-        repos = indexed.repos;
-        if (indexed.aiTitle) withWork.title = titleify(indexed.aiTitle);
+        try {
+          const indexed = indexSessionFileMessages(store, withWork, readPath, readMtimeMs, readSize, state);
+          repos = indexed.repos;
+          if (indexed.aiTitle) withWork.title = titleify(indexed.aiTitle);
+        } catch (error) {
+          logIndexFailure(readPath, error);
+          repos = store.listSessionRepos(row.id);
+        }
       } else {
         repos = extractSessionRepos(withWork);
       }
