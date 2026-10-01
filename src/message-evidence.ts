@@ -3,6 +3,7 @@ import { likeAllTerms, likeClauses, likeSnippet, planMessageQuery, searchableRow
 import { statSync } from 'node:fs';
 import type { Store } from './db.ts';
 import type { Hono } from 'hono';
+import { wholeMtimeMs } from './mtime.ts';
 
 export interface SourceRef {
   provider: string;
@@ -109,7 +110,7 @@ function sourceStatus(store: Store, row: MessageEvidenceRow): string {
     const stat = statSync(row.sourceFile);
     const watermark = store.getSessionIndexState(row.sourceFile);
     if (!watermark) return 'present_unverified';
-    return stat.size === watermark.size && stat.mtimeMs === watermark.mtimeMs ? 'indexed_metadata_matches' : 'changed_since_index';
+    return stat.size === watermark.size && wholeMtimeMs(stat) === watermark.mtimeMs ? 'indexed_metadata_matches' : 'changed_since_index';
   } catch { return 'missing'; }
 }
 

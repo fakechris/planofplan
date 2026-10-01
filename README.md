@@ -167,6 +167,9 @@ bun run menubar:build
 open /Applications/planofplan.app
 ```
 
+打包要求 Bun ≥ 1.4.2(1.3.x 编译出的 daemon 会在启动扫描里段错误);全局 bun 较旧时用
+`PLANOFPLAN_BUILD_BUN=/path/to/bun bun run menubar:build` 指定。
+
 `menubar:build` 只允许在 Git 工作区干净且所有源代码已经 commit 后运行。构建会把当前
 commit 的完整 SHA、短 SHA、构建时间和版本写入 app，并原子替换
 `/Applications/planofplan.app`。不要从 `dist` 启动旧副本。

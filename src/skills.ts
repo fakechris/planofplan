@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import type { Database } from 'bun:sqlite';
 import type { Store } from './db.ts';
 import type { SkillHit } from './types.ts';
+import { wholeMtimeMs } from './mtime.ts';
 
 // ── Skills 目录探测 ──────────────────────────────────────────────────
 // 自动探测 ~/.skills, ~/.claude/skills, ~/.codex/skills 以及当前项目 skills/
@@ -190,7 +191,7 @@ export function syncSkillsCatalog(store: Store, rootsOverride?: string[]): { tot
       }
 
       const prevMtime = existingMtime.get(entry);
-      if (prevMtime !== undefined && Math.abs(prevMtime - st.mtimeMs) < 1) {
+      if (prevMtime !== undefined && Math.abs(prevMtime - wholeMtimeMs(st)) < 1) {
         seenNames.add(entry);
         continue;
       }
@@ -206,7 +207,7 @@ export function syncSkillsCatalog(store: Store, rootsOverride?: string[]): { tot
           parsed.description,
           parsed.allowedTools ? JSON.stringify(parsed.allowedTools) : null,
           parsed.triggers.length > 0 ? parsed.triggers.join(' | ') : null,
-          st.mtimeMs,
+          wholeMtimeMs(st),
           Date.now(),
         );
 

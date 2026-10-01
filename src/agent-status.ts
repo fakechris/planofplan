@@ -10,6 +10,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { promisify } from 'node:util';
+import { wholeMtimeMs } from './mtime.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -56,7 +57,7 @@ const HOOK_STATE_MAP: Record<string, number> = {
 
 function ageSeconds(path: string): number {
   try {
-    return (Date.now() - statSync(path).mtimeMs) / 1000;
+    return (Date.now() - wholeMtimeMs(statSync(path))) / 1000;
   } catch {
     return 1e9;
   }
