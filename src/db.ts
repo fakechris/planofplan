@@ -1,4 +1,5 @@
 import { Database } from 'bun:sqlite';
+import { redactNullable } from './redact.ts';
 import { createHash } from 'node:crypto';
 import type {
   FileTouchSession,
@@ -40,6 +41,9 @@ export function projectEntityId(url: string): string {
 
 /** 配额快照保留期:纯时序数据,过期即清,否则每天 ~2 万行无限累积。 */
 export const SNAPSHOT_RETENTION_DAYS = 90;
+
+/** 存量脱敏回填的完成哨兵(INV-898);sessions.ts 的孤儿水位清理必须跳过它。 */
+export const REDACT_BACKFILL_STATE_PATH = '__redact_backfill_v1__';
 
 /** 当前 schema 迁移天花板:迁移链每级 `PRAGMA user_version = N` 的最大值。
  *  测试断言迁移完成度时引用本常量,不要硬编码,避免每次加迁移破一片。 */
@@ -650,6 +654,58 @@ export class Store {
       this.pruneSnapshotsBefore(Date.now() - SNAPSHOT_RETENTION_DAYS * 86_400_000);
       db.exec('PRAGMA user_version = 15');
     }
+    // 存量脱敏(INV-898)。解析器版本 +1 只会重扫源文件仍在的会话;源文件已删除而
+    // 索引保留的会话靠这里原地脱敏。完成标记用 session_index_state 哨兵行,不用
+    // user_version:实测本机库已被未知构建推到 16,编号门会被永久关掉(与
+    // session-origin.ts 的 v4 教训同)。只改真有变化的行(触发器同步 FTS),之后
+    // optimize 合并掉仍含旧词条的段。
+    if (!this.getSessionIndexState(REDACT_BACKFILL_STATE_PATH)) {
+      const changed = this.redactStoredText();
+      try {
+        if (changed > 0) db.exec(`INSERT INTO session_messages_fts(session_messages_fts) VALUES ('optimize')`);
+      } catch {
+        /* 失败不阻塞启动;调度器每日 optimize 兜底 */
+      }
+      this.upsertSessionIndexState({
+        path: REDACT_BACKFILL_STATE_PATH, mtimeMs: Date.now(), size: 0, parsedBytes: 0, lines: changed, parserVersion: 0,
+      });
+    }
+  }
+
+  /** 原地脱敏已入库的消息正文与会话标题;返回改动行数。分块按 rowid 走,避免一次读全表。 */
+  redactStoredText(): number {
+    let changed = 0;
+    const update = this.db.query('UPDATE session_messages SET text = ?, full_text = ? WHERE rowid = ?');
+    let after = 0;
+    for (;;) {
+      const rows = this.db.query(
+        'SELECT rowid, text, full_text AS fullText FROM session_messages WHERE rowid > ? ORDER BY rowid LIMIT 2000',
+      ).all(after) as Array<{ rowid: number; text: string | null; fullText: string | null }>;
+      if (rows.length === 0) break;
+      this.withTransaction(() => {
+        for (const row of rows) {
+          const text = redactNullable(row.text);
+          const fullText = redactNullable(row.fullText);
+          if (text !== row.text || fullText !== row.fullText) {
+            update.run(text, fullText, row.rowid);
+            changed += 1;
+          }
+        }
+      });
+      after = rows[rows.length - 1]!.rowid;
+    }
+    const titles = this.db.query('SELECT id, title FROM sessions WHERE title IS NOT NULL').all() as Array<{ id: string; title: string }>;
+    const setTitle = this.db.query('UPDATE sessions SET title = ? WHERE id = ?');
+    this.withTransaction(() => {
+      for (const row of titles) {
+        const title = redactNullable(row.title);
+        if (title !== row.title) {
+          setTitle.run(title, row.id);
+          changed += 1;
+        }
+      }
+    });
+    return changed;
   }
 
   getUserVersion(): number {
@@ -1547,8 +1603,10 @@ export class Store {
     return row?.last ?? null;
   }
 
-  upsertSessions(rows: SessionRecord[]): void {
-    if (rows.length === 0) return;
+  upsertSessions(input: SessionRecord[]): void {
+    if (input.length === 0) return;
+    // 标题常取自首条用户消息,与消息同样脱敏(INV-898)
+    const rows = input.map((row) => ({ ...row, title: redactNullable(row.title) }));
     // 注意:excluded.* 引用的是 VALUES 的最终值,VALUES 里的 COALESCE(?, 'user')
     // 会让 excluded.origin 永远非空,导致冲突更新把已有 origin 重置回 'user'
     //(线上实测:subagent 被 stub 重扫洗掉)。所以 UPDATE 分支必须用独立的
@@ -1902,8 +1960,11 @@ export class Store {
 
   /** 写入消息行。返回实际执行的 INSERT/UPDATE 行数:内容未变的重扫行
    *  直接跳过(零写),调用方可据此观测 churn。 */
-  upsertSessionMessages(rows: SessionMessageRow[]): number {
-    if (rows.length === 0) return 0;
+  upsertSessionMessages(input: SessionMessageRow[]): number {
+    if (input.length === 0) return 0;
+    // 入库漏斗:全部 provider 的消息都经这里,脱敏放在指纹比对之前,
+    // 否则已入库的明文行会被当成「未变」而保留(INV-898)
+    const rows = input.map((row) => ({ ...row, text: redactNullable(row.text), fullText: redactNullable(row.fullText) }));
     const stmt = this.db.query(
       `INSERT INTO session_messages (
          id, session_id, seq, role, kind, tool_name, text, timestamp, model, input_tokens, output_tokens, full_text, parser_version
