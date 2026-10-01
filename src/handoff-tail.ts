@@ -120,7 +120,11 @@ export function buildConversationTail(messages: TailMessage[], options: TailOpti
     if (lines.length > 0) parts.push('### 较早(每条一行)', '', ...lines, '');
     parts.push('### 最近(原文)', '', full.join('\n\n'), '');
     if (omitted > 0) {
-      parts.push(`> 更早的 ${omitted} 条(第 1–${omitted} 条)未展示:read_session session_id=${options.sessionId} offset=1 可续读。`, '');
+      // 页序来自整个会话;需求范围的段从中间开始,所以用实际首尾页序并限定页长,
+      // 否则续读会越出范围(CodeRabbit #88)
+      const first = messages[0]!.ordinal;
+      const last = messages[omitted - 1]!.ordinal;
+      parts.push(`> 更早的 ${omitted} 条(第 ${first}–${last} 条)未展示:read_session session_id=${options.sessionId} offset=${first} limit=${Math.min(100, omitted)} 起续读,按页尾 offset 读到第 ${last} 条。`, '');
     }
     return parts.join('\n');
   };

@@ -57,4 +57,15 @@ describe('buildConversationTail', () => {
     expect(tail.markdown).toContain('没有已索引的消息');
     expect(tail.verbatim + tail.condensed + tail.omitted).toBe(0);
   });
+
+  test('a scoped tail points at its own omitted ordinals with a bounded page', () => {
+    // requirement span: session ordinals 40..339, older ones belong to another requirement
+    const scoped = conversation(300).map((m) => ({ ...m, ordinal: m.ordinal + 39 }));
+    const tail = buildConversationTail(scoped, { charBudget: 4_000, sessionId: 'claude:s' });
+    expect(tail.omitted).toBeGreaterThan(100);
+    expect(tail.markdown).toContain('offset=40 limit=100');
+    expect(tail.markdown).toContain(`第 40–${39 + tail.omitted} 条`);
+    expect(tail.markdown).not.toContain('offset=1 ');
+  });
 });
+
