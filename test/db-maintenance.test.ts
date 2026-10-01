@@ -59,7 +59,8 @@ describe('v11 FTS 瘦身迁移(模拟旧库)', () => {
       END`);
       old.upsertSessionMessages([
         msg({ id: 'm1', sessionId: SESSION_ID, seq: 1, text: '旧库正文' }),
-        msg({ id: 't1', sessionId: SESSION_ID, seq: 2, role: 'tool', kind: 'tool_use', toolName: 'Bash', text: '{"command":"旧库工具"}' }),
+        // 非命令类工具:INV-900 起 shell 命令可搜,其余工具入参仍退出索引
+        msg({ id: 't1', sessionId: SESSION_ID, seq: 2, role: 'tool', kind: 'tool_use', toolName: 'Edit', text: '{"file_path":"旧库工具"}' }),
       ]);
       expect(old.searchSessionMessages('旧库工具')).toHaveLength(1); // 旧行为:工具入参可搜
       old.db.exec('PRAGMA user_version = 10');

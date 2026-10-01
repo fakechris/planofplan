@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { likeAllTerms, likeClauses, likeSnippet, planMessageQuery } from './message-query.ts';
+import { likeAllTerms, likeClauses, likeSnippet, planMessageQuery, searchableRowSql } from './message-query.ts';
 import { statSync } from 'node:fs';
 import type { Store } from './db.ts';
 import type { Hono } from 'hono';
@@ -143,7 +143,7 @@ export function searchMessageEvidence(store: Store, args: Record<string, unknown
   const plan = planMessageQuery(q);
   // Every term is required (INV-899): long terms through FTS, short ones as LIKE in the same statement.
   const like = (patterns: string[]) => store.db.query(`SELECT ${COLUMNS} FROM session_messages m
-    JOIN sessions s ON s.id=m.session_id WHERE ${where} AND m.kind != 'tool_use' AND ${likeClauses('m.text', patterns.length)}
+    JOIN sessions s ON s.id=m.session_id WHERE ${where} AND ${searchableRowSql('m')} AND ${likeClauses('m.text', patterns.length)}
     ORDER BY m.timestamp DESC, m.session_id, m.seq, m.id LIMIT ? OFFSET ?`).all(...params, ...patterns, limit + 1, offset) as MessageEvidenceRow[];
   let rows: Array<MessageEvidenceRow & { snippet?: string }>;
   let searchMode = plan.likes.length > 0 ? 'fts5+like' : 'fts5';
@@ -158,7 +158,7 @@ export function searchMessageEvidence(store: Store, args: Record<string, unknown
       rows = store.db.query(`SELECT ${COLUMNS}, snippet(session_messages_fts, 0, char(1), char(2), '…', 48) AS snippet
         FROM session_messages_fts JOIN session_messages m ON m.rowid=session_messages_fts.rowid
         JOIN sessions s ON s.id=m.session_id
-        WHERE ${where} AND m.kind != 'tool_use' AND session_messages_fts MATCH ?${shortTerms}
+        WHERE ${where} AND ${searchableRowSql('m')} AND session_messages_fts MATCH ?${shortTerms}
         ORDER BY session_messages_fts.rank LIMIT ? OFFSET ?`)
         .all(...params, plan.match, ...plan.likes, limit + 1, offset) as Array<MessageEvidenceRow & { snippet: string }>;
     } catch {

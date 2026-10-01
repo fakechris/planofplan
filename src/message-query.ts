@@ -61,3 +61,47 @@ export function likeSnippet(text: string, terms: string[], context = 24): string
   }
   return text.slice(0, context * 2);
 }
+
+/**
+ * Tools whose calls are commands worth finding later (INV-900). "How did we deploy
+ * last time" is answered by the ssh/sed/docker lines that ran, not by the prose
+ * around them. Only these tools' command text enters the full-text index: other
+ * tool input (Edit/Write bodies, file reads) stays out — it was most of the index
+ * when everything was in.
+ */
+export const SEARCHABLE_TOOL_NAMES = ['bash', 'exec', 'exec_command', 'shell', 'local_shell', 'run_terminal_cmd'] as const;
+
+export function isSearchableTool(name: string | null | undefined): boolean {
+  return name != null && (SEARCHABLE_TOOL_NAMES as readonly string[]).includes(name.toLowerCase());
+}
+
+/** SQL: this row's text belongs in the full-text index. `row` is a table alias, or new/old in a trigger. */
+export function searchableRowSql(row: string): string {
+  return `(${row}.kind != 'tool_use' OR lower(${row}.tool_name) IN (${SEARCHABLE_TOOL_NAMES.map((name) => `'${name}'`).join(', ')}))`;
+}
+
+/**
+ * The command a shell-like tool ran: `command` or `cmd` (a string or an argv array),
+ * or the input itself when it is a plain string (codex `exec` code). Inputs arrive
+ * as objects or, from some providers, as their JSON text.
+ */
+export function commandOfToolInput(input: unknown): string | null {
+  let value = input;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed.startsWith('{')) return trimmed || null;
+    try {
+      value = JSON.parse(trimmed);
+    } catch {
+      return trimmed;
+    }
+  }
+  if (!value || typeof value !== 'object') return null;
+  const obj = value as Record<string, unknown>;
+  for (const key of ['command', 'cmd']) {
+    const field = obj[key];
+    if (typeof field === 'string' && field.trim()) return field.trim();
+    if (Array.isArray(field) && field.every((part) => typeof part === 'string')) return field.join(' ');
+  }
+  return null;
+}
