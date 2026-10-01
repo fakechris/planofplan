@@ -8,7 +8,10 @@
  *   - session: id, project_id, parent_id, directory, title, time_created, time_updated, tokens_*
  *   - message: id, session_id, time_created, data (JSON: role, model, tokens)
  *   - part: id, message_id, session_id, time_created, data (JSON: type=text|tool|patch|reasoning)
- *   - OpenCode 2 / next: session_message (type, data)
+ *   - OpenCode 2 (v2.0.x): session_v2 (same columns as session) + session_message
+ *     (session_id, type, seq, data)。迁移把旧会话 INSERT OR IGNORE 复制进 session_v2,
+ *     旧表保留,所以两张表并读,同 id 以 session_v2 为准;消息按 seq 排序。
+ *     data 形状见 OpenCode packages/schema/src/session-message.ts(v2.0.21)。
  */
 import { existsSync } from 'node:fs';
 import { Database } from 'bun:sqlite';
@@ -39,33 +42,92 @@ interface OpenCodeSessionDbRow {
   tokens_reasoning?: number | null;
 }
 
+function hasTable(db: Database, name: string): boolean {
+  return Boolean(db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name));
+}
+
+function sessionRows(db: Database, table: string): OpenCodeSessionDbRow[] {
+  const cols = new Set(
+    (db.query(`PRAGMA table_info('${table}')`).all() as Array<{ name: string }>).map((c) => c.name),
+  );
+  const selectCols = [
+    'id',
+    cols.has('parent_id') ? 'parent_id' : 'NULL AS parent_id',
+    cols.has('title') ? 'title' : 'NULL AS title',
+    cols.has('directory') ? 'directory' : 'NULL AS directory',
+    cols.has('path') ? 'path' : 'NULL AS path',
+    cols.has('time_created') ? 'time_created' : '0 AS time_created',
+    cols.has('time_updated') ? 'time_updated' : '0 AS time_updated',
+    cols.has('tokens_input') ? 'tokens_input' : '0 AS tokens_input',
+    cols.has('tokens_output') ? 'tokens_output' : '0 AS tokens_output',
+    cols.has('tokens_reasoning') ? 'tokens_reasoning' : '0 AS tokens_reasoning',
+  ].join(', ');
+  return db.query(`SELECT ${selectCols} FROM ${table}`).all() as OpenCodeSessionDbRow[];
+}
+
+/** session_message 里对索引有意义的一项:用户原话、助手正文、工具调用。 */
+interface V2Entry {
+  id: string;
+  role: 'user' | 'assistant' | 'tool';
+  text: string;
+  toolName: string | null;
+  input: unknown;
+  ts: number | null;
+}
+
+/**
+ * OpenCode 2 的 session_message,按 seq 展开。reasoning 与 system/synthetic(注入文本)、
+ * skill/compaction/切换类消息不入索引;shell 消息按 bash 工具调用处理。
+ * 该会话没有 session_message 行时返回 null(走 v1 的 message/part);有行但全被过滤时
+ * 返回空数组,不回退到旧表。
+ */
+function v2Entries(db: Database, nativeId: string): V2Entry[] | null {
+  if (!hasTable(db, 'session_message')) return null;
+  const rows = db.query(
+    'SELECT id, type, data, time_created FROM session_message WHERE session_id = ? ORDER BY seq',
+  ).all(nativeId) as Array<{ id: string; type: string; data: string; time_created: number | null }>;
+  if (rows.length === 0) return null;
+  const entries: V2Entry[] = [];
+  for (const row of rows) {
+    let data: Record<string, unknown>;
+    try {
+      data = JSON.parse(row.data) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    const ts = row.time_created;
+    if (row.type === 'user' && typeof data.text === 'string' && data.text) {
+      entries.push({ id: row.id, role: 'user', text: data.text, toolName: null, input: null, ts });
+    } else if (row.type === 'shell' && typeof data.command === 'string' && data.command) {
+      entries.push({ id: row.id, role: 'tool', text: data.command, toolName: 'bash', input: { command: data.command }, ts });
+    } else if (row.type === 'assistant' && Array.isArray(data.content)) {
+      data.content.forEach((block: unknown, index: number) => {
+        if (!block || typeof block !== 'object') return;
+        const b = block as { type?: string; text?: unknown; name?: unknown; state?: { input?: unknown } };
+        const id = `${row.id}:${index}`;
+        if (b.type === 'text' && typeof b.text === 'string' && b.text) {
+          entries.push({ id, role: 'assistant', text: b.text, toolName: null, input: null, ts });
+        } else if (b.type === 'tool') {
+          const toolName = typeof b.name === 'string' && b.name ? b.name : 'tool';
+          entries.push({ id, role: 'tool', text: '', toolName, input: b.state?.input ?? null, ts });
+        }
+      });
+    }
+  }
+  return entries;
+}
+
 export function extractOpencodeDb(path: string, mtimeMs: number): SessionRecord[] {
   if (!existsSync(path)) return [];
   let db: Database | null = null;
   try {
     db = new Database(path, { readonly: true });
-    // Check if session table exists
-    const hasSessionTable = db.query(
-      "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session'",
-    ).get();
-    if (!hasSessionTable) return [];
-    const cols = new Set(
-      (db.query("PRAGMA table_info('session')").all() as Array<{ name: string }>).map((c) => c.name),
-    );
-    const selectCols = [
-      'id',
-      cols.has('parent_id') ? 'parent_id' : 'NULL AS parent_id',
-      cols.has('title') ? 'title' : 'NULL AS title',
-      cols.has('directory') ? 'directory' : 'NULL AS directory',
-      cols.has('path') ? 'path' : 'NULL AS path',
-      cols.has('time_created') ? 'time_created' : '0 AS time_created',
-      cols.has('time_updated') ? 'time_updated' : '0 AS time_updated',
-      cols.has('tokens_input') ? 'tokens_input' : '0 AS tokens_input',
-      cols.has('tokens_output') ? 'tokens_output' : '0 AS tokens_output',
-      cols.has('tokens_reasoning') ? 'tokens_reasoning' : '0 AS tokens_reasoning',
-    ].join(', ');
-
-    const rows = db.query(`SELECT ${selectCols} FROM session`).all() as OpenCodeSessionDbRow[];
+    const byId = new Map<string, OpenCodeSessionDbRow>();
+    for (const table of ['session', 'session_v2']) {
+      if (!hasTable(db, table)) continue;
+      for (const row of sessionRows(db, table)) byId.set(row.id, row);
+    }
+    const rows = [...byId.values()];
 
     return rows.map((row) => {
       const rawTitle = row.title ? row.title.trim() : '';
@@ -106,38 +168,18 @@ export function messagesFromOpencodeDb(path: string, nativeId: string, sessionId
   try {
     db = new Database(path, { readonly: true });
 
-    // Check if v2 session_message table exists and has rows
-    const hasSessionMessage = db.query(
-      "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_message'",
-    ).get();
-
-    if (hasSessionMessage) {
-      const v2Rows = db.query(
-        `SELECT id, type, data, time_created
-         FROM session_message
-         WHERE session_id = ?
-         ORDER BY time_created, id`,
-      ).all(nativeId) as Array<{ id: string; type: string; data: string; time_created: number | null }>;
-
-      if (v2Rows.length > 0) {
-        let seq = 0;
-        for (const r of v2Rows) {
-          seq += 1;
-          try {
-            const data = JSON.parse(r.data) as Record<string, unknown>;
-            const role = r.type === 'user' ? 'user' : 'assistant';
-            const text = typeof data.text === 'string' ? data.text : (typeof data.content === 'string' ? data.content : '');
-            const id = `${sessionId}:${r.id}`;
-            if (text) {
-              const textRowObj = textRow(sessionId, id, seq, role, text, r.time_created);
-              if (textRowObj) rows.push(textRowObj);
-            }
-          } catch {
-            /* skip */
-          }
+    const v2 = v2Entries(db, nativeId);
+    if (v2) {
+      v2.forEach((entry, index) => {
+        const id = `${sessionId}:${entry.id}`;
+        if (entry.role === 'tool') {
+          rows.push(toolRow(sessionId, id, index + 1, entry.toolName ?? 'tool', entry.input, entry.ts));
+        } else {
+          const text = textRow(sessionId, id, index + 1, entry.role, entry.text, entry.ts);
+          if (text) rows.push(text);
         }
-        return rows;
-      }
+      });
+      return rows;
     }
 
     // Standard v1: message + part
@@ -205,6 +247,30 @@ export function touchesFromOpencodeDb(
   let db: Database | null = null;
   try {
     db = new Database(path, { readonly: true });
+    const v2 = v2Entries(db, nativeId);
+    if (v2) {
+      v2.forEach((entry, index) => {
+        if (entry.role !== 'tool' || !entry.toolName) return;
+        const op = opOfTool(entry.toolName);
+        if (op === 'bash' || op === 'shell' || op === 'exec_command' || op === 'exec') return;
+        const input = entry.input as { filePath?: unknown } | null;
+        const rawPath = typeof input?.filePath === 'string' && input.filePath.trim()
+          ? input.filePath.trim()
+          : filePathOfInput(entry.input);
+        if (!rawPath) return;
+        touches.push({
+          id: `${sessionId}:${entry.id}`,
+          sessionId,
+          provider: 'opencode',
+          filePath: normalizeTouchPath(rawPath, fallbackCwd),
+          toolName: entry.toolName,
+          op,
+          ts: entry.ts,
+          ordinal: (index + 1) * 1000,
+        });
+      });
+      return touches;
+    }
     const hasPartTable = db.query(
       "SELECT 1 FROM sqlite_master WHERE type='table' AND name='part'",
     ).get();
@@ -344,6 +410,20 @@ export function turnsFromOpencodeDb(path: string, nativeId: string): TranscriptT
   let db: Database | null = null;
   try {
     db = new Database(path, { readonly: true });
+    const v2 = v2Entries(db, nativeId);
+    if (v2) {
+      for (const entry of v2) {
+        if (entry.role === 'tool') {
+          const summary = entry.input && typeof entry.input === 'object'
+            ? JSON.stringify(entry.input).slice(0, 160)
+            : entry.toolName ?? 'tool';
+          turns.push({ role: 'tool', text: summary, toolName: entry.toolName ?? 'tool' });
+        } else {
+          turns.push({ role: entry.role, text: entry.text });
+        }
+      }
+      return turns;
+    }
     const hasPartTable = db.query(
       "SELECT 1 FROM sqlite_master WHERE type='table' AND name='part'",
     ).get();

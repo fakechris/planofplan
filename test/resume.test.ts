@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
-import { _clearBinCache, findExecutable, resumeFor } from '../src/resume.ts';
+import { _clearBinCache, findExecutable, launchResume, resumeFor } from '../src/resume.ts';
 import type { SessionRecord } from '../src/types.ts';
 
 function session(partial: Partial<SessionRecord> & Pick<SessionRecord, 'id' | 'provider' | 'nativeId'>): SessionRecord {
@@ -157,5 +157,34 @@ describe('resume CLI discovery', () => {
       nativeId: '1',
     }), { resume: { zcode: { kind: 'app', app: 'NoSuchZCodeApp' } } });
     expect(info.available).toBe(false);
+  });
+
+  test('a Claude subagent transcript is not offered `claude --resume`, and points to its parent', () => {
+    const home = fakeHome();
+    try {
+      writeBin(join(home, '.local', 'bin'), 'claude');
+      const lookup = { home, path: '' };
+      const sub = session({
+        id: 'claude:agent-a03feab7fb404094c',
+        provider: 'claude',
+        nativeId: 'agent-a03feab7fb404094c',
+        origin: 'subagent',
+        parentId: 'claude:0d4c1f6e-0000-4000-8000-000000000000',
+      });
+      const info = resumeFor(sub, lookup);
+      expect(info.available).toBe(false);
+      expect(info.command).toBeNull();
+      expect(info.reason).toContain('claude:0d4c1f6e-0000-4000-8000-000000000000');
+
+      const launched = launchResume(sub, lookup);
+      expect(launched.ok).toBe(false);
+      expect(launched.command).toBeUndefined();
+
+      const main = resumeFor(session({ id: 'claude:main', provider: 'claude', nativeId: 'main' }), lookup);
+      expect(main.available).toBe(true);
+    } finally {
+      _clearBinCache();
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });

@@ -315,7 +315,8 @@ export const MESSAGE_TEXT_MAX = 10_000;
 export const TOOL_INPUT_MAX = 2_000;
 // v9: 入库前脱敏(INV-898),全量重扫以清除存量明文密钥
 // v11: shell 类工具的命令作为可检索正文(INV-900)
-export const MESSAGE_PARSER_VERSION = 11;
+// v12: OpenCode 2 的 session_message 按 seq 展开助手正文与工具调用(INV-921)
+export const MESSAGE_PARSER_VERSION = 12;
 
 function clipField(text: string, max = MESSAGE_TEXT_MAX): string {
   return text.length > max ? `${text.slice(0, max)}…` : text;

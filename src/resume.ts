@@ -222,10 +222,22 @@ function specFor(provider: string): ResumeSpec | undefined {
   return BINS[provider];
 }
 
+/**
+ * Claude subagent transcript(subagents/agent-*.jsonl)的 id 不是 `claude --resume`
+ * 认的 session id,给出命令必然失败;返回拒绝原因,有父会话时指向它。
+ */
+function unresumableReason(session: SessionRecord): string | null {
+  if (session.provider !== 'claude' || session.origin !== 'subagent') return null;
+  return session.parentId
+    ? `Claude subagent 不能单独 resume,请 resume 父会话 ${session.parentId}`
+    : 'Claude subagent 不能单独 resume';
+}
+
 export function resumeCommand(
   session: SessionRecord,
   lookup: BinLookup = {},
 ): { argv: string[]; display: string; kind: ResumeKind; label: string; env?: Record<string, string> } | null {
+  if (unresumableReason(session)) return null;
   const spec = specFor(session.provider);
   const over = resumeOverride(session, lookup);
   const kind = over.kind ?? spec?.kind ?? 'cli';
@@ -267,6 +279,8 @@ export function resumeCommand(
 }
 
 export function resumeFor(session: SessionRecord, lookup: BinLookup = {}): SessionResume {
+  const refused = unresumableReason(session);
+  if (refused) return { available: false, command: null, reason: refused };
   const spec = specFor(session.provider);
   const over = resumeOverride(session, lookup);
   if (!spec && !over.kind && !over.bin && !over.url && !over.app) {
