@@ -14,6 +14,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import type { Store } from './db.ts';
 import type { PlanSection } from './types.ts';
+import { wholeMtimeMs } from './mtime.ts';
 
 const DIRECT_NAMES = new Set([
   'task_plan.md', 'progress.md', 'findings.md', 'plan.md', 'PLAN.md',
@@ -352,7 +353,7 @@ export async function materializePlanFiles(store: Store, options: { now?: number
     if (prior && prior.missingSince == null && prior.lastSnapshotId
       && prior.repo != null
       && prior.lastSnapshotMtimeMs != null
-      && Math.abs(prior.lastSnapshotMtimeMs - stat.mtimeMs) < 1) {
+      && Math.abs(prior.lastSnapshotMtimeMs - wholeMtimeMs(stat)) < 1) {
       store.touchPlanFile(prior.id, now); // 内容未变,只续命
       continue;
     }
@@ -385,7 +386,7 @@ export async function materializePlanFiles(store: Store, options: { now?: number
       goal: parsed.goal,
       currentPhase: parsed.currentPhase,
       repo,
-      mtimeMs: stat.mtimeMs,
+      mtimeMs: wholeMtimeMs(stat),
       rawHash,
       sections: parsed.sections,
       checkboxChecked: parsed.checkboxChecked,

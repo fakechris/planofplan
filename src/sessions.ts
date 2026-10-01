@@ -59,6 +59,7 @@ import {
   commitWitnessesFromAmpThread,
   recordsFromAmpThread,
 } from './amp-session.ts';
+import { wholeMtimeMs } from './mtime.ts';
 
 /** Subset of usage collect options — kept here to avoid a usage.ts cycle. */
 export interface SessionCollectOptions {
@@ -257,7 +258,7 @@ function walkFiles(root: string, since: number, match: (name: string, path: stri
         visit(path);
       } else if (entry.isFile() && match(entry.name, path)) {
         try {
-          if (statSync(path).mtimeMs >= since - 2 * DAY_MS) files.push(path);
+          if (wholeMtimeMs(statSync(path)) >= since - 2 * DAY_MS) files.push(path);
         } catch {
           /* rotated */
         }
@@ -687,7 +688,7 @@ export function discoverSessionFiles(options: SessionCollectOptions, since: numb
   ];
   return groups.flatMap(({ provider, files }) => files.flatMap((path) => {
     try {
-      return [{ provider, path, mtimeMs: statSync(path).mtimeMs }];
+      return [{ provider, path, mtimeMs: wholeMtimeMs(statSync(path)) }];
     } catch {
       return [];
     }
@@ -1062,7 +1063,7 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
     let readSize = 0;
     try {
       const readStat = statSync(readPath);
-      readMtimeMs = readStat.mtimeMs;
+      readMtimeMs = wholeMtimeMs(readStat);
       readSize = readStat.size;
     } catch {
       /* 正文文件不存在(如 kimi 尚无 wire.jsonl):只落目录元数据 */
@@ -1073,7 +1074,7 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
       try {
         const walStat = statSync(`${readPath}-wal`);
         if (walStat.size > 32) {
-          compositeMtimeMs = Math.max(compositeMtimeMs, walStat.mtimeMs);
+          compositeMtimeMs = Math.max(compositeMtimeMs, wholeMtimeMs(walStat));
           compositeSize += walStat.size;
         }
       } catch {

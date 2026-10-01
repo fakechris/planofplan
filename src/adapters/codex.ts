@@ -17,6 +17,7 @@ import type { AdapterContext, Credential, PlanAdapter, QuotaWindow } from '../ty
 import { fetchQuota } from './http.ts';
 import { AdapterError } from '../types.ts';
 import { clampPct } from './util.ts';
+import { wholeMtimeMs } from '../mtime.ts';
 
 const USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage';
 
@@ -122,7 +123,7 @@ function collectRolloutFiles(root: string): string[] {
       if (entry.isDirectory()) walk(full, depth + 1);
       else if (entry.name.startsWith('rollout-') && entry.name.endsWith('.jsonl')) {
         try {
-          out.push({ path: full, mtimeMs: statSync(full).mtimeMs });
+          out.push({ path: full, mtimeMs: wholeMtimeMs(statSync(full)) });
         } catch { /* 竞态跳过 */ }
       }
     }
@@ -193,7 +194,7 @@ export function harvestLocalRateLimits(root = codexHome(), now = Date.now()): Qu
           ? (doc.payload as { rate_limits?: unknown }).rate_limits ?? doc.payload
           : doc.rate_limits;
         const ts = typeof doc.timestamp === 'string' ? Date.parse(doc.timestamp) : NaN;
-        const atMs = Number.isFinite(ts) ? ts : statSync(file).mtimeMs;
+        const atMs = Number.isFinite(ts) ? ts : wholeMtimeMs(statSync(file));
         const parsed = parseRateLimitsPayload(payload, atMs);
         if (parsed) {
           record = parsed;

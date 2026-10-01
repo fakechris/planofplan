@@ -6,6 +6,7 @@ import { createServer } from '../src/server.ts';
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { wholeMtimeMs } from '../src/mtime.ts';
 
 const SID = 'claude:evidence';
 const TEXT = '保留换行\n```ts\n' + 'x'.repeat(12500) + '\n```\n关键尾部🙂';
@@ -60,7 +61,7 @@ describe('message evidence public interfaces', () => {
       expect(call(store, 'read_message', { source_ref: ref }).source_status).toBe('present_unverified');
       expect(readFileSync(path, 'utf8')).toBe('immutable original source');
       const stat = statSync(path);
-      store.upsertSessionIndexState({ path, size: stat.size, mtimeMs: stat.mtimeMs, parsedBytes: stat.size, lines: 1, parserVersion: 8 });
+      store.upsertSessionIndexState({ path, size: stat.size, mtimeMs: wholeMtimeMs(stat), parsedBytes: stat.size, lines: 1, parserVersion: 8 });
       expect(call(store, 'read_message', { source_ref: ref }).source_status).toBe('indexed_metadata_matches');
       writeFileSync(path, 'changed externally after indexing');
       const changed = call(store, 'read_message', { source_ref: ref });

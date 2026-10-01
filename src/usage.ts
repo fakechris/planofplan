@@ -17,6 +17,7 @@ import { fetchOfficialUsage } from './official-usage.ts';
 import { collectSessionCatalog } from './sessions.ts';
 import { modelPriceFor } from './pricing.ts';
 import { extractAntigravityUsage, antigravityConversationId } from './antigravity-usage.ts';
+import { wholeMtimeMs } from './mtime.ts';
 
 const DAY_MS = 86_400_000;
 
@@ -270,7 +271,7 @@ function jsonlFiles(root: string, since: number): string[] {
             : null;
           if (
             (pathDay != null && pathDay + DAY_MS >= since)
-            || (pathDay == null && stat.mtimeMs >= since - 2 * DAY_MS)
+            || (pathDay == null && wholeMtimeMs(stat) >= since - 2 * DAY_MS)
           ) {
             files.push(path);
           }
@@ -298,7 +299,7 @@ function dbFiles(root: string, since: number): string[] {
       .map((name) => join(root, name))
       .filter((path) => {
         try {
-          return statSync(path).mtimeMs >= since - 2 * 86_400_000;
+          return wholeMtimeMs(statSync(path)) >= since - 2 * 86_400_000;
         } catch {
           return false;
         }
@@ -362,7 +363,7 @@ function parseZcodeRecord(
   until: number,
 ): UsageRecord | null {
   if (value.type !== 'model_io') return null;
-  const timestamp = parseTimestamp(value.completedAt ?? value.startedAt, statSync(file).mtimeMs);
+  const timestamp = parseTimestamp(value.completedAt ?? value.startedAt, wholeMtimeMs(statSync(file)));
   if (!inRange(timestamp, since, until)) return null;
   const response = value.response && typeof value.response === 'object'
     ? value.response as Record<string, unknown>
@@ -403,7 +404,7 @@ function parseKimiCliRecord(
   until: number,
 ): UsageRecord | null {
   if (value.type !== 'usage.record' || !value.usage || typeof value.usage !== 'object') return null;
-  const timestamp = parseTimestamp(value.time, statSync(file).mtimeMs);
+  const timestamp = parseTimestamp(value.time, wholeMtimeMs(statSync(file)));
   if (!inRange(timestamp, since, until)) return null;
   const usage = value.usage as Record<string, unknown>;
   const numeric: NumericUsage = {
@@ -451,7 +452,7 @@ function parseGrokRecord(
     && context.completion_tokens == null
     && context.reasoning_tokens == null
   ) return null;
-  const timestamp = parseTimestamp(value.ts, statSync(file).mtimeMs);
+  const timestamp = parseTimestamp(value.ts, wholeMtimeMs(statSync(file)));
   if (!inRange(timestamp, since, until)) return null;
   const numeric: NumericUsage = {
     inputTokens: finiteNumber(context.prompt_tokens),
@@ -491,7 +492,7 @@ function parseDshRecord(
   if (value.type !== 'assistant/message' || !value.data || typeof value.data !== 'object') return null;
   const data = value.data as Record<string, unknown>;
   if (!data.usage || typeof data.usage !== 'object') return null;
-  const timestamp = parseTimestamp(value.time, statSync(file).mtimeMs);
+  const timestamp = parseTimestamp(value.time, wholeMtimeMs(statSync(file)));
   if (!inRange(timestamp, since, until)) return null;
   const message = data.message && typeof data.message === 'object'
     ? data.message as Record<string, unknown>
@@ -528,7 +529,7 @@ export function scanDshLogs(root: string, since = Date.now() - 30 * DAY_MS, unti
           if (entry.isDirectory()) visit(path);
           else if (entry.isFile() && entry.name.endsWith('.jsonl.zstd')) {
             try {
-              if (statSync(path).mtimeMs >= since - 2 * DAY_MS) result.push(path);
+              if (wholeMtimeMs(statSync(path)) >= since - 2 * DAY_MS) result.push(path);
             } catch { /* rotated file */ }
           }
         }
@@ -1029,7 +1030,7 @@ function dshFiles(root: string, since: number): string[] {
         visit(path);
       } else if (entry.isFile() && entry.name.endsWith('.jsonl.zstd')) {
         try {
-          if (statSync(path).mtimeMs >= since - 2 * DAY_MS) result.push(path);
+          if (wholeMtimeMs(statSync(path)) >= since - 2 * DAY_MS) result.push(path);
         } catch {
           /* file may be rotated while scanning */
         }
@@ -1113,7 +1114,7 @@ function localScanFiles(options: CollectUsageOptions, since: number): LocalScanF
         provider,
         project,
         size: stat.size,
-        mtimeMs: stat.mtimeMs,
+        mtimeMs: wholeMtimeMs(stat),
         scannedAt: 0,
         scannedSince: 0,
         parsedBytes: 0,
@@ -1131,7 +1132,7 @@ function scanAntigravityDb(path: string, since: number, until: number): UsageRec
   if (rows.length === 0) return [];
   let mtime = Date.now();
   try {
-    mtime = statSync(path).mtimeMs;
+    mtime = wholeMtimeMs(statSync(path));
   } catch {
     /* 用当前时刻兜底 */
   }
