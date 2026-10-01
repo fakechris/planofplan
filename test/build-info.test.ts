@@ -26,4 +26,45 @@ describe('build info', () => {
       bundlePath: '/Applications/planofplan.app',
     });
   });
+
+  const plist = `<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+	<key>CFBundleShortVersionString</key>
+	<string>0.2.0</string>
+	<key>PlanofplanBuildTimestamp</key>
+	<string>2026-10-01T13:08:20Z</string>
+	<key>PlanofplanCommitSHA</key>
+	<string>e9598cbaf55d4f140bb04f9c094ce156f7b4a45c</string>
+	<key>PlanofplanCommitShortSHA</key>
+	<string>e9598cb</string>
+</dict>
+</plist>`;
+  const daemon = '/Applications/planofplan.app/Contents/MacOS/planofplan-daemon';
+
+  test('a daemon started by launchd (no env) reads its bundle Info.plist', () => {
+    const read = (path: string): string => {
+      expect(path).toBe('/Applications/planofplan.app/Contents/Info.plist');
+      return plist;
+    };
+    expect(getBuildInfo({}, daemon, read)).toEqual({
+      commitSha: 'e9598cbaf55d4f140bb04f9c094ce156f7b4a45c',
+      shortCommitSha: 'e9598cb',
+      buildTimestamp: '2026-10-01T13:08:20Z',
+      bundlePath: '/Applications/planofplan.app',
+      appVersion: '0.2.0',
+    });
+  });
+
+  test('env set by the menubar app still wins over the plist', () => {
+    expect(getBuildInfo({ PLANOFPPLAN_BUILD_COMMIT: 'abcdef0123456789abcdef0123456789abcdef01' }, daemon, () => plist))
+      .toMatchObject({ commitSha: 'abcdef0123456789abcdef0123456789abcdef01', shortCommitSha: 'abcdef0' });
+  });
+
+  test('outside an app bundle, or with an unreadable plist, it stays dev', () => {
+    expect(getBuildInfo({}, '/Users/me/.bun/bin/bun', () => plist).commitSha).toBe('dev');
+    expect(getBuildInfo({}, daemon, () => { throw new Error('ENOENT'); }).commitSha).toBe('dev');
+    expect(getBuildInfo({}, daemon, () => '<plist><dict></dict></plist>').commitSha).toBe('dev');
+  });
 });
+
