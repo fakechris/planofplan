@@ -1121,6 +1121,8 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
         try {
           store.upsertSessionMessages(messagesFromZcodeDb(file.path, row.nativeId, row.id));
           store.upsertSessionCommitWitnesses(commitWitnessesFromZcodeDb(file.path, row.nativeId, row.id));
+          // part/message 表与 opencode 同构,文件触碰沿用同一抽取(INV-902)
+          store.upsertSessionTouches(touchesFromOpencodeDb(file.path, row.nativeId, row.id, row.cwd));
         } catch {
           /* 单个 session 的消息抽取失败不拖垮目录 */
         }

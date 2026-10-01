@@ -240,7 +240,10 @@ function turnsFromZcodeDb(path: string, nativeId: string): TranscriptTurn[] {
     for (const row of rows) {
       try {
         const message = JSON.parse(row.message) as { role?: string };
-        const part = JSON.parse(row.part) as { type?: string; text?: string; name?: string };
+        const part = JSON.parse(row.part) as {
+          type?: string; text?: string; name?: string; tool?: string; input?: unknown;
+          state?: { input?: unknown };
+        };
         const role = message.role === 'user' ? 'user' : message.role === 'assistant' ? 'assistant' : 'tool';
         if (part.type === 'text' && part.text) pushTurn(turns, role === 'tool' ? 'assistant' : role, part.text);
         else if (part.type === 'tool' || part.type === 'tool-call') {
@@ -310,7 +313,8 @@ export async function readTranscript(session: SessionRecord): Promise<SessionTra
 export const MESSAGE_TEXT_MAX = 10_000;
 export const TOOL_INPUT_MAX = 2_000;
 // v9: 入库前脱敏(INV-898),全量重扫以清除存量明文密钥
-export const MESSAGE_PARSER_VERSION = 9;
+// v10: grok backend_tool_call 的工具名与参数(INV-902)
+export const MESSAGE_PARSER_VERSION = 10;
 
 function clipField(text: string, max = MESSAGE_TEXT_MAX): string {
   return text.length > max ? `${text.slice(0, max)}…` : text;
@@ -486,8 +490,12 @@ function messagesFromGrokRecord(sessionId: string, record: Record<string, unknow
     return row ? [row] : [];
   }
   if (type === 'backend_tool_call' || type === 'tool_call') {
-    const name = typeof record.name === 'string' ? record.name : 'tool';
-    return [toolRow(sessionId, id, seq, name, record.arguments ?? record.input, ts)];
+    // backend_tool_call(服务端工具,如网页搜索)没有顶层 name/arguments:
+    // 名字在 kind.tool_type,参数在 kind.action(INV-902)
+    const kind = record.kind && typeof record.kind === 'object' ? record.kind as { tool_type?: unknown; action?: unknown } : null;
+    const name = typeof record.name === 'string' ? record.name
+      : typeof kind?.tool_type === 'string' ? kind.tool_type : 'tool';
+    return [toolRow(sessionId, id, seq, name, record.arguments ?? record.input ?? kind?.action, ts)];
   }
   return [];
 }
@@ -595,14 +603,19 @@ export function messagesFromZcodeDb(path: string, nativeId: string, sessionId: s
       seq += 1;
       try {
         const message = JSON.parse(row.message) as { role?: string };
-        const part = JSON.parse(row.part) as { type?: string; text?: string; name?: string };
+        const part = JSON.parse(row.part) as {
+          type?: string; text?: string; name?: string; tool?: string; input?: unknown;
+          state?: { input?: unknown };
+        };
         const id = `${sessionId}:${row.part_id}`;
         const role = message.role === 'user' ? 'user' : 'assistant';
         if (part.type === 'text' && part.text) {
           const text = textRow(sessionId, id, seq, role, part.text, row.created);
           if (text) rows.push(text);
         } else if (part.type === 'tool' || part.type === 'tool-call') {
-          rows.push(toolRow(sessionId, id, seq, part.name ?? 'tool', part.text ?? part.name ?? '', row.created));
+          // ZCode 与 opencode 同构:工具名在 part.tool,入参在 part.state.input(INV-902)。
+          // part.name / part.text 是旧假设,保留作兜底。
+          rows.push(toolRow(sessionId, id, seq, part.tool ?? part.name ?? 'tool', part.state?.input ?? part.input ?? part.text ?? '', row.created));
         }
       } catch {
         /* 单条 part 解析失败跳过 */
