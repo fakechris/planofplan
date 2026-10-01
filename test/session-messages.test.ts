@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { openMemoryDb } from '../src/db.ts';
 import { collectSessionCatalog, sessionKey } from '../src/sessions.ts';
 import { messagesFromRecords, messagesFromZcodeDb } from '../src/transcript.ts';
+import { touchesFromOpencodeDb } from '../src/opencode-session.ts';
 import type { SessionMessageRow } from '../src/types.ts';
 
 function tempRoot(): string {
@@ -300,5 +301,50 @@ describe('collectSessionCatalog message indexing', () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+// INV-902: tool calls whose name and input live where the parser was not looking.
+describe('tool calls are read from where each provider puts them', () => {
+  function zcodeDb(root: string, parts: Array<{ id: string; data: unknown }>): string {
+    const { Database } = require('bun:sqlite');
+    const dbPath = join(root, 'db.sqlite');
+    const db = new Database(dbPath);
+    db.exec(`
+      CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
+      CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, sequence INTEGER, time_created INTEGER, data TEXT);
+    `);
+    db.query('INSERT INTO message VALUES (?, ?, ?, ?)').run('m1', 's1', 100, JSON.stringify({ role: 'assistant' }));
+    parts.forEach((part, i) => db.query('INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)').run(part.id, 'm1', 's1', i, 100 + i, JSON.stringify(part.data)));
+    db.close();
+    return dbPath;
+  }
+
+  test('zcode: the tool name is part.tool and its input is part.state.input', () => {
+    const root = tempRoot();
+    try {
+      const path = zcodeDb(root, [
+        { id: 'p1', data: { type: 'tool', callID: 'c1', tool: 'Bash', state: { status: 'completed', input: { command: 'ssh oracle_5 docker ps', description: 'list' } } } },
+        { id: 'p2', data: { type: 'tool', callID: 'c2', tool: 'Edit', state: { status: 'completed', input: { file_path: '/repo/src/a.ts', old_string: 'a', new_string: 'b' } } } },
+      ]);
+      const rows = messagesFromZcodeDb(path, 's1', 'zcode:s1');
+      expect(rows.map((row) => row.toolName)).toEqual(['Bash', 'Edit']);
+      expect(rows[0]?.text).toContain('ssh oracle_5 docker ps');
+      expect(rows[1]?.text).toContain('/repo/src/a.ts');
+      // The same parts give file touches: the part/message tables are opencode's.
+      const touches = touchesFromOpencodeDb(path, 's1', 'zcode:s1', '/repo');
+      expect(touches.map((touch) => [touch.op, touch.filePath])).toEqual([['edit', '/repo/src/a.ts']]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('grok: a backend tool call names itself in kind.tool_type and carries kind.action', () => {
+    const rows = messagesFromRecords('grok', 'grok:s1', [
+      { type: 'backend_tool_call', kind: { tool_type: 'web_search', action: { type: 'search', query: 'bun sqlite trigram' }, id: 'x', status: 'completed' } },
+      { type: 'tool_call', name: 'run_terminal_cmd', arguments: { command: 'ls' } },
+    ]);
+    expect(rows.map((row) => row.toolName)).toEqual(['web_search', 'run_terminal_cmd']);
+    expect(rows[0]?.text).toContain('bun sqlite trigram');
   });
 });
