@@ -264,6 +264,19 @@ launchctl print gui/$(id -u)/local.planofplan.daemon      # 查看守护状态
 - 开启守护后不要再手动 `bun run serve`：默认端口不同（9288 vs 9291），会出现两个
   daemon 同时轮询并写同一个 SQLite 库。
 
+## 监听地址与远程访问
+
+索引里是本机全部 coding agent 会话，所以 daemon 默认只监听回环地址（`127.0.0.1`
+与 `::1`），局域网与 Tailscale 上的其他机器连不上。Host 头校验只防浏览器 DNS
+rebinding，不是鉴权。
+
+确需远程访问时同时设置两个环境变量；只设地址不设 token 会拒绝启动：
+
+```bash
+PLANOFPLAN_BIND=100.x.y.z PLANOFPLAN_TOKEN=<至少 16 字符> bun src/cli.ts serve
+# 客户端每个请求带 Authorization: Bearer <token>；远程 Host 还需加入 PLANOFPLAN_ALLOWED_HOSTS
+```
+
 ## 配置
 
 运行时状态全部在 `~/.planofplan/`（可用 `PLANOFPPLAN_HOME` 改）：

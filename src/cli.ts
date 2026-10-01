@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { resolveBind } from './bind.ts';
 import { join } from 'node:path';
 import { ensureHome, loadConfig } from './config.ts';
 import { Store, openDb, openMemoryDb } from './db.ts';
@@ -224,6 +225,8 @@ async function pricingCmd(): Promise<void> {
 // ── serve ──────────────────────────────────────────────────────────
 async function serve(): Promise<void> {
   const f = flags();
+  // 先于开库与调度:地址配置错就不该启动任何东西
+  const bind = resolveBind();
   const cfg = loadConfig();
   const port = f.port ?? cfg.port;
   // deep link(handoff 等)用 cfg.port 拼 URL,必须与实际绑定端口一致
@@ -250,11 +253,20 @@ async function serve(): Promise<void> {
   }
 
   // live = 非 demo:启动文件监听,session 目录有写入就自动增量索引(见 server.ts)
-  const server = createServer(store, scheduler, cfg, { live: !f.demo, startupScan: !f.demo });
+  const server = createServer(store, scheduler, cfg, { live: !f.demo, startupScan: !f.demo, authToken: bind.token });
   // idleTimeout 提到 2 分钟:handoff 的 LLM 摘要合成可能超过默认 10s,
   // Bun.serve 会在 handler 无输出时掐掉请求(线上实测踩过)
-  Bun.serve({ port, fetch: server.fetch, idleTimeout: 120 });
-  console.log(`planofplan 已启动: http://localhost:${port}${f.demo ? '  (demo 数据，内存库，不落盘)' : ''}`);
+  // 默认只绑回环(127.0.0.1 与 ::1):索引里是本机全部 agent 会话。绑其他地址须同时配 token(INV-897)
+  for (const [index, hostname] of bind.hostnames.entries()) {
+    try {
+      Bun.serve({ port, hostname, fetch: server.fetch, idleTimeout: 120 });
+    } catch (error) {
+      // 首个地址失败即退出;额外的 ::1 在没有 IPv6 的机器上可以缺席
+      if (index === 0) throw error;
+      console.error(`planofplan: 未能监听 ${hostname}:${port}(${error instanceof Error ? error.message : String(error)})`);
+    }
+  }
+  console.log(`planofplan 已启动: http://localhost:${port}  (监听 ${bind.hostnames.join(', ')})${bind.token ? '  (需 Bearer token)' : ''}${f.demo ? '  (demo 数据，内存库，不落盘)' : ''}`);
   if (f.demo) console.log('提示：demo 模式用内置示例数据预览界面；真实数据请配置 MINIMAX_CODING_API_KEY 后去掉 --demo 启动。');
 
 }
