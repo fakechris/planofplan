@@ -183,3 +183,87 @@ describe('requirement evidence at handoff boundaries', () => {
     } finally { store.close(); }
   });
 });
+
+describe('conversation tail in handoffs (INV-916)', () => {
+  function withMessages() {
+    const { store } = fixture();
+    const rows = [
+      { seq: 1, role: 'user', kind: 'text', text: 'A: repair authentication please' },
+      { seq: 2, role: 'tool', kind: 'tool_use', toolName: 'Bash', text: 'bun test auth' },
+      { seq: 5, role: 'assistant', kind: 'text', text: 'A is fixed except the refresh path' },
+      { seq: 10, role: 'user', kind: 'text', text: 'B: export invoices as CSV' },
+      { seq: 12, role: 'assistant', kind: 'text', text: 'B: invoices export written to export.ts' },
+    ];
+    store.upsertSessionMessages(rows.map((row, i) => ({
+      id: `m${i}`, sessionId: SID, seq: row.seq, role: row.role as 'user', kind: row.kind as 'text',
+      toolName: (row as { toolName?: string }).toolName ?? null, text: row.text, timestamp: now - 9000 + row.seq,
+      model: null, inputTokens: null, outputTokens: null,
+    })));
+    return store;
+  }
+
+  test('off by default: the package is unchanged unless a tail budget is asked for', () => {
+    const store = withMessages();
+    try {
+      const plain = buildHandoffPackage(store, 'session', SID, 'http://localhost/')!.markdown;
+      expect(plain).not.toContain('## 最近对话');
+      const withTail = buildHandoffPackage(store, 'session', SID, 'http://localhost/', { tailChars: 4000 })!.markdown;
+      expect(withTail).toContain('## 最近对话');
+      expect(withTail).toContain('B: invoices export written to export.ts');
+      expect(withTail.length - plain.length).toBeLessThanOrEqual(4000 + 2);
+    } finally { store.close(); }
+  });
+
+  test('a requirement handoff only shows conversation from its own span', () => {
+    const store = withMessages();
+    try {
+      const text = buildHandoffPackage(store, 'requirement', 'req:A', 'http://localhost/', { tailChars: 4000 })!.markdown;
+      expect(text).toContain('A is fixed except the refresh path');
+      expect(text).not.toContain('export invoices as CSV');
+    } finally { store.close(); }
+  });
+
+  test('files: tool calls without touches read "none recorded"; no tool calls at all reads Unknown', () => {
+    const store = withMessages();
+    try {
+      expect(buildHandoffPackage(store, 'requirement', 'req:A', 'http://localhost/')!.markdown).toContain('无记录');
+      const noTools = buildHandoffPackage(store, 'requirement', 'req:B', 'http://localhost/')!.markdown;
+      expect(noTools).toMatch(/涉及文件[\s\S]*Unknown/);
+    } finally { store.close(); }
+  });
+
+  test('session_handoff takes tail_chars; read_session can return a budgeted tail', () => {
+    const store = withMessages();
+    try {
+      expect(call(store, 'session_handoff', { session_id: SID }).content[0]!.text).not.toContain('## 最近对话');
+      expect(call(store, 'session_handoff', { session_id: SID, tail_chars: 4000 }).content[0]!.text).toContain('## 最近对话');
+      const tail = call(store, 'read_session', { session_id: SID, tail_chars: 3000 }).content[0]!.text;
+      expect(tail).toContain('## 最近对话');
+      expect(tail.length).toBeLessThanOrEqual(3000);
+      expect(call(store, 'read_session', { session_id: SID, tail_chars: 3000, offset: 2 }).isError).toBe(true);
+      expect(call(store, 'session_handoff', { session_id: SID, tail_chars: 10 }).isError).toBe(true);
+    } finally { store.close(); }
+  });
+
+  test('hidden sessions still refuse to export, tail or not', () => {
+    const store = withMessages();
+    try {
+      store.setSessionHidden(SID, true);
+      expect(buildHandoffPackage(store, 'session', SID, 'http://localhost/', { tailChars: 4000 })).toBeNull();
+      expect(call(store, 'read_session', { session_id: SID, tail_chars: 3000 }).isError).toBe(true);
+    } finally { store.close(); }
+  });
+
+  test('HTTP handoff adds the tail only when tail_chars is given, and rejects out-of-range budgets', async () => {
+    const store = withMessages();
+    try {
+      const app = createServer(store, { refreshPlan: async () => ({ ok: true, slug: 'test', windows: [] }) } as never, { port: 9291, plans: [] });
+      const plain = await (await app.request(`http://localhost/api/handoff/session/${encodeURIComponent(SID)}`)).json() as { markdown: string };
+      expect(plain.markdown).not.toContain('## 最近对话');
+      const tailed = await (await app.request(`http://localhost/api/handoff/session/${encodeURIComponent(SID)}?tail_chars=4000`)).json() as { markdown: string };
+      expect(tailed.markdown).toContain('## 最近对话');
+      expect((await app.request(`http://localhost/api/handoff/session/${encodeURIComponent(SID)}?tail_chars=99`)).status).toBe(400);
+    } finally { store.close(); }
+  });
+});
+

@@ -6,7 +6,7 @@ import { buildUsageReport } from './usage.ts';
 import { searchSessions } from './sessions.ts';
 import { getBuildInfo } from './build-info.ts';
 import { readRequirementEvidence } from './requirement-evidence.ts';
-import { buildHandoffPackage } from './handoff.ts';
+import { buildHandoffPackage, sessionTail } from './handoff.ts';
 import { searchMessageEvidence, readMessageEvidence, listMessageEvidencePage, eligibleMessageSessionIds, MESSAGE_FILTER_SCHEMA, SOURCE_REF_SCHEMA, MessageEvidenceError } from './message-evidence.ts';
 import { buildLineageReport } from './lineage-report.ts';
 import { existsSync } from 'node:fs';
@@ -216,6 +216,18 @@ function fmtMsgTime(ts: number | null): string {
   return new Date(ts).toISOString().slice(5, 16).replace('T', ' ');
 }
 
+const TAIL_MIN = 2_000;
+const TAIL_MAX = 16_000;
+
+function tailCharsArg(args: Record<string, unknown>): number | undefined {
+  if (args.tail_chars === undefined) return undefined;
+  const n = Number(args.tail_chars);
+  if (!Number.isInteger(n) || n < TAIL_MIN || n > TAIL_MAX) {
+    throw new ToolArgError(`tail_chars must be an integer between ${TAIL_MIN} and ${TAIL_MAX}.`);
+  }
+  return n;
+}
+
 function toolReadSession(store: Store, args: Record<string, unknown>): string {
   const sessionId = typeof args.session_id === 'string' ? args.session_id.trim() : '';
   if (!sessionId) throw new ToolArgError('session_id is required (get it from session_search / repo_lineage result lines)');
@@ -229,6 +241,13 @@ function toolReadSession(store: Store, args: Record<string, unknown>): string {
   }
   if (hiddenSessionIds(store).has(sessionId)) {
     throw new ToolArgError(`session is hidden by the user: ${sessionId}`);
+  }
+  const tailChars = tailCharsArg(args);
+  if (tailChars != null) {
+    if (Object.keys(args).some((key) => key !== 'session_id' && key !== 'tail_chars')) {
+      throw new ToolArgError('tail_chars cannot be combined with offset, limit or filters; page with offset instead.');
+    }
+    return sessionTail(store, sessionId, tailChars);
   }
   const { rows, total } = listMessageEvidencePage(store, sessionId, offset, limit, args);
   if (total === 0) {
@@ -531,6 +550,7 @@ const TOOLS: ToolDef[] = [
       properties: {
         session_id: { type: 'string', minLength: 1, description: '会话级交接，包含该会话所有需求' },
         requirement_id: { type: 'string', minLength: 1, description: '单个需求交接，使用 requirement_status 返回的需求 ID' },
+        tail_chars: { type: 'integer', minimum: TAIL_MIN, maximum: TAIL_MAX, description: '可选：追加"最近对话"段的字符预算（最近原文、较早一行、更早只计数并给续读 offset）；不给则不加' },
       },
       oneOf: [{ required: ['session_id'] }, { required: ['requirement_id'] }],
       additionalProperties: false,
@@ -540,14 +560,15 @@ const TOOLS: ToolDef[] = [
       const hasRequirement = Object.hasOwn(args, 'requirement_id');
       const id = hasSession ? args.session_id : args.requirement_id;
       if (hasSession === hasRequirement || typeof id !== 'string' || !id.trim()
-        || Object.keys(args).some((key) => key !== 'session_id' && key !== 'requirement_id')) {
+        || Object.keys(args).some((key) => key !== 'session_id' && key !== 'requirement_id' && key !== 'tail_chars')) {
         throw new ToolArgError('Provide exactly one non-empty session_id or requirement_id.');
       }
+      const tailChars = tailCharsArg(args);
       const type = hasSession ? 'session' : 'requirement';
       const deepLink = `http://localhost:${cfg.port}/#${hasSession ? 'sessions' : 'requirements'}/${encodeURIComponent(id.trim())}`;
-      const pkg = buildHandoffPackage(store, type, id.trim(), deepLink);
+      const pkg = buildHandoffPackage(store, type, id.trim(), deepLink, { tailChars });
       if (!pkg) throw new ToolArgError('Source unavailable (unknown, hidden or deleted).');
-      const maxChars = 24_000;
+      const maxChars = 24_000 + (tailChars ?? 0);
       return pkg.markdown.length <= maxChars ? pkg.markdown
         : `${pkg.markdown.slice(0, maxChars)}\n\n[Handoff truncated at ${maxChars} characters. This is incomplete context: use a specific requirement_id, read_session or ${deepLink} for the remaining evidence.]`;
     },
@@ -603,6 +624,7 @@ const TOOLS: ToolDef[] = [
         offset: { type: 'number', description: '过滤后消息页序(1起)，不是源seq；续读使用页尾值' },
         limit: { type: 'number', description: '本页最多返回条数,默认 30,最大 100' },
         role: MESSAGE_FILTER_SCHEMA.role,
+        tail_chars: { type: 'integer', minimum: TAIL_MIN, maximum: TAIL_MAX, description: '续接用:返回会话结尾的分层摘录(最近原文、较早一行、更早只计数)，不超过该字符预算；不能与 offset/limit/过滤条件同用' },
       },
       required: ['session_id'],
       additionalProperties: false,
