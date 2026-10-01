@@ -241,6 +241,19 @@ CREATE TABLE IF NOT EXISTS session_user_meta (
   updated_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_session_user_meta_file ON session_user_meta(file_path);
+-- 额度告警状态(INV-922):用户状态,扫描与重建都不碰。一行 = 该窗口本周期已提醒;
+-- 删除 = 重新武装;delivered_at 为空 = 等待菜单栏 app 发通知。
+CREATE TABLE IF NOT EXISTS quota_alerts (
+  key TEXT PRIMARY KEY,
+  plan_slug TEXT NOT NULL,
+  window TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  value REAL,
+  threshold REAL,
+  message TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  delivered_at INTEGER
+);
 -- 文件 touch 行为层:tool_use 入参里的结构化文件路径(Bash command 不解析)。
 CREATE TABLE IF NOT EXISTS session_file_touches (
   id TEXT PRIMARY KEY,
@@ -413,6 +426,18 @@ function rowToWindow(r: SnapshotRow): QuotaWindow {
     note: r.note,
     fetchedAt: r.fetched_at,
   };
+}
+
+export interface QuotaAlertRecord {
+  key: string;
+  planSlug: string;
+  window: string;
+  kind: 'usage' | 'balance';
+  value: number | null;
+  threshold: number | null;
+  message: string;
+  createdAt: number;
+  deliveredAt?: number | null;
 }
 
 export class Store {
@@ -1551,6 +1576,46 @@ export class Store {
       this.db.exec('ROLLBACK');
       throw error;
     }
+  }
+
+  quotaAlertKeys(): string[] {
+    return (this.db.query('SELECT key FROM quota_alerts ORDER BY key').all() as Array<{ key: string }>).map((row) => row.key);
+  }
+
+  insertQuotaAlerts(rows: QuotaAlertRecord[]): void {
+    if (rows.length === 0) return;
+    const insert = this.db.query(`INSERT OR IGNORE INTO quota_alerts
+      (key, plan_slug, window, kind, value, threshold, message, created_at, delivered_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)`);
+    this.withTransaction(() => {
+      for (const row of rows) {
+        insert.run(row.key, row.planSlug, row.window, row.kind, row.value, row.threshold, row.message, row.createdAt);
+      }
+    });
+  }
+
+  deleteQuotaAlerts(keys: string[]): void {
+    if (keys.length === 0) return;
+    const del = this.db.query('DELETE FROM quota_alerts WHERE key = ?');
+    this.withTransaction(() => { for (const key of keys) del.run(key); });
+  }
+
+  pendingQuotaAlerts(): QuotaAlertRecord[] {
+    return this.db.query(`SELECT key, plan_slug AS planSlug, window, kind, value, threshold, message,
+      created_at AS createdAt, delivered_at AS deliveredAt FROM quota_alerts WHERE delivered_at IS NULL ORDER BY created_at, key`)
+      .all() as QuotaAlertRecord[];
+  }
+
+  recentQuotaAlerts(limit = 20): QuotaAlertRecord[] {
+    return this.db.query(`SELECT key, plan_slug AS planSlug, window, kind, value, threshold, message,
+      created_at AS createdAt, delivered_at AS deliveredAt FROM quota_alerts ORDER BY created_at DESC LIMIT ?`)
+      .all(limit) as QuotaAlertRecord[];
+  }
+
+  ackQuotaAlerts(keys: string[], now: number): void {
+    if (keys.length === 0) return;
+    const ack = this.db.query('UPDATE quota_alerts SET delivered_at = ? WHERE key = ? AND delivered_at IS NULL');
+    this.withTransaction(() => { for (const key of keys) ack.run(now, key); });
   }
 
   close(): void {

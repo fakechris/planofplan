@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import ServiceManagement
+@preconcurrency import UserNotifications
 import SweetCookieKit
 
 struct Overview: Decodable {
@@ -962,6 +963,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         rebuildMenu()
 
         ensureDaemon()
+        setUpQuotaAlertNotifications()
         refreshOverview()
         offerAutoLaunchIfNeeded()
         pollTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
@@ -1329,6 +1331,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 NSLog("planofplan: invalid overview response: \(error)")
             }
             self.refreshUISafely()
+            self.checkQuotaAlerts()
             self.fetchUsageSummary()
             self.startSafariPermissionOnboardingIfNeeded()
             self.bootstrapBrowserSessions()
@@ -1872,6 +1875,99 @@ extension AppDelegate: NSMenuDelegate {
             rebuildMenu()
             updateMenuBarIcon()
         }
+    }
+}
+
+// ── 额度告警通知(INV-922)──────────────────────────────────────────
+// daemon 判定"该不该提醒"(每窗口每周期一次、过期读数不提醒),这里只负责发系统
+// 通知:每次轮询 POST /api/alerts/check 报告通知权限并取待发告警,发出后 ack。
+// 未授权时不 ack,告警留在 daemon 里,设置页显示为"待通知"。
+private struct PendingQuotaAlert: Decodable {
+    let key: String
+    let message: String
+}
+
+private struct QuotaAlertCheck: Decodable {
+    let pending: [PendingQuotaAlert]
+}
+
+extension AppDelegate: UNUserNotificationCenterDelegate {
+    /// UNUserNotificationCenter 只能在 .app bundle 里用(裸二进制会崩)。
+    private var notificationsAvailable: Bool { Bundle.main.bundleIdentifier != nil }
+
+    fileprivate func setUpQuotaAlertNotifications() {
+        guard notificationsAvailable else { return }
+        let center = UNUserNotificationCenter.current()
+        center.delegate = self
+        Task { @MainActor in
+            _ = try? await center.requestAuthorization(options: [.alert, .sound])
+        }
+    }
+
+    fileprivate func checkQuotaAlerts() {
+        guard notificationsAvailable else {
+            postAlertCheck(notifier: "unavailable")
+            return
+        }
+        Task { @MainActor in
+            let settings = await UNUserNotificationCenter.current().notificationSettings()
+            let status: String
+            switch settings.authorizationStatus {
+            case .authorized, .provisional, .ephemeral: status = "authorized"
+            case .denied: status = "denied"
+            case .notDetermined: status = "not_determined"
+            @unknown default: status = "unavailable"
+            }
+            postAlertCheck(notifier: status)
+        }
+    }
+
+    private func postAlertCheck(notifier: String) {
+        let body = try? JSONSerialization.data(withJSONObject: ["notifier": notifier])
+        request(path: "/api/alerts/check", method: "POST", body: body) { [weak self] data, status in
+            guard let self, status == 200, notifier == "authorized", let data,
+                  let check = try? JSONDecoder().decode(QuotaAlertCheck.self, from: data),
+                  !check.pending.isEmpty else { return }
+            Task { @MainActor in await self.deliverQuotaAlerts(check.pending) }
+        }
+    }
+
+    private func deliverQuotaAlerts(_ alerts: [PendingQuotaAlert]) async {
+        var delivered: [String] = []
+        for alert in alerts {
+            let content = UNMutableNotificationContent()
+            content.title = "planofplan 额度告警"
+            content.body = alert.message
+            content.sound = .default
+            content.userInfo = ["url": "http://127.0.0.1:\(port)/#plans"]
+            let request = UNNotificationRequest(identifier: "planofplan.alert.\(alert.key)", content: content, trigger: nil)
+            do {
+                try await UNUserNotificationCenter.current().add(request)
+                delivered.append(alert.key)
+            } catch {
+                NSLog("planofplan: quota alert notification failed: \(error)")
+            }
+        }
+        guard !delivered.isEmpty, let body = try? JSONSerialization.data(withJSONObject: ["keys": delivered]) else { return }
+        request(path: "/api/alerts/ack", method: "POST", body: body) { _, _ in }
+    }
+
+    /// accessory app 常被视为前台:仍然弹横幅。
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification
+    ) async -> UNNotificationPresentationOptions {
+        [.banner, .list, .sound]
+    }
+
+    /// 点击告警打开 Dashboard 的额度页。
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse
+    ) async {
+        guard let raw = response.notification.request.content.userInfo["url"] as? String,
+              let url = URL(string: raw) else { return }
+        await MainActor.run { _ = NSWorkspace.shared.open(url) }
     }
 }
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { resolveBind } from './bind.ts';
 import { join } from 'node:path';
-import { ensureHome, loadConfig } from './config.ts';
+import { ensureHome, loadConfig, saveAlertsConfig } from './config.ts';
 import { Store, openDb, openMemoryDb } from './db.ts';
 import { Scheduler, buildOverview, formatResetCountdown, type OverviewPlan } from './core.ts';
 import { createServer } from './server.ts';
@@ -20,6 +20,7 @@ import { existsSync, statSync, renameSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { sessionProject } from './repos.ts';
 import { searchSkills, syncSkillsCatalog } from './skills.ts';
+import { DEFAULT_ALERT_SETTINGS } from './quota-alerts.ts';
 
 const argv = process.argv.slice(2);
 
@@ -48,6 +49,7 @@ function help(): void {
   planofplan pricing refresh                拉取 LiteLLM 模型价格快照(离线时用内置家族表估算)
   planofplan hook install [--repo 路径]     装 commit trailer 钩子(agent 提交自动声明 session)
   planofplan pricing status                 显示价格快照状态
+  planofplan alerts [--usage N|off] [--balance N|off]  查看/设置额度告警阈值(通知由菜单栏 app 发出)
   planofplan status                         各 plan 调度/凭据/最近抓取状态
   planofplan refresh [slug]                 手动刷新一个/全部 plan
   planofplan browser-auth                  读取 Safari kimi-auth 并刷新 Kimi
@@ -349,6 +351,55 @@ async function refresh(): Promise<void> {
   }
 }
 
+/** planofplan alerts [--usage <1-100|off>] [--balance <金额|off>]:查看/设置额度告警阈值(INV-922)。 */
+async function alertsCmd(): Promise<void> {
+  const cfg = loadConfig();
+  const next = { ...(cfg.alerts ?? DEFAULT_ALERT_SETTINGS) };
+  let changed = false;
+  for (let i = 1; i < argv.length; i++) {
+    const flag = argv[i];
+    if (flag !== '--usage' && flag !== '--balance') continue;
+    const raw = argv[++i];
+    const value = raw === 'off' ? null : Number(raw);
+    const valid = value === null
+      || (Number.isFinite(value) && (flag === '--usage' ? value >= 1 && value <= 100 : value >= 0));
+    if (!valid) {
+      console.error(`${flag} 需要 ${flag === '--usage' ? '1-100' : '>= 0 的金额'} 或 off`);
+      process.exitCode = 1;
+      return;
+    }
+    if (flag === '--usage') next.usagePercent = value;
+    else next.balance = value;
+    changed = true;
+  }
+  if (changed) {
+    saveAlertsConfig(next);
+    // 运行中的 daemon 内存里有一份配置:尽力同步,失败只提示需重启。
+    // 自定义 PLANOFPPLAN_HOME(测试/隔离环境)时不碰本机 daemon,免得改到真实配置。
+    let applied = false;
+    for (const port of process.env.PLANOFPPLAN_HOME ? [] : new Set([9291, cfg.port])) {
+      try {
+        const res = await fetch(`http://127.0.0.1:${port}/api/alerts/settings`, {
+          method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(next),
+          signal: AbortSignal.timeout(2_000),
+        });
+        if (res.ok) applied = true;
+      } catch { /* daemon 未运行 */ }
+    }
+    console.log(applied ? '已保存并同步到运行中的 daemon' : '已保存(未同步到运行中的 daemon,下次启动生效)');
+  }
+  console.log(`用量告警: ${next.usagePercent == null ? '关闭' : `≥ ${next.usagePercent}%`}`);
+  console.log(`余额告警: ${next.balance == null ? '关闭' : `≤ ${next.balance}`}`);
+  const store = openDb(join(ensureHome(), 'planofplan.db'));
+  const recent = store.recentQuotaAlerts(10);
+  if (recent.length > 0) {
+    console.log('最近告警:');
+    for (const alert of recent) {
+      console.log(`  ${new Date(alert.createdAt).toLocaleString('zh-CN', { hour12: false })}  ${alert.message}${alert.deliveredAt ? '' : '  (待通知)'}`);
+    }
+  }
+}
+
 async function browserAuth(): Promise<void> {
   const result = await refreshKimiBrowserSession('safari');
   if (!result.token) {
@@ -540,6 +591,9 @@ switch (cmd) {
     break;
   case 'refresh':
     await refresh();
+    break;
+  case 'alerts':
+    await alertsCmd();
     break;
   case 'browser-auth':
     await browserAuth();

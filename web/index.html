@@ -252,6 +252,17 @@
           <div class="muted" id="settingsLlmHint"></div>
         </div>
         <div class="session-attrs">
+          <h3>额度告警</h3>
+          <p class="settings-copy">窗口用量达到阈值、余额降到阈值时，由菜单栏 app 发系统通知；每个窗口每个周期只提醒一次，读数过期或失败不提醒。留空表示关闭。</p>
+          <div class="handoff-llm">
+            <label>用量 ≥ <input id="alertUsageInput" type="number" min="1" max="100" step="1" size="4" placeholder="关闭" />%</label>
+            <label>余额 ≤ <input id="alertBalanceInput" type="number" min="0" step="0.01" size="6" placeholder="关闭" /></label>
+            <button type="button" class="secondary-btn" id="saveAlertsBtn">保存</button>
+          </div>
+          <div class="muted" id="alertNotifierHint"></div>
+          <div class="muted" id="alertRecentList"></div>
+        </div>
+        <div class="session-attrs">
           <h3>接入 Agent (MCP)</h3>
           <p class="settings-copy">把 planofplan 的只读洞察（配额/谱系/会话深读）接入任意 MCP 客户端。端点：<code id="mcpEndpointHint"></code></p>
           <div class="mcp-copy-list">
