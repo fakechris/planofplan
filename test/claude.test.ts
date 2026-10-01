@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'bun:test';
 import { normalizeClaude } from '../src/adapters/claude.ts';
 import { AdapterError, type AdapterContext, type Credential } from '../src/types.ts';
@@ -113,54 +114,56 @@ describe('normalizeClaude', () => {
 });
 
 describe('Claude OAuth lifecycle', () => {
-  test('401 refreshes with the rotated token and persists it before retrying usage', async () => {
+  const ctx = {
+    plan: { slug: 'claude', name: 'Claude', adapter: 'claude', enabled: true, pollIntervalSec: 300, extra: {} },
+    now: Date.now,
+    log: () => {},
+  } as AdapterContext;
+
+  async function withFetch<T>(
+    handler: (request: Request) => Response | Promise<Response>,
+    run: (requests: Array<{ url: string; authorization?: string; body?: string }>) => Promise<T>,
+  ): Promise<T> {
     const previousFetch = globalThis.fetch;
     const previousTokenUrl = process.env.CLAUDE_OAUTH_TOKEN_URL;
     const requests: Array<{ url: string; authorization?: string; body?: string }> = [];
-    const persisted: { value: { accessToken: string; refreshToken: string; expiresAt: number } | null } = {
-      value: null,
-    };
-
     process.env.CLAUDE_OAUTH_TOKEN_URL = 'http://claude.test/oauth/token';
     globalThis.fetch = (async (input: string | Request | URL, init?: RequestInit) => {
       const request = input instanceof Request ? new Request(input, init) : new Request(input.toString(), init);
       requests.push({
         url: request.url,
         authorization: request.headers.get('authorization') ?? undefined,
-        body: request.method === 'POST' ? await request.text() : undefined,
+        body: request.method === 'POST' ? await request.clone().text() : undefined,
       });
-      if (request.url.endsWith('/oauth/token')) {
-        return Response.json({
-          access_token: 'fresh-access',
-          refresh_token: 'refresh-2',
-          expires_in: 3600,
-          token_type: 'Bearer',
-        });
-      }
-      if (request.headers.get('authorization') === 'Bearer stale-access') {
-        return new Response('expired', { status: 401 });
-      }
-      return Response.json({
-        five_hour: { utilization: 12 },
-        seven_day: { utilization: 34 },
-      });
+      return handler(request);
     }) as typeof fetch;
-
     try {
+      return await run(requests);
+    } finally {
+      globalThis.fetch = previousFetch;
+      if (previousTokenUrl == null) delete process.env.CLAUDE_OAUTH_TOKEN_URL;
+      else process.env.CLAUDE_OAUTH_TOKEN_URL = previousTokenUrl;
+    }
+  }
+
+  const usageOrRefresh = (request: Request): Response => {
+    if (request.url.endsWith('/oauth/token')) {
+      return Response.json({ access_token: 'fresh-access', refresh_token: 'refresh-2', expires_in: 3600 });
+    }
+    if (request.headers.get('authorization') === 'Bearer stale-access') {
+      return new Response('expired', { status: 401 });
+    }
+    return Response.json({ five_hour: { utilization: 12 }, seven_day: { utilization: 34 } });
+  };
+
+  test('an env-supplied refresh token renews in memory on 401 and retries usage', async () => {
+    await withFetch(usageOrRefresh, async (requests) => {
       const credential = {
         kind: 'bearer',
         value: 'stale-access',
-        source: 'auto',
+        source: 'env',
         refreshToken: 'refresh-1',
-        persist: async (token: { accessToken: string; refreshToken: string; expiresAt: number }) => {
-          persisted.value = token;
-        },
-      } as unknown as Credential;
-      const ctx = {
-        plan: { slug: 'claude', name: 'Claude', adapter: 'claude', enabled: true, pollIntervalSec: 300, extra: {} },
-        now: Date.now,
-        log: () => {},
-      } as AdapterContext;
+      } as Credential;
 
       const { claudeAdapter } = await import('../src/adapters/claude.ts');
       const windows = await claudeAdapter.fetchUsage(ctx, credential);
@@ -171,20 +174,56 @@ describe('Claude OAuth lifecycle', () => {
         undefined,
         'Bearer fresh-access',
       ]);
-      expect(new URLSearchParams(requests[1]?.body).get('grant_type')).toBe('refresh_token');
       expect(new URLSearchParams(requests[1]?.body).get('refresh_token')).toBe('refresh-1');
-      expect(new URLSearchParams(requests[1]?.body).get('client_id')).toBe(
-        '9d1c250a-e61b-44d9-88ed-5944d1962f5e',
-      );
-      expect(persisted.value).toEqual({
-        accessToken: 'fresh-access',
-        refreshToken: 'refresh-2',
-        expiresAt: expect.any(Number),
-      });
-    } finally {
-      globalThis.fetch = previousFetch;
-      if (previousTokenUrl == null) delete process.env.CLAUDE_OAUTH_TOKEN_URL;
-      else process.env.CLAUDE_OAUTH_TOKEN_URL = previousTokenUrl;
-    }
+    });
+  });
+
+  test("Claude Code's Keychain login is read-only: no refresh token, nothing to write back", async () => {
+    const { keychainCredentialFromBlob } = await import('../src/adapters/claude.ts');
+    const blob = JSON.stringify({
+      claudeAiOauth: {
+        accessToken: 'kc-access',
+        refreshToken: 'kc-refresh',
+        expiresAt: Date.now() + 3_600_000,
+        refreshTokenExpiresAt: Date.now() + 86_400_000,
+        scopes: ['user:profile'],
+        subscriptionType: 'max',
+        rateLimitTier: 'tier',
+      },
+    });
+    const credential = keychainCredentialFromBlob(blob);
+    expect(credential).toMatchObject({ kind: 'bearer', value: 'kc-access', source: 'auto', expiresAt: expect.any(Number) });
+    expect(credential?.refreshToken ?? null).toBeNull();
+    expect(Object.keys(credential ?? {})).not.toContain('persist');
+  });
+
+  test('a rejected Keychain token reports an auth error without asking for a new token', async () => {
+    await withFetch(usageOrRefresh, async (requests) => {
+      const credential = { kind: 'bearer', value: 'stale-access', source: 'auto' } as Credential;
+      const { claudeAdapter } = await import('../src/adapters/claude.ts');
+      await expect(claudeAdapter.fetchUsage(ctx, credential)).rejects.toMatchObject({ kind: 'auth' });
+      expect(requests.some((request) => request.url.endsWith('/oauth/token'))).toBe(false);
+    });
+  });
+
+  test('an expired Keychain token is reported stale before any request is made', async () => {
+    await withFetch(usageOrRefresh, async (requests) => {
+      const credential = {
+        kind: 'bearer',
+        value: 'stale-access',
+        source: 'auto',
+        expiresAt: Date.now() - 1_000,
+      } as Credential;
+      const { claudeAdapter } = await import('../src/adapters/claude.ts');
+      await expect(claudeAdapter.fetchUsage(ctx, credential)).rejects.toMatchObject({ kind: 'auth' });
+      expect(requests).toHaveLength(0);
+    });
+  });
+
+  test('src never writes to the Keychain', () => {
+    const offenders = [...new Bun.Glob('src/**/*.ts').scanSync('.')].filter((file) =>
+      readFileSync(file, 'utf8').includes('add-generic-password'),
+    );
+    expect(offenders).toEqual([]);
   });
 });

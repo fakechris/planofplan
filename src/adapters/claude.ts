@@ -8,8 +8,11 @@
  * - 头：Authorization Bearer + anthropic-beta: oauth-2025-04-20
  * - 解析（实测响应）：five_hour.utilization → 5h；seven_day.utilization → 周；
  *   extra_usage{is_enabled, monthly_limit, used_credits, utilization} → 月度花费（启用时）
- * - 注意：/api/oauth/usage 限流较严（~5 req/token），429 时刷新 token 换限流窗口（onWatch 方案）；
+ * - 注意：/api/oauth/usage 限流较严（~5 req/token），429 交给调度器退避；
  *   token 需 user:profile scope；keychain 读取触发系统授权时自动降级提示
+ * - Keychain 里是 Claude Code 自己的登录：只读，不刷新、不写回（刷新会轮换 refresh token
+ *   把 Claude Code 登出，写回会丢它的其他字段）。过期就报 auth，让用户运行 `claude`。
+ *   只有用户显式给的 CLAUDE_CODE_OAUTH_REFRESH_TOKEN 才会在内存里刷新。
  */
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -206,9 +209,7 @@ export function normalizeClaude(raw: unknown): QuotaWindow[] {
 
 interface ClaudeOAuthRecord {
   accessToken: string;
-  refreshToken: string | null;
   expiresAt: number | null;
-  scopes?: string[];
 }
 
 function parseClaudeOAuthRecord(value: string): ClaudeOAuthRecord | null {
@@ -218,20 +219,14 @@ function parseClaudeOAuthRecord(value: string): ClaudeOAuthRecord | null {
       const parsed = JSON.parse(candidate) as {
         claudeAiOauth?: {
           accessToken?: unknown;
-          refreshToken?: unknown;
           expiresAt?: unknown;
-          scopes?: unknown;
         };
       };
       const oauth = parsed.claudeAiOauth;
       if (!oauth || typeof oauth.accessToken !== 'string' || !oauth.accessToken.trim()) continue;
       return {
         accessToken: oauth.accessToken.trim(),
-        refreshToken: typeof oauth.refreshToken === 'string' && oauth.refreshToken ? oauth.refreshToken : null,
         expiresAt: typeof oauth.expiresAt === 'number' && Number.isFinite(oauth.expiresAt) ? oauth.expiresAt : null,
-        scopes: Array.isArray(oauth.scopes)
-          ? oauth.scopes.filter((scope): scope is string => typeof scope === 'string')
-          : undefined,
       };
     } catch {
       /* try the next supported Keychain encoding */
@@ -254,41 +249,16 @@ async function readKeychainCredential(): Promise<Credential | null> {
   } catch {
     return null;
   }
-  const blob = stdout.trim();
-  if (!blob) return null;
-  const record = parseClaudeOAuthRecord(blob);
+  return keychainCredentialFromBlob(stdout);
+}
+
+/** Claude Code 的 Keychain 条目 → 只读凭据：不带 refresh token，也没有 persist。 */
+export function keychainCredentialFromBlob(blob: string): Credential | null {
+  const trimmed = blob.trim();
+  if (!trimmed) return null;
+  const record = parseClaudeOAuthRecord(trimmed);
   if (!record) return null;
-  return {
-    kind: 'bearer',
-    value: record.accessToken,
-    source: 'auto',
-    refreshToken: record.refreshToken,
-    expiresAt: record.expiresAt,
-    persist: async (next) => {
-      const payload = JSON.stringify({
-        claudeAiOauth: {
-          accessToken: next.accessToken,
-          refreshToken: next.refreshToken,
-          expiresAt: next.expiresAt ?? Date.now() + 8 * 60 * 60 * 1000,
-          ...(record.scopes ? { scopes: record.scopes } : {}),
-        },
-      });
-      await execFileAsync(
-        'security',
-        [
-          'add-generic-password',
-          '-U',
-          '-a',
-          process.env.USER ?? '',
-          '-s',
-          KEYCHAIN_SERVICE,
-          '-w',
-          payload,
-        ],
-        { timeout: 8_000, maxBuffer: 64 * 1024 },
-      );
-    },
-  };
+  return { kind: 'bearer', value: record.accessToken, source: 'auto', expiresAt: record.expiresAt };
 }
 
 function atobSafe(v: string): string {
@@ -373,11 +343,6 @@ export const claudeAdapter: PlanAdapter = {
         cred.value = activeToken;
         cred.refreshToken = rotatedRefresh;
         cred.expiresAt = expiresAt;
-        try {
-          await cred.persist?.({ accessToken: activeToken, refreshToken: rotatedRefresh, expiresAt });
-        } catch {
-          // A temporary Keychain lock must not discard a valid access token for this poll.
-        }
         return true;
       } catch {
         return false;
@@ -385,7 +350,9 @@ export const claudeAdapter: PlanAdapter = {
     };
 
     if (cred.expiresAt != null && cred.expiresAt <= Date.now() + 60_000) {
-      await refresh();
+      if (!(await refresh()) && cred.expiresAt <= Date.now()) {
+        throw new AdapterError('auth', 'Claude 登录已过期：请运行 `claude` 刷新登录后重试');
+      }
     }
 
     const requestUsage = async (): Promise<Response> => {
@@ -408,19 +375,9 @@ export const claudeAdapter: PlanAdapter = {
       }
     };
 
-    // fetchQuota 已就地消化短等待的 429;抛上来的限流错误先试一次换 token
-    // (onWatch 方案:刷新 = 换限流窗口),换完仍限流才把 retryAfterSec 交给调度器。
-    // 401/403 仍以 Response 返回,走原有的换 token 重试。
-    let res: Response;
-    try {
-      res = await requestUsage();
-    } catch (e) {
-      if (e instanceof AdapterError && e.kind === 'api' && cred.refreshToken && (await refresh())) {
-        res = await requestUsage();
-      } else {
-        throw e;
-      }
-    }
+    // fetchQuota 已就地消化短等待的 429;抛上来的限流错误带 retryAfterSec 交给调度器退避。
+    // 401/403 以 Response 返回:有用户显式给的 refresh token 才换 token 重试。
+    let res = await requestUsage();
     if ((res.status === 401 || res.status === 403) && (await refresh())) {
       res = await requestUsage();
     }
