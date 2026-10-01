@@ -1,9 +1,10 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDb, openMemoryDb , SCHEMA_VERSION } from '../src/db.ts';
-import { collectSessionCatalog } from '../src/sessions.ts';
+import { collectSessionCatalog, pathPresence } from '../src/sessions.ts';
 import type { SessionMessageRow } from '../src/types.ts';
 
 const UUID = 'abcdef01-2345-6789-abcd-ef0123456789';
@@ -120,6 +121,73 @@ describe('库维护:孤儿水位与保留期', () => {
       await collectSessionCatalog(store, makeRoots(root));
       expect(store.getSessionIndexState('/nonexistent/gone.jsonl')).toBeNull();
       expect(store.getSessionIndexState(file)).not.toBeNull(); // 真文件的水位不动
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('pathPresence 只把 ENOENT/ENOTDIR 当作不存在,权限错误是 unknown', () => {
+    const root = mkdtempSync(join(tmpdir(), 'pop-presence-'));
+    const locked = join(root, 'locked');
+    try {
+      mkdirSync(locked);
+      writeFileSync(join(locked, 'f.jsonl'), 'x');
+      writeFileSync(join(root, 'plain'), 'x');
+      expect(pathPresence(join(locked, 'f.jsonl'))).toBe('present');
+      expect(pathPresence(join(root, 'nope.jsonl'))).toBe('missing');
+      expect(pathPresence(join(root, 'plain', 'child'))).toBe('missing'); // ENOTDIR
+      chmodSync(locked, 0o000);
+      expect(pathPresence(join(locked, 'f.jsonl'))).toBe('unknown');
+    } finally {
+      chmodSync(locked, 0o755);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('源目录暂时无权限读取时不删会话与水位;文件真被删除才删', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'pop-eacces-'));
+    const { store, file } = seed(root);
+    const dir = join(file, '..');
+    try {
+      await collectSessionCatalog(store, makeRoots(root));
+      expect(store.getSession(SESSION_ID)).not.toBeNull();
+
+      chmodSync(dir, 0o000);
+      await collectSessionCatalog(store, makeRoots(root));
+      chmodSync(dir, 0o755);
+      expect(store.getSession(SESSION_ID)).not.toBeNull();
+      expect(store.getSessionIndexState(file)).not.toBeNull();
+      expect(store.countSessionMessages(SESSION_ID)).toBeGreaterThan(0);
+
+      rmSync(file);
+      await collectSessionCatalog(store, makeRoots(root));
+      expect(store.getSession(SESSION_ID)).toBeNull();
+      expect(store.getSessionIndexState(file)).toBeNull();
+    } finally {
+      chmodSync(dir, 0o755);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('扫描对 L0 只读:fixture home 下每个文件的内容与 mtime 扫描前后不变', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'pop-readonly-'));
+    const fingerprint = (): Record<string, string> => {
+      const out: Record<string, string> = {};
+      for (const entry of readdirSync(root, { recursive: true }) as string[]) {
+        const path = join(root, entry);
+        const st = statSync(path);
+        if (!st.isFile()) continue;
+        out[entry] = `${st.size}:${st.mtimeMs}:${createHash('sha256').update(readFileSync(path)).digest('hex')}`;
+      }
+      return out;
+    };
+    try {
+      const { store } = seed(root);
+      const before = fingerprint();
+      await collectSessionCatalog(store, makeRoots(root));
+      await collectSessionCatalog(store, makeRoots(root));
+      expect(store.getSession(SESSION_ID)).not.toBeNull();
+      expect(fingerprint()).toEqual(before);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

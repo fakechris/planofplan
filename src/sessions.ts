@@ -1011,6 +1011,21 @@ function indexSessionFileMessages(
   return { repos, aiTitle };
 }
 
+/**
+ * 清理用的存在性探针。existsSync 对 EACCES/EPERM 也返回 false,会把"暂时读不到"
+ * (TCC 权限、launchd 权限上下文、外置卷未挂载)当成"已删除",连消息索引一起删掉。
+ * 只有 ENOENT/ENOTDIR 才算 missing;其它错误是 unknown,清理时保留。
+ */
+export function pathPresence(path: string): 'present' | 'missing' | 'unknown' {
+  try {
+    statSync(path);
+    return 'present';
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === 'ENOENT' || code === 'ENOTDIR' ? 'missing' : 'unknown';
+  }
+}
+
 export async function collectSessionCatalog(store: Store, options: SessionCollectOptions = {}): Promise<number> {
   const since = options.since ?? Date.now() - 30 * DAY_MS;
   const until = options.until ?? Date.now();
@@ -1190,8 +1205,8 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
     sessionStubsFromUsage(store, since, until, new Set(rows.map((row) => row.id)))
       .filter((stub) => !tombstones.ids.has(stub.id)),
   );
-  // 清理:墓碑期间漏进库的行先删;源文件已被删除/轮换的 session,
-  // 连同消息索引和 repo 归属一起删
+  // 清理:墓碑期间漏进库的行先删;源文件确认已被删除/轮换(ENOENT)的 session,
+  // 连同消息索引和 repo 归属一起删;读不到(权限等)的保留
   for (const row of store.listSessionRows()) {
     if (tombstones.ids.has(row.id)) {
       store.deleteSession(row.id);
@@ -1199,17 +1214,17 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
     }
     if (!row.sourceFile) continue;
     if (!(CATALOG_PROVIDERS as readonly string[]).includes(row.provider)) continue;
-    if (!existsSync(row.sourceFile)) store.deleteSession(row.id);
+    if (pathPresence(row.sourceFile) === 'missing') store.deleteSession(row.id);
   }
   // 库维护(有界,失败不拖垮扫描):磁盘上已不存在的孤儿水位(实测积累过
   // 359/1920 行)按存在性清理;消息按保留期裁剪,目录行永久保留。
   try {
     const statePaths = store.listSessionIndexStatePaths();
     const migrationMarkers = new Set<string>([...ORIGIN_BACKFILL_STATE_PATHS, REDACT_BACKFILL_STATE_PATH]);
-    const deadStates = statePaths.filter((path) => !migrationMarkers.has(path) && !existsSync(path));
+    const deadStates = statePaths.filter((path) => !migrationMarkers.has(path) && pathPresence(path) === 'missing');
     if (deadStates.length > 0) store.deleteSessionIndexStates(deadStates);
     const scanPaths = store.listUsageScanFilePaths();
-    const deadScans = scanPaths.filter((path) => !existsSync(path));
+    const deadScans = scanPaths.filter((path) => pathPresence(path) === 'missing');
     if (deadScans.length > 0) store.deleteUsageScanFiles(deadScans);
     const retentionDays = options.messageRetentionDays
       ?? Number(process.env.PLANOFPLAN_MESSAGE_RETENTION_DAYS ?? 60);
