@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { likeAllTerms, likeClauses, likeSnippet, planMessageQuery, searchableRowSql } from './message-query.ts';
+import { isFtsQueryError, likeAllTerms, likeClauses, likeSnippet, planMessageQuery, searchableRowSql, visibleHighlights } from './message-query.ts';
 import { statSync } from 'node:fs';
 import type { Store } from './db.ts';
 import type { Hono } from 'hono';
@@ -147,6 +147,7 @@ export function searchMessageEvidence(store: Store, args: Record<string, unknown
     JOIN sessions s ON s.id=m.session_id WHERE ${where} AND ${searchableRowSql('m')} AND ${likeClauses('m.text', patterns.length)}
     ORDER BY m.timestamp DESC, m.session_id, m.seq, m.id LIMIT ? OFFSET ?`).all(...params, ...patterns, limit + 1, offset) as MessageEvidenceRow[];
   let rows: Array<MessageEvidenceRow & { snippet?: string }>;
+  let fallbackReason: string | null = null;
   let searchMode = plan.likes.length > 0 ? 'fts5+like' : 'fts5';
   if (plan.match == null) {
     rows = like(plan.likes);
@@ -162,15 +163,17 @@ export function searchMessageEvidence(store: Store, args: Record<string, unknown
         WHERE ${where} AND ${searchableRowSql('m')} AND session_messages_fts MATCH ?${shortTerms}
         ORDER BY session_messages_fts.rank LIMIT ? OFFSET ?`)
         .all(...params, plan.match, ...plan.likes, limit + 1, offset) as Array<MessageEvidenceRow & { snippet: string }>;
-    } catch {
+    } catch (error) {
+      if (!isFtsQueryError(error)) throw error;
       rows = like(likeAllTerms(plan));
       searchMode = 'like_fallback';
+      fallbackReason = error instanceof Error ? error.message : String(error);
     }
   }
   return {
     items: rows.slice(0, limit).map((row) => {
       return { source_ref: sourceRef(row), role: row.role, kind: row.kind,
-        timestamp: row.timestamp, snippet: row.snippet ?? likeSnippet(row.text, plan.terms, 60), content_complete: row.fullText != null,
+        timestamp: row.timestamp, snippet: visibleHighlights(row.snippet ?? likeSnippet(row.text, plan.terms, 60)), content_complete: row.fullText != null,
         source_status: sourceStatus(store, row), indexed_at: row.indexedAt };
     }),
     truncated: rows.length > limit,
@@ -181,6 +184,8 @@ export function searchMessageEvidence(store: Store, args: Record<string, unknown
       'Search covers the existing indexed text excerpt (visible text up to 10000 characters); read_message can recover retained full text.',
       'Search pagination is a live view; SourceRef pins message content, not the result list.',
       ...(searchMode === 'fts5' || searchMode === 'fts5+like' ? [] : ['LIKE fallback may scan more rows; narrow project/provider/time for large histories.']),
+      ...(fallbackReason != null ? [`The full-text index rejected this query (${fallbackReason}); it ran as a LIKE scan instead.`] : []),
+      'Hits in snippets are marked «like this».',
     ],
   };
 }

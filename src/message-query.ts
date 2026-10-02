@@ -105,3 +105,23 @@ export function commandOfToolInput(input: unknown): string | null {
   }
   return null;
 }
+
+/**
+ * Whether an error from a MATCH query is the query itself being unacceptable to FTS5 — the
+ * only case where falling back to LIKE is right (INV-904). Anything else (a locked or
+ * corrupt database, a bug) must surface instead of being hidden behind a slower scan.
+ */
+export function isFtsQueryError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /fts5|syntax error|unterminated string|no such column|malformed MATCH/i.test(message);
+}
+
+/**
+ * Snippets handed to agents (message_search, session_search) mark hits with visible
+ * guillemets: «hit». The \u0001/\u0002 markers FTS emits are control characters that
+ * end up invisible in an agent's context and in anything it quotes. The web UI keeps
+ * the raw markers and turns them into <b>.
+ */
+export function visibleHighlights(snippet: string): string {
+  return snippet.replaceAll('\u0001', '«').replaceAll('\u0002', '»');
+}

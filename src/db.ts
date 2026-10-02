@@ -1,5 +1,5 @@
 import { Database } from 'bun:sqlite';
-import { likeAllTerms, likeClauses, likeSnippet, planMessageQuery, searchableRowSql } from './message-query.ts';
+import { isFtsQueryError, likeAllTerms, likeClauses, likeSnippet, planMessageQuery, searchableRowSql } from './message-query.ts';
 import { redactNullable } from './redact.ts';
 import { createHash } from 'node:crypto';
 import type {
@@ -3171,8 +3171,9 @@ export class Store {
          LIMIT ?`,
       ).all(plan.match, ...plan.likes, limit) as Array<{ sessionId: string; snippet: string; rank: number }>;
       return aggregateMessageHits(rows.map((row) => ({ sessionId: row.sessionId, snippet: row.snippet })));
-    } catch {
-      // FTS 语法错误（特殊字符等）兜底到 LIKE
+    } catch (error) {
+      // 只有 FTS 拒绝查询本身才兜底到 LIKE;库锁/损坏等错误照常抛出(INV-904)
+      if (!isFtsQueryError(error)) throw error;
       return this.searchSessionMessagesLike(likeAllTerms(plan), plan.terms, limit);
     }
   }

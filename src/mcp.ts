@@ -192,7 +192,8 @@ function toolSessionSearch(store: Store, args: Record<string, unknown>): string 
     lines.push(`- [${session.provider}] ${date} ${title} (${session.id})`);
     const hit = hitBySession.get(session.id);
     if (hit) {
-      lines.push(`  content hit: ${clipLine(hit.snippet.replaceAll('\u0001', '').replaceAll('\u0002', ''))}`);
+      // message_search already marks hits «like this» (INV-904): same convention here
+      lines.push(`  content hit: ${clipLine(hit.snippet)}`);
       lines.push(`  source_ref=${JSON.stringify(hit.source_ref)}`);
     }
   }
