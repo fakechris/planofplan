@@ -266,3 +266,75 @@ export function registerMessageEvidenceRoutes(app: Hono, store: Store): void {
     });
   }
 }
+
+/** One session's standing in a content search (INV-901). */
+export interface SessionContentHit {
+  sessionId: string;
+  /** Best FTS rank among its matching messages (lower is better); null on the LIKE path. */
+  bestRank: number | null;
+  hits: number;
+  lastHitAt: number | null;
+  /** The best-matching message: by rank, or the most recent on the LIKE path. */
+  bestRowid: number;
+}
+
+const SESSION_HIT_CAP = 500;
+
+/**
+ * Content search aggregated per session in SQL (INV-901). Every matching message counts,
+ * so a long session with hundreds of hits cannot crowd others out of a fixed message
+ * window, and each session reports its best rank, hit count and last hit. Same planner,
+ * filters and searchability as message_search.
+ */
+export function searchSessionsByContent(store: Store, args: Record<string, unknown>, q: string): { sessions: SessionContentHit[]; mode: string } {
+  const params: Array<string | number> = [];
+  const where = whereFilters(args, params);
+  const plan = planMessageQuery(q);
+  const shortTerms = plan.likes.length > 0 ? ` AND ${likeClauses('m.text', plan.likes.length)}` : '';
+  const aggregate = (matches: string, matchParams: Array<string | number>, rankExpr: string) => store.db.query(
+    // One pass over the matches: window functions give each session its best row, hit
+    // count and last hit together (a correlated subquery re-ran the match per session).
+    `WITH hits AS MATERIALIZED (
+       SELECT m.session_id AS sid, m.rowid AS rid, ${rankExpr} AS r, m.timestamp AS ts
+       ${matches}
+     ), ranked AS (
+       SELECT sid, rid, r,
+         row_number() OVER (PARTITION BY sid ORDER BY r, ts DESC) AS rn,
+         count(*) OVER (PARTITION BY sid) AS n,
+         max(ts) OVER (PARTITION BY sid) AS last
+       FROM hits
+     )
+     SELECT sid AS sessionId, r AS bestRank, n AS hits, last AS lastHitAt, rid AS bestRowid
+     FROM ranked WHERE rn = 1 ORDER BY r, n DESC, last DESC LIMIT ?`,
+  ).all(...matchParams, SESSION_HIT_CAP) as SessionContentHit[];
+  const likeAll = (patterns: string[]) => aggregate(
+    `FROM session_messages m JOIN sessions s ON s.id = m.session_id
+       WHERE ${where} AND ${searchableRowSql('m')} AND ${likeClauses('m.text', patterns.length)}`,
+    [...params, ...patterns],
+    // No rank without FTS: the most recent hit stands in, so ORDER BY r picks it.
+    '-coalesce(m.timestamp, 0)',
+  ).map((hit) => ({ ...hit, bestRank: null }));
+  if (plan.match == null) return { sessions: likeAll(plan.likes), mode: 'like_short_query' };
+  try {
+    const sessions = aggregate(
+      `FROM session_messages_fts JOIN session_messages m ON m.rowid = session_messages_fts.rowid
+         JOIN sessions s ON s.id = m.session_id
+         WHERE ${where} AND ${searchableRowSql('m')} AND session_messages_fts MATCH ?${shortTerms}`,
+      [...params, plan.match, ...plan.likes],
+      'session_messages_fts.rank',
+    );
+    return { sessions, mode: plan.likes.length > 0 ? 'fts5+like' : 'fts5' };
+  } catch (error) {
+    if (!isFtsQueryError(error)) throw error;
+    return { sessions: likeAll(likeAllTerms(plan)), mode: 'like_fallback' };
+  }
+}
+
+/** The search-result item for one message row, with hits marked «like this». */
+export function messageEvidenceItem(store: Store, rowid: number, q: string) {
+  const row = store.db.query(`SELECT ${COLUMNS} FROM session_messages m JOIN sessions s ON s.id = m.session_id WHERE m.rowid = ?`)
+    .get(rowid) as MessageEvidenceRow | null;
+  if (!row) return null;
+  return { source_ref: sourceRef(row), role: row.role, kind: row.kind, timestamp: row.timestamp,
+    snippet: visibleHighlights(likeSnippet(row.text, planMessageQuery(q).terms, 60)) };
+}

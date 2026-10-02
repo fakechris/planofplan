@@ -7,7 +7,7 @@ import { searchSessions } from './sessions.ts';
 import { getBuildInfo } from './build-info.ts';
 import { readRequirementEvidence } from './requirement-evidence.ts';
 import { buildHandoffPackage, sessionTail } from './handoff.ts';
-import { searchMessageEvidence, readMessageEvidence, listMessageEvidencePage, eligibleMessageSessionIds, MESSAGE_FILTER_SCHEMA, SOURCE_REF_SCHEMA, MessageEvidenceError } from './message-evidence.ts';
+import { searchMessageEvidence, searchSessionsByContent, messageEvidenceItem, readMessageEvidence, listMessageEvidencePage, eligibleMessageSessionIds, MESSAGE_FILTER_SCHEMA, SOURCE_REF_SCHEMA, MessageEvidenceError } from './message-evidence.ts';
 import { buildLineageReport } from './lineage-report.ts';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -167,39 +167,51 @@ function toolSessionSearch(store: Store, args: Record<string, unknown>): string 
   const filters = { ...args, active_since: since, active_until: now };
   const eligible = eligibleMessageSessionIds(store, filters);
   const rows = store.listSessionRows().filter((row) => eligible.has(row.id));
-  const messageResult = searchMessageEvidence(store, { ...filters, q, limit: 100, offset: 0 });
-  const hits = messageResult.items;
-  const hitBySession = new Map<string, typeof hits[number]>();
-  for (const hit of hits) if (!hitBySession.has(hit.source_ref.session_id)) hitBySession.set(hit.source_ref.session_id, hit);
-  const matched = searchSessions(rows, q);
-  const have = new Set(matched.map((row) => row.id));
-  for (const hit of hits) {
-    const id = hit.source_ref.session_id;
-    if (have.has(id)) continue;
-    const session = store.getSession(id);
-    if (!session || !eligible.has(id)) continue;
-    matched.push(session);
-    have.add(id);
+  // Relevance first (INV-901): content hits aggregated per session in SQL, so a long
+  // session cannot crowd the others out; a title/project match adds weight; ties go to
+  // the session with more hits, then the more recent one.
+  const content = searchSessionsByContent(store, filters, q);
+  const metaMatched = new Set(searchSessions(rows, q).map((row) => row.id));
+  const contentById = new Map(content.sessions.map((hit, index) => [hit.sessionId, { hit, index }]));
+  const candidates = new Map<string, SessionRecord>();
+  for (const row of rows) if (metaMatched.has(row.id)) candidates.set(row.id, row);
+  for (const hit of content.sessions) {
+    if (candidates.has(hit.sessionId) || !eligible.has(hit.sessionId)) continue;
+    const session = store.getSession(hit.sessionId);
+    if (session) candidates.set(hit.sessionId, session);
   }
-  matched.sort((a, b) => b.updatedAt - a.updatedAt);
-  if (matched.length === 0) return `No sessions match "${q}" in the last ${days} days.`;
+  const total = content.sessions.length;
+  const scored = [...candidates.values()].map((session) => {
+    const found = contentById.get(session.id);
+    // Content: 1.0 for the best-ranked session down toward 0 for the last; title/project: +0.5.
+    const contentScore = found ? 1 - found.index / Math.max(1, total) : 0;
+    const score = contentScore + (metaMatched.has(session.id) ? 0.5 : 0);
+    return { session, found: found?.hit ?? null, score };
+  });
+  scored.sort((a, b) => b.score - a.score
+    || (b.found?.hits ?? 0) - (a.found?.hits ?? 0)
+    || b.session.updatedAt - a.session.updatedAt);
+  if (scored.length === 0) return `No sessions match "${q}" in the last ${days} days.`;
   const requirements = store.firstRequirementBySession();
-  const shown = Math.min(limit, matched.length);
-  const lines: string[] = [`${matched.length} session(s) match "${q}" (last ${days} days, showing ${shown}):`];
-  for (const session of matched.slice(0, limit)) {
+  const shown = Math.min(limit, scored.length);
+  const lines: string[] = [
+    `${scored.length} session(s) match "${q}" (last ${days} days, showing ${shown}).`,
+    `Ranked by the best-matching message (${content.mode === 'fts5' || content.mode === 'fts5+like' ? 'full-text relevance' : 'hit count'}); a title/project match adds weight; ties by hit count, then recency.`,
+  ];
+  for (const { session, found } of scored.slice(0, limit)) {
     const date = new Date(session.updatedAt).toISOString().slice(0, 16).replace('T', ' ');
     const title = clipLine(requirements.get(session.id)?.text ?? session.title ?? '无标题', 160);
-    lines.push(`- [${session.provider}] ${date} ${title} (${session.id})`);
-    const hit = hitBySession.get(session.id);
-    if (hit) {
-      // message_search already marks hits «like this» (INV-904): same convention here
-      lines.push(`  content hit: ${clipLine(hit.snippet)}`);
-      lines.push(`  source_ref=${JSON.stringify(hit.source_ref)}`);
+    const why = [found ? `${found.hits} hit${found.hits === 1 ? '' : 's'}` : null, metaMatched.has(session.id) ? 'title/project match' : null].filter(Boolean).join(', ');
+    lines.push(`- [${session.provider}] ${date} ${title} (${session.id}) — ${why}`);
+    const item = found ? messageEvidenceItem(store, found.bestRowid, q) : null;
+    if (item) {
+      // message_search marks hits «like this» (INV-904): same convention here
+      lines.push(`  content hit: ${clipLine(item.snippet)}`);
+      lines.push(`  source_ref=${JSON.stringify(item.source_ref)}`);
     }
   }
-  lines.push(`Message search mode: ${messageResult.search_mode}. Search indexes bounded excerpts; read_message returns retained full text.`);
-  if (messageResult.truncated) lines.push('(content hits truncated at 100; use message_search with next_offset for all matching messages)');
-  lines.push(truncationNote(shown, matched.length, 'pass a higher limit (max 30), narrow the query, or shorten days').trim());
+  lines.push(`Message search mode: ${content.mode}. Search indexes bounded excerpts; read_message returns retained full text; message_search lists every matching message.`);
+  lines.push(truncationNote(shown, scored.length, 'pass a higher limit (max 30), narrow the query, or shorten days').trim());
   return lines.filter((line) => line !== '').join('\n');
 }
 
