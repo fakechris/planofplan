@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { resolveBind } from './bind.ts';
 import { join } from 'node:path';
-import { ensureHome, loadConfig, saveAlertsConfig } from './config.ts';
+import { ensureHome, loadConfig, removeEmptyLegacyIndex, saveAlertsConfig } from './config.ts';
 import { Store, openDb, openMemoryDb } from './db.ts';
 import { Scheduler, buildOverview, formatResetCountdown, type OverviewPlan } from './core.ts';
 import { createServer } from './server.ts';
@@ -233,6 +233,7 @@ async function serve(): Promise<void> {
   const port = f.port ?? cfg.port;
   // deep link(handoff 等)用 cfg.port 拼 URL,必须与实际绑定端口一致
   cfg.port = port;
+  if (!f.demo && removeEmptyLegacyIndex(ensureHome())) console.log('planofplan: 删除了早期版本遗留的空 index.db(索引在 planofplan.db)');
   const store = f.demo ? openMemoryDb() : openDb(join(ensureHome(), 'planofplan.db'));
 
   syncStore(store, cfg);

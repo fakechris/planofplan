@@ -61,7 +61,7 @@
 
 ### Milestone M7: 跨 Agent 消息级内容检索与上下文交接引擎 (INV-274)
 - **INV-276 (M7-1)**: SQLite FTS5 消息级增量全文索引与信封过滤清洗
-  - 扩展 `~/.planofplan/index.db`：新增 `session_messages` 与 `messages_fts` (trigram/fts5)
+  - 扩展 `~/.planofplan/planofplan.db`：新增 `session_messages` 与 `session_messages_fts` (trigram/fts5)
   - 增量扫描：复用 mtime + 行级游标水位，非阻塞单飞追加
   - 信封降噪：打标 `is_meta=1` 排除命令信封与 Base64 大图
   - API 与检索：`/api/session-search` 支持消息级 snippet 高亮回源
