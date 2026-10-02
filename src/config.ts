@@ -1,6 +1,6 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import type { PlanConfig, ResumeConfig } from './types.ts';
 import { DEFAULT_ALERT_SETTINGS, type AlertSettings } from './quota-alerts.ts';
 
@@ -129,6 +129,23 @@ export function ensureHome(): string {
     chmodSync(dir, 0o700);
   }
   return dir;
+}
+
+/**
+ * An empty `index.db` left by early builds (INV-905). The index is planofplan.db; an
+ * empty file under the old name makes anyone checking by hand open the wrong database and
+ * see "no such table". Only a zero-byte file is removed — anything with content is left
+ * alone. Returns whether one was removed.
+ */
+export function removeEmptyLegacyIndex(dir: string = homeDir()): boolean {
+  const legacy = join(dir, 'index.db');
+  try {
+    if (statSync(legacy).size !== 0) return false;
+    rmSync(legacy);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function configPath(): string {
