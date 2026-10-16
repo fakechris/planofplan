@@ -136,6 +136,30 @@ describe('buildOverview current snapshot batch', () => {
   });
 });
 
+describe('buildOverview sticky windows（INV-1242）', () => {
+  test('kimi 部分批次不抹掉 月/周，缺失窗口沿用最近成功快照', () => {
+    const store = openMemoryDb();
+    const kimi = DEFAULT_PLANS.find((item) => item.slug === 'kimi')!;
+    store.syncPlan(kimi);
+    const t0 = 1_770_000_000_000;
+    store.insertWindows(kimi.slug, [
+      { window: 'rolling_5h', label: '5H', used: 1, total: 100, unit: 'requests', percentage: 1, resetAt: t0 + 3_600_000, note: null },
+      { window: 'weekly', label: 'Week', used: 2, total: 100, unit: 'requests', percentage: 2, resetAt: t0 + 86_400_000, note: null },
+      { window: 'monthly', label: 'Month', used: null, total: null, unit: 'percent', percentage: 3, resetAt: t0 + 2_592_000_000, note: null },
+    ], t0);
+    // 月/周单源失败的退化批次：只剩 5H
+    store.insertWindows(kimi.slug, [
+      { window: 'rolling_5h', label: '5H', used: 4, total: 100, unit: 'requests', percentage: 4, resetAt: t0 + 3_600_000, note: null },
+    ], t0 + 60_000);
+
+    const overview = buildOverview(store, [kimi], t0 + 61_000);
+    expect(overview.plans[0]!.windows.map((window) => window.window)).toEqual(['rolling_5h', 'weekly', 'monthly']);
+    expect(overview.plans[0]!.windows.find((w) => w.window === 'rolling_5h')!.percentage).toBe(4);
+    expect(overview.plans[0]!.windows.find((w) => w.window === 'weekly')!.fetchedAt).toBe(t0);
+    expect(overview.plans[0]!.windows.find((w) => w.window === 'monthly')!.percentage).toBe(3);
+  });
+});
+
 describe('buildOverview tier 注解', () => {
   test('peakPricing=true 的 plan 在高峰时刻返回 tier.label=DeepSeek 高峰', () => {
     const store = openMemoryDb();

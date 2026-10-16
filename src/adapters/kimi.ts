@@ -827,6 +827,8 @@ async function fetchSubscriptionStats(token: string, cookieHeader?: string | nul
 
 export const kimiAdapter: PlanAdapter = {
   slug: 'kimi',
+  // 周/5H/月来自三个互相独立的数据源，任一源失败不应抹掉其它窗口的展示
+  stickyWindows: true,
   credentialHint:
     '没有有效 Kimi 会话：请在所选浏览器打开 kimi.com 刷新登录态，再从 menubar 读取浏览器会话；也可运行 kimi-code login 或设置 KIMI_CODE_API_KEY',
 
