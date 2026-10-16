@@ -358,7 +358,11 @@ export class Scheduler {
         consecutive_failures: failures,
         last_error: err.message,
         paused_until: Date.now() + cooldownSec(failures, err.retryAfterSec) * 1000,
-        auth_status: err.kind === 'auth' || err.kind === 'unknown' ? AUTH_STATUS.INVALID : state?.auth_status ?? AUTH_STATUS.UNKNOWN,
+        // 仅适配器显式判定的 auth 错误（401/未登录）才作废凭据。unknown 多为
+      // 本地基础设施抖动——如索引大事务期间落库撞上 SQLITE_BUSY——误置
+      // INVALID 会让卡片显示「凭据失效」并清空窗口（INV-1255）。保持原状态，
+      // 由 consecutive_failures → stale 路径呈现旧数据与时间戳。
+      auth_status: err.kind === 'auth' ? AUTH_STATUS.INVALID : state?.auth_status ?? AUTH_STATUS.UNKNOWN,
       });
       return { ok: false, slug, error: err.message, auth: err.kind === 'auth' };
     }
