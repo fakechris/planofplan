@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { buildOverview } from '../src/core.ts';
 import { openMemoryDb } from '../src/db.ts';
 import { DEFAULT_PLANS } from '../src/config.ts';
-import { AUTH_STATUS, type QuotaWindow } from '../src/types.ts';
+import { AUTH_STATUS, type PlanConfig, type QuotaWindow } from '../src/types.ts';
 
 describe('buildOverview auth state', () => {
   test('旧额度快照加当前缺凭据不能继续显示 ok', () => {
@@ -379,5 +379,78 @@ describe('Overview cooldownUntil 透传', () => {
     store.setState('kimi', { paused_until: now - 1000 });
     const expired = buildOverview(store, [plan], now).plans[0]!;
     expect(expired.cooldownUntil).toBeNull();
+  });
+});
+
+describe('refreshPlan 错误分类（INV-1255）', () => {
+  async function withFakeMinimax(plan: PlanConfig, fetchUsage: () => Promise<never>): Promise<() => void> {
+    const { registry } = await import('../src/adapters/index.ts');
+    const original = registry.minimax;
+    registry.minimax = {
+      slug: 'minimax',
+      detectCredentials: async () => ({ kind: 'bearer', value: 'test', source: 'manual' }),
+      fetchUsage,
+    };
+    void plan;
+    return () => { registry.minimax = original!; };
+  }
+
+  test('未知异常（如 database is locked）不作废凭据，历史窗口保持可见', async () => {
+    const { Scheduler } = await import('../src/core.ts');
+    const store = openMemoryDb();
+    const plan = DEFAULT_PLANS.find((item) => item.slug === 'minimax')!;
+    store.syncPlan(plan);
+    store.insertWindows(plan.slug, [{
+      window: 'rolling_5h', label: '5H', used: 1, total: 100, unit: 'prompts', percentage: 1, resetAt: null, note: null,
+    }], 100);
+    store.setState(plan.slug, { last_success_at: 100, auth_status: AUTH_STATUS.AUTO });
+
+    const restore = await withFakeMinimax(plan, async () => {
+      throw new Error('database is locked');
+    });
+    try {
+      const scheduler = new Scheduler(store, { port: 9291, plans: [plan] });
+      const result = await scheduler.refreshPlan('minimax');
+      expect(result.ok).toBe(false);
+
+      const state = store.getState('minimax')!;
+      expect(state.last_error).toBe('database is locked');
+      expect(state.auth_status).toBe(AUTH_STATUS.AUTO);
+
+      const overview = buildOverview(store, [plan], 200).plans[0]!;
+      expect(overview.status).toBe('stale');
+      expect(overview.windows).toHaveLength(1);
+    } finally {
+      restore();
+    }
+  });
+
+  test('auth 类 AdapterError 仍作废凭据并隐藏窗口（回归）', async () => {
+    const { Scheduler } = await import('../src/core.ts');
+    const { AdapterError } = await import('../src/types.ts');
+    const store = openMemoryDb();
+    const plan = DEFAULT_PLANS.find((item) => item.slug === 'minimax')!;
+    store.syncPlan(plan);
+    store.insertWindows(plan.slug, [{
+      window: 'rolling_5h', label: '5H', used: 1, total: 100, unit: 'prompts', percentage: 1, resetAt: null, note: null,
+    }], 100);
+    store.setState(plan.slug, { last_success_at: 100, auth_status: AUTH_STATUS.AUTO });
+
+    const restore = await withFakeMinimax(plan, async () => {
+      throw new AdapterError('auth', 'Kimi 网页会话过期(HTTP 401)');
+    });
+    try {
+      const scheduler = new Scheduler(store, { port: 9291, plans: [plan] });
+      await scheduler.refreshPlan('minimax');
+
+      const state = store.getState('minimax')!;
+      expect(state.auth_status).toBe(AUTH_STATUS.INVALID);
+
+      const overview = buildOverview(store, [plan], 200).plans[0]!;
+      expect(overview.status).toBe('auth_error');
+      expect(overview.windows).toEqual([]);
+    } finally {
+      restore();
+    }
   });
 });
