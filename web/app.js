@@ -2669,7 +2669,10 @@ function renderPlan(p, now) {
         countdown.dataset.resetAt = w.resetAt;
         countdown.textContent = fmtCountdown(w.resetAt, now);
       }
-      node.querySelector('.win-note').textContent = w.note || '';
+      // 粘性窗口（kimi 月/周）可能沿用上一批成功快照：数据时间明显落后整卡时显式标注来源批次。
+      const staleMs = p.lastFetchedAt != null && w.fetchedAt != null ? p.lastFetchedAt - w.fetchedAt : 0;
+      const staleLabel = staleMs > 120_000 ? `数据 ${fmtAgo(w.fetchedAt, now)}` : '';
+      node.querySelector('.win-note').textContent = [w.note || '', staleLabel].filter(Boolean).join(' · ');
       wins.appendChild(node);
     }
   }

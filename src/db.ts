@@ -43,6 +43,9 @@ export function projectEntityId(url: string): string {
 /** 配额快照保留期:纯时序数据,过期即清,否则每天 ~2 万行无限累积。 */
 export const SNAPSHOT_RETENTION_DAYS = 90;
 
+/** 稳定窗口键：跨批次语义稳定，可安全粘性沿用（latestStickyByPlan 只回填这些键）。 */
+const STABLE_SNAPSHOT_WINDOWS = ['rolling_5h', 'weekly', 'monthly', 'requests', 'credits_period'] as const;
+
 /** 存量脱敏回填的完成哨兵(INV-898);sessions.ts 的孤儿水位清理必须跳过它。 */
 export const REDACT_BACKFILL_STATE_PATH = '__redact_backfill_v1__';
 
@@ -1222,6 +1225,31 @@ export class Store {
       )
       .all(...(latestBatchOnly ? [planId, latestFetchedAt] : [planId])) as SnapshotRow[];
     return rows.map(rowToWindow);
+  }
+
+  /**
+   * 粘性窗口视图（多源独立 adapter 专用，见 PlanAdapter.stickyWindows）：
+   * 以最新一批为底，批内缺失的稳定窗口跨批取各自最新一条成功快照。
+   * 与 latestByPlan(plan, true) 的整批替换不同，kimi 的周/月单源失败时
+   * 不会让对应进度条从 UI 消失（INV-1242）。
+   */
+  latestStickyByPlan(planId: string): QuotaWindow[] {
+    const merged = [...this.latestByPlan(planId, true)];
+    const present = new Set(merged.map((w) => w.window));
+    for (const key of STABLE_SNAPSHOT_WINDOWS) {
+      if (present.has(key)) continue;
+      const row = this.db
+        .query('SELECT * FROM snapshots WHERE plan_id = ? AND window = ? ORDER BY fetched_at DESC, id DESC LIMIT 1')
+        .get(planId, key) as SnapshotRow | null;
+      if (row) merged.push(rowToWindow(row));
+    }
+    // 与 latestByPlan 的稳定窗口排序一致：5h → 周 → 月 → requests → credits；
+    // 自定义车道排最后，sort 稳定，保持批内相对顺序。
+    const rank = (w: QuotaWindow): number => {
+      const index = STABLE_SNAPSHOT_WINDOWS.indexOf(w.window as (typeof STABLE_SNAPSHOT_WINDOWS)[number]);
+      return index === -1 ? STABLE_SNAPSHOT_WINDOWS.length : index;
+    };
+    return merged.sort((a, b) => rank(a) - rank(b));
   }
 
   latestAll(): Map<string, QuotaWindow[]> {

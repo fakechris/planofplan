@@ -130,7 +130,11 @@ function buildPlanOverview(store: Store, plan: PlanConfig, now: number): Overvie
   const state = store.getState(plan.slug);
   // A successful provider poll is one snapshot batch. Do not merge a new
   // weekly-only Codex response with an older 5H row from a previous schema.
-  const windows = store.latestByPlan(plan.slug, true);
+  // 多源独立 adapter（kimi：周/5H/月来自三个独立请求）声明 stickyWindows，
+  // 单源失败时缺失窗口跨批沿用最近成功快照，否则 UI 整根消失（INV-1242）。
+  const windows = adapter?.stickyWindows
+    ? store.latestStickyByPlan(plan.slug)
+    : store.latestByPlan(plan.slug, true);
 
   let status: PlanStatus;
   let authStatus = state?.auth_status ?? AUTH_STATUS.UNKNOWN;

@@ -62,6 +62,28 @@ describe('Store', () => {
     expect(latest[0]!.used).toBe(20);
   });
 
+  test('粘性模式：部分批次不抹掉稳定窗口，缺失键跨批沿用最近成功快照（INV-1242）', () => {
+    const store = openMemoryDb();
+    store.syncPlan({ ...plan, slug: 'kimi', adapter: 'kimi', name: 'Kimi Code' });
+    const t0 = 1_770_000_000_000;
+    store.insertWindows('kimi', [
+      win(10, t0),
+      { ...win(20, t0), window: 'weekly', label: 'Week' },
+      { ...win(0, t0), window: 'monthly', label: 'Month', used: null, total: null, unit: 'percent', percentage: 30 },
+    ], t0);
+    // 月/周单源失败的退化批次：只剩 5H
+    store.insertWindows('kimi', [win(11, t0 + 60_000)], t0 + 60_000);
+
+    const sticky = store.latestStickyByPlan('kimi');
+    expect(sticky.map((w) => w.window)).toEqual(['rolling_5h', 'weekly', 'monthly']);
+    expect(sticky.find((w) => w.window === 'rolling_5h')!.used).toBe(11);
+    expect(sticky.find((w) => w.window === 'weekly')!.fetchedAt).toBe(t0);
+    expect(sticky.find((w) => w.window === 'monthly')!.percentage).toBe(30);
+
+    // 整批语义不受影响：最新一批确实只有 5H
+    expect(store.latestByPlan('kimi', true).map((w) => w.window)).toEqual(['rolling_5h']);
+  });
+
   test('Factory Standard/Core windows render in 5H, week, month order', () => {
     const store = openMemoryDb();
     store.syncPlan({ ...plan, slug: 'factory', adapter: 'factory', name: 'Factory Droid' });

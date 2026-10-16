@@ -91,6 +91,13 @@ export interface PlanAdapter {
    * key 配置入口——避免再出现「后端支持、前端漏掉入口」的缺口。
    */
   manualKey?: boolean;
+  /**
+   * 多源独立适配器声明：各配额窗口来自互相独立的请求（如 kimi 的 周/5H/月），
+   * 单源失败属于常态。声明后 overview 取「每个稳定窗口各自最新一条快照」跨批
+   * 粘性合并，本批缺失的窗口沿用最近一次成功数据；未声明（单响应型，如 codex）
+   * 保持整批替换语义，避免旧 schema 行幽灵复活。
+   */
+  stickyWindows?: boolean;
 }
 
 export type UsageSource = 'local' | 'official';
