@@ -16,10 +16,11 @@ import { buildUsageReport, collectUsageReport } from './usage.ts';
 import { buildSessionList, collectSessionCatalog, searchSessions } from './sessions.ts';
 import { refreshPricingSnapshot, pricingSnapshotStatus } from './pricing.ts';
 import { installCommitHook, uninstallCommitHook, prepareCommitMsgPath } from './hook.ts';
-import { existsSync, statSync, renameSync, rmSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { sessionProject } from './repos.ts';
 import { searchSkills, syncSkillsCatalog } from './skills.ts';
+import { rotateServeLogIfNeeded } from './serve-log.ts';
 import { DEFAULT_ALERT_SETTINGS } from './quota-alerts.ts';
 
 const argv = process.argv.slice(2);
@@ -239,20 +240,6 @@ async function serve(): Promise<void> {
   if (f.demo) seedDemo(store);
 
   const scheduler = new Scheduler(store, cfg);
-  scheduler.start();
-
-  // serve.log 轮转(重启时):子进程 stderr 已 inherit,日志会持续增长。
-  // 超 5MB 挪一代(launchd 的 fd 跟随 inode,旧内容继续写 .old 直到下次重启,
-  // 换代即清)。够用且零依赖——按 696K/月的增速,数月触发一次。
-  try {
-    const logPath = join(ensureHome(), 'serve.log');
-    if (existsSync(logPath) && statSync(logPath).size > 5 * 1024 * 1024) {
-      rmSync(`${logPath}.old`, { force: true });
-      renameSync(logPath, `${logPath}.old`);
-    }
-  } catch {
-    /* 轮转失败不影响启动 */
-  }
 
   // live = 非 demo:启动文件监听,session 目录有写入就自动增量索引(见 server.ts)
   const server = createServer(store, scheduler, cfg, { live: !f.demo, startupScan: !f.demo, authToken: bind.token });
@@ -264,10 +251,21 @@ async function serve(): Promise<void> {
       Bun.serve({ port, hostname, fetch: server.fetch, idleTimeout: 120 });
     } catch (error) {
       // 首个地址失败即退出;额外的 ::1 在没有 IPv6 的机器上可以缺席
-      if (index === 0) throw error;
+      if (index === 0) {
+        const busy = (error as { code?: string }).code === 'EADDRINUSE';
+        console.error(busy
+          ? `planofplan: 端口 ${port} 已被占用——大概率已有一个 daemon 在运行（menubar 直启与 launchd label 二选一，保留一个即可）`
+          : `planofplan: 无法监听 ${hostname}:${port}（${error instanceof Error ? error.message : String(error)}）`);
+        process.exit(1);
+      }
       console.error(`planofplan: 未能监听 ${hostname}:${port}(${error instanceof Error ? error.message : String(error)})`);
     }
   }
+  // 轮转与 scheduler.start 都在绑定成功之后：对着被占端口重试的 launchd 实例
+  // 绝不触碰 serve.log（否则轮转与失败日志互相冲刷，adapter 诊断全丢），
+  // 也不再空跑一轮 provider 轮询（INV-1243）。
+  rotateServeLogIfNeeded(join(ensureHome(), 'serve.log'));
+  scheduler.start();
   console.log(`planofplan 已启动: http://localhost:${port}  (监听 ${bind.hostnames.join(', ')})${bind.token ? '  (需 Bearer token)' : ''}${f.demo ? '  (demo 数据，内存库，不落盘)' : ''}`);
   if (f.demo) console.log('提示：demo 模式用内置示例数据预览界面；真实数据请配置 MINIMAX_CODING_API_KEY 后去掉 --demo 启动。');
 

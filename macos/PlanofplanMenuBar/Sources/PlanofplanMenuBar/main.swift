@@ -1165,16 +1165,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return icon
     }
 
-    private func ensureDaemon() {        request(path: "/api/overview", method: "GET") { [weak self] result, _ in
+    private func ensureDaemon() {
+        // 启动竞速防御（INV-1243）：launchd label / 上一个 daemon 可能还没完成绑定。
+        // 连续探测失败才考虑 spawn，避免与 KeepAlive 的 launchd 实例抢端口。
+        probeDaemonThenStart(attempt: 0)
+    }
+
+    private func probeDaemonThenStart(attempt: Int) {
+        request(path: "/api/overview", method: "GET") { [weak self] result, _ in
             guard let self else { return }
-            if result == nil {
+            if result != nil { return }
+            if attempt >= 2 {
                 self.startDaemon()
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                self?.probeDaemonThenStart(attempt: attempt + 1)
             }
         }
     }
 
     private func startDaemon() {
         guard daemon == nil || daemon?.isRunning == false else { return }
+        // LaunchAgent（KeepAlive=true）与直启子进程互斥：label 已加载时 daemon 归
+        // launchd 管，menubar 只消费 API，不再 spawn 第二个实例抢端口（INV-1243）。
+        if launchdLabelLoaded() {
+            NSLog("planofplan: daemon managed by launchd label \(AutoLaunchManager.daemonLabel), skip direct spawn")
+            return
+        }
         let binary = bundleDaemonURL()
         guard FileManager.default.isExecutableFile(atPath: binary.path) else {
             NSLog("planofplan: bundled daemon missing at \(binary.path)")
@@ -1212,6 +1230,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return url
         }
         return URL(fileURLWithPath: "/Applications/planofplan.app/Contents/MacOS/planofplan-daemon")
+    }
+
+    /// launchd label 是否已加载（plist 存在且 launchctl print 成功）。
+    /// 只看 plist 不够：用户可能手动 bootout 了但 plist 还在，此时仍需直启兜底。
+    private func launchdLabelLoaded() -> Bool {
+        let plistPath = "\(NSHomeDirectory())/Library/LaunchAgents/\(AutoLaunchManager.daemonLabel).plist"
+        guard FileManager.default.fileExists(atPath: plistPath) else { return false }
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        task.arguments = ["print", "gui/\(getuid())/\(AutoLaunchManager.daemonLabel)"]
+        task.standardOutput = FileHandle.nullDevice
+        task.standardError = FileHandle.nullDevice
+        do {
+            try task.run()
+        } catch {
+            return false
+        }
+        task.waitUntilExit()
+        return task.terminationStatus == 0
     }
 
     private func findExecutable(candidates: [String?]) -> String? {
