@@ -29,7 +29,7 @@ import { startSessionWatcher, createRateGate } from './watcher.ts';
 import { registerMcpRoutes } from './mcp.ts';
 import { buildLineageReport } from './lineage-report.ts';
 import { getAgentStatus } from './agent-status.ts';
-import { childProcessArgs } from './spawn.ts';
+import { spawnSelf } from './spawn.ts';
 import { ScanQueue } from './scan-queue.ts';
 import { registerMessageEvidenceRoutes } from './message-evidence.ts';
 import { checkQuotaAlerts, DEFAULT_ALERT_SETTINGS } from './quota-alerts.ts';
@@ -111,7 +111,9 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
   const usageReportCache = new Map<string, { report: ReturnType<typeof buildUsageReport>; at: number }>();
   const USAGE_CACHE_TTL_MS = 60_000;
 
-  const spawnScan = options.spawnScan ?? ((args: string[]) => Bun.spawn(childProcessArgs(args), { stdout: 'ignore', stderr: 'inherit' }));
+  // spawnSelf 显式快照 process.env:Bun.spawn 的默认 env 只含启动时快照,
+  // 运行时注入的变量(preload 的测试隔离 home)不会下发(INV-1329)。
+  const spawnScan = options.spawnScan ?? ((args: string[]) => spawnSelf(args));
   const scanQueue = new ScanQueue(async (request) => {
     if (request.kind === 'usage') await runUsageRefresh(request.days, request.includeOfficial ?? false);
     else await runSessionIndex(request.days, request.source);

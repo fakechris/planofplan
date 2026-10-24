@@ -188,25 +188,40 @@ function spanReposFor(
  * 物化(每轮 collect 末尾跑):全量重导,确定性 id,幂等。
  * 只覆盖 origin=user 的 session(subagent 的派工 prompt 不是需求,
  * 与 buildWorkGraph 的排除口径一致)。
+ * 输入流式化(INV-1329):用户消息按 session 分组迭代,组内派生完即弃,
+ * 不再把全量消息文本物化成大 map;输出按 (sessionId, seq) 排序保证确定性。
  */
 export function materializeRequirements(store: Store): number {
-  const bySession = new Map<string, Array<{ seq: number; ts: number | null; text: string }>>();
-  for (const row of store.listUserMessageRows()) {
-    if (!row.text) continue;
-    const list = bySession.get(row.sessionId) ?? [];
-    list.push({ seq: row.seq, ts: row.ts, text: row.text });
-    bySession.set(row.sessionId, list);
-  }
-  const rows: RequirementRecord[] = [];
+  const sessionsById = new Map<string, SessionRecord>();
   for (const session of store.listSessionRows()) {
     if ((session.origin ?? 'user') !== 'user') continue;
-    const derived = deriveSessionRequirements(session, bySession.get(session.id) ?? []);
-    if (derived.length === 0) continue;
+    sessionsById.set(session.id, session);
+  }
+  const rows: RequirementRecord[] = [];
+  const flushSession = (sessionId: string, messages: Array<{ seq: number; ts: number | null; text: string }>): void => {
+    const session = sessionsById.get(sessionId);
+    if (!session) return;
+    const derived = deriveSessionRequirements(session, messages);
+    if (derived.length === 0) return;
     const spanRepos = spanReposFor(session, derived, store.listSessionTouches(session.id));
     for (const item of derived) {
       rows.push({ ...item, repos: spanRepos.get(item.id) ?? [] });
     }
+  };
+  // iterateUserMessageRows 按 session_id 排序,分组连续:见组即切
+  let currentId: string | null = null;
+  let buffer: Array<{ seq: number; ts: number | null; text: string }> = [];
+  for (const row of store.iterateUserMessageRows()) {
+    if (!row.text) continue;
+    if (row.sessionId !== currentId) {
+      if (currentId != null) flushSession(currentId, buffer);
+      currentId = row.sessionId;
+      buffer = [];
+    }
+    buffer.push({ seq: row.seq, ts: row.ts, text: row.text });
   }
+  if (currentId != null) flushSession(currentId, buffer);
+  rows.sort((a, b) => (a.sessionId === b.sessionId ? a.seq - b.seq : (a.sessionId < b.sessionId ? -1 : 1)));
   store.replaceAllRequirements(rows);
   return rows.length;
 }

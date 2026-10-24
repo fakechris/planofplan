@@ -162,11 +162,11 @@ export function extractOpencodeDb(path: string, mtimeMs: number): SessionRecord[
   }
 }
 
-export function messagesFromOpencodeDb(path: string, nativeId: string, sessionId: string): SessionMessageRow[] {
+export function messagesFromOpencodeDb(path: string, nativeId: string, sessionId: string, shared?: Database): SessionMessageRow[] {
   const rows: SessionMessageRow[] = [];
   let db: Database | null = null;
   try {
-    db = new Database(path, { readonly: true });
+    db = shared ?? new Database(path, { readonly: true });
 
     const v2 = v2Entries(db, nativeId);
     if (v2) {
@@ -232,7 +232,7 @@ export function messagesFromOpencodeDb(path: string, nativeId: string, sessionId
   } catch {
     return rows;
   } finally {
-    db?.close();
+    if (!shared) db?.close();
   }
   return rows;
 }
@@ -242,11 +242,12 @@ export function touchesFromOpencodeDb(
   nativeId: string,
   sessionId: string,
   fallbackCwd: string | null,
+  shared?: Database,
 ): SessionFileTouch[] {
   const touches: SessionFileTouch[] = [];
   let db: Database | null = null;
   try {
-    db = new Database(path, { readonly: true });
+    db = shared ?? new Database(path, { readonly: true });
     const v2 = v2Entries(db, nativeId);
     if (v2) {
       v2.forEach((entry, index) => {
@@ -346,7 +347,7 @@ export function touchesFromOpencodeDb(
   } catch {
     return touches;
   } finally {
-    db?.close();
+    if (!shared) db?.close();
   }
   return touches;
 }
@@ -355,11 +356,12 @@ export function commitWitnessesFromOpencodeDb(
   path: string,
   nativeId: string,
   sessionId: string,
+  shared?: Database,
 ): CommitWitness[] {
   const out: CommitWitness[] = [];
   let db: Database | null = null;
   try {
-    db = new Database(path, { readonly: true });
+    db = shared ?? new Database(path, { readonly: true });
     const hasPartTable = db.query(
       "SELECT 1 FROM sqlite_master WHERE type='table' AND name='part'",
     ).get();
@@ -400,7 +402,7 @@ export function commitWitnessesFromOpencodeDb(
   } catch {
     return out;
   } finally {
-    db?.close();
+    if (!shared) db?.close();
   }
   return out;
 }
@@ -468,10 +470,10 @@ export function turnsFromOpencodeDb(path: string, nativeId: string): TranscriptT
   return turns;
 }
 
-export function recordsFromOpencodeDb(path: string, nativeId: string): unknown[] {
+export function recordsFromOpencodeDb(path: string, nativeId: string, shared?: Database): unknown[] {
   let db: Database | null = null;
   try {
-    db = new Database(path, { readonly: true });
+    db = shared ?? new Database(path, { readonly: true });
     const hasPartTable = db.query(
       "SELECT 1 FROM sqlite_master WHERE type='table' AND name='part'",
     ).get();
@@ -490,6 +492,6 @@ export function recordsFromOpencodeDb(path: string, nativeId: string): unknown[]
   } catch {
     return [];
   } finally {
-    db?.close();
+    if (!shared) db?.close();
   }
 }

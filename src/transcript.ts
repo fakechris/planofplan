@@ -599,12 +599,14 @@ export function messagesFromRecords(
   return records.flatMap((record, index) => messagesFromRecord(provider, sessionId, record, seqBase + index));
 }
 
-/** ZCode 的消息在其自有 sqlite 里,part 表自带 id,upsert 幂等,配合"总是重扫"。 */
-export function messagesFromZcodeDb(path: string, nativeId: string, sessionId: string): SessionMessageRow[] {
+/** ZCode 的消息在其自有 sqlite 里,part 表自带 id,upsert 幂等,配合"总是重扫"。
+ *  shared:调用方持有的只读连接(zcode 全部 session 同库,一轮扫描只开一次,
+ *  INV-1329);不传则自开自关。 */
+export function messagesFromZcodeDb(path: string, nativeId: string, sessionId: string, shared?: Database): SessionMessageRow[] {
   const rows: SessionMessageRow[] = [];
   let db: Database | null = null;
   try {
-    db = new Database(path, { readonly: true });
+    db = shared ?? new Database(path, { readonly: true });
     const parts = db.query(
       `SELECT p.id AS part_id, m.data AS message, p.data AS part, m.time_created AS created
        FROM part p JOIN message m ON m.id = p.message_id
@@ -637,7 +639,7 @@ export function messagesFromZcodeDb(path: string, nativeId: string, sessionId: s
   } catch {
     return rows;
   } finally {
-    db?.close();
+    if (!shared) db?.close();
   }
   return rows;
 }
