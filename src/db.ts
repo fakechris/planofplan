@@ -40,8 +40,15 @@ export function projectEntityId(url: string): string {
   return createHash('sha1').update(url).digest('hex').slice(0, 12);
 }
 
-/** 配额快照保留期:纯时序数据,过期即清,否则每天 ~2 万行无限累积。 */
-export const SNAPSHOT_RETENTION_DAYS = 90;
+/** 配额快照保留期:纯时序数据,过期即清,否则每天 ~2 万行无限累积。
+ *  PLANOFPLAN_SNAPSHOT_RETENTION_DAYS 可调(默认 90,非法值回落 90)。 */
+export function snapshotRetentionDays(): number {
+  const raw = Number(process.env.PLANOFPLAN_SNAPSHOT_RETENTION_DAYS);
+  return Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : 90;
+}
+
+/** 库空间回收阈值:空闲页超过它才值得 VACUUM/增量回收,常态扫描零成本。 */
+export const SPACE_RECLAIM_THRESHOLD_BYTES = 256 * 1024 * 1024;
 
 /** 稳定窗口键：跨批次语义稳定，可安全粘性沿用（latestStickyByPlan 只回填这些键）。 */
 const STABLE_SNAPSHOT_WINDOWS = ['rolling_5h', 'weekly', 'monthly', 'requests', 'credits_period'] as const;
@@ -52,20 +59,6 @@ export const REDACT_BACKFILL_STATE_PATH = '__redact_backfill_v1__';
 /** 当前 schema 迁移天花板:迁移链每级 `PRAGMA user_version = N` 的最大值。
  *  测试断言迁移完成度时引用本常量,不要硬编码,避免每次加迁移破一片。 */
 export const SCHEMA_VERSION = 15;
-
-/** 消息行的内容指纹:id + 全部业务列。库内侧与写入侧必须同构,
- *  NULL 与 undefined 归一为空串。 */
-function messageFingerprint(
-  id: string, seq: number, role: string, kind: string,
-  toolName: string | null, text: string | null, timestamp: number | null,
-  model: string | null, inputTokens: number | null, outputTokens: number | null,
-  fullText: string | null, parserVersion: number | null,
-): string {
-  return [
-    id, seq, role, kind, toolName, text, timestamp, model,
-    inputTokens, outputTokens, fullText, parserVersion,
-  ].map((value) => (value ?? '\u0001')).join('\u0000');
-}
 
 /**
  * The FTS triggers, generated from searchableRowSql so the index, message_search and the
@@ -512,6 +505,14 @@ export class Store {
     db.exec('CREATE INDEX IF NOT EXISTS idx_session_repos_session ON session_repos(session_id)');
     db.exec('CREATE INDEX IF NOT EXISTS idx_session_repos_name ON session_repos(name)');
 
+    // 库维护状态(键值表):auto_vacuum 激活标记等。不用 user_version 挂钩
+    // ——本机库已被未知构建推到 16 的教训(见下方 v15 注释),编号门会永久
+    // 关掉;CREATE IF NOT EXISTS 天然幂等,新老库一视同仁。
+    db.exec(`CREATE TABLE IF NOT EXISTS maintenance_state (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    )`);
+
     // v1：本地 usage 记录的 day 曾按 UTC 分桶，与 menubar/web 的「今日」（本地
     // 日期）不一致。一次性按本地时区重算（official 记录保留 provider 原样日期）。
     const version = (db.query('PRAGMA user_version').get() as { user_version: number }).user_version;
@@ -691,7 +692,7 @@ export class Store {
     // v15:snapshots 保留期回填。配额快照是纯时序数据,此前无限增长
     //(52.7 万行/日增 2 万),90 天之外的行一次性清掉;此后由调度器日清。
     if (version < 15) {
-      this.pruneSnapshotsBefore(Date.now() - SNAPSHOT_RETENTION_DAYS * 86_400_000);
+      this.pruneSnapshotsBefore(Date.now() - snapshotRetentionDays() * 86_400_000);
       db.exec('PRAGMA user_version = 15');
     }
     this.ensureSearchTriggers();
@@ -1356,12 +1357,70 @@ export class Store {
   }
 
   /** 只清配额快照(不动 usage_records:/api/usage 对外承诺 365 天窗口)。
-   *  迁移回填与调度器日清共用。 */
-  pruneSnapshotsBefore(cutoffMs: number): number {
-    const r = this.db
-      .query(`DELETE FROM snapshots WHERE fetched_at < ?`)
-      .run(cutoffMs);
-    return Number(r.changes);
+   *  迁移回填与调度器日清共用。分批删除:百万行级存量一次性 DELETE 会长占
+   *  写锁,与 serve 的轮询写入互相 BUSY(INV-1329)。 */
+  pruneSnapshotsBefore(cutoffMs: number, batchSize = 5_000): number {
+    let total = 0;
+    for (;;) {
+      const r = this.db.query(
+        `DELETE FROM snapshots WHERE id IN (
+           SELECT id FROM snapshots WHERE fetched_at < ? LIMIT ?)`,
+      ).run(cutoffMs, batchSize);
+      const deleted = Number(r.changes);
+      total += deleted;
+      if (deleted < batchSize) return total;
+    }
+  }
+
+  /** 库维护状态读取(maintenance_state 键值表)。 */
+  getMaintenanceState(key: string): string | null {
+    const row = this.db.query('SELECT value FROM maintenance_state WHERE key = ?').get(key) as
+      | { value: string }
+      | null;
+    return row?.value ?? null;
+  }
+
+  setMaintenanceState(key: string, value: string): void {
+    this.db
+      .query('INSERT INTO maintenance_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+      .run(key, value);
+  }
+
+  /** 空闲页字节数:freelist_count × page_size。 */
+  freelistBytes(): number {
+    const freelist = (this.db.query('PRAGMA freelist_count').get() as { freelist_count: number }).freelist_count;
+    const pageSize = (this.db.query('PRAGMA page_size').get() as { page_size: number }).page_size;
+    return freelist * pageSize;
+  }
+
+  /** 截断 WAL 的 checkpoint(TRUNCATE)。库忙时返回 false,不抛错。 */
+  walCheckpoint(): boolean {
+    try {
+      const r = this.db.query('PRAGMA wal_checkpoint(TRUNCATE)').get() as { busy: number };
+      return r.busy === 0;
+    } catch {
+      return false;
+    }
+  }
+
+  /** 空间回收(INV-1329):空闲页超阈值才动手——未激活的老库一次性
+   *  `PRAGMA auto_vacuum=INCREMENTAL` + VACUUM(重建文件,回收全部空闲页
+   *  并激活增量模式);已激活的库走 `PRAGMA incremental_vacuum` 增量回收。
+   *  激活标记存 maintenance_state,不信 PRAGMA 读数:auto_vacuum 在 VACUUM
+   *  前后读数语义含混(设了 pragma 但未生效也报 2)。必须在事务外调用;
+   *  VACUUM 需要独占访问,库忙(BUSY)时抛错由调用方下轮重试。 */
+  reclaimDbSpace(thresholdBytes = SPACE_RECLAIM_THRESHOLD_BYTES): { skipped: boolean; beforeBytes: number; afterBytes: number } {
+    const beforeBytes = this.freelistBytes();
+    if (beforeBytes <= thresholdBytes) return { skipped: true, beforeBytes, afterBytes: beforeBytes };
+    const activated = this.getMaintenanceState('db.autovacuum') === 'incremental';
+    if (!activated) {
+      this.db.exec('PRAGMA auto_vacuum = INCREMENTAL');
+      this.db.exec('VACUUM');
+      this.setMaintenanceState('db.autovacuum', 'incremental');
+    } else {
+      this.db.exec('PRAGMA incremental_vacuum');
+    }
+    return { skipped: false, beforeBytes, afterBytes: this.freelistBytes() };
   }
 
   /** FTS5 死段合并:外部内容表的 delete+insert churn 会积累死 segment,
@@ -1704,6 +1763,65 @@ export class Store {
       confidence: row.confidence,
       fetchedAt: row.fetched_at ?? undefined,
     }));
+  }
+
+  /** getUsageRecords 的流式版(INV-1329):大窗口聚合(applySessionUsage /
+   *  stub 回填)不再把整段数组物化进内存。迭代完成前不要在同连接上写——
+   *  语句游标未释放时写库会 BUSY/失效。 */
+  *iterateUsageRecords(since: number, until: number): Generator<UsageRecord> {
+    const stmt = this.db.query(
+      `SELECT id, day, timestamp, provider, model, session_id, project, source_file,
+              input_tokens, cached_input_tokens, cache_creation_input_tokens,
+              output_tokens, reasoning_output_tokens, total_tokens,
+              billable_tokens, estimated_cost_usd, source, confidence
+              , fetched_at
+       FROM usage_records
+       WHERE timestamp >= ? AND timestamp < ?
+       ORDER BY timestamp ASC, id ASC`,
+    );
+    for (const row of stmt.iterate(since, until) as Generator<{
+      id: string;
+      day: string;
+      timestamp: number;
+      provider: string;
+      model: string;
+      session_id: string | null;
+      project: string | null;
+      source_file: string | null;
+      input_tokens: number;
+      cached_input_tokens: number;
+      cache_creation_input_tokens: number;
+      output_tokens: number;
+      reasoning_output_tokens: number;
+      total_tokens: number;
+      billable_tokens: number | null;
+      estimated_cost_usd: number | null;
+      source: UsageRecord['source'];
+      confidence: UsageRecord['confidence'];
+      fetched_at: number | null;
+    }>) {
+      yield {
+        id: row.id,
+        day: row.day,
+        timestamp: row.timestamp,
+        provider: row.provider,
+        model: row.model,
+        sessionId: row.session_id,
+        project: row.project,
+        sourceFile: row.source_file,
+        inputTokens: row.input_tokens,
+        cachedInputTokens: row.cached_input_tokens,
+        cacheCreationInputTokens: row.cache_creation_input_tokens,
+        outputTokens: row.output_tokens,
+        reasoningOutputTokens: row.reasoning_output_tokens,
+        totalTokens: row.total_tokens,
+        billableTokens: row.billable_tokens,
+        estimatedCostUsd: row.estimated_cost_usd,
+        source: row.source,
+        confidence: row.confidence,
+        fetchedAt: row.fetched_at ?? undefined,
+      };
+    }
   }
 
   getUsageReport(since: number, until: number): UsageReport {
@@ -2114,12 +2232,8 @@ export class Store {
     // 挑出内容真有变化的行:DO UPDATE 即便值相同也会执行,每次重扫都会
     // 触发一轮 UPDATE(连带 FTS delete+insert churn、WAL 噪音)。未变行直接
     // 跳过,重扫趋近零写。
-    const unchanged = this.existingMessageFingerprints(rows);
-    const changed = rows.filter((row) => !unchanged.has(messageFingerprint(
-      row.id, row.seq, row.role, row.kind, row.toolName, row.text,
-      row.timestamp, row.model, row.inputTokens, row.outputTokens,
-      row.fullText ?? null, row.parserVersion ?? null,
-    )));
+    const unchanged = this.unchangedMessageIds(rows);
+    const changed = rows.filter((row) => !unchanged.has(row.id));
     if (changed.length === 0) return 0;
     this.withTransaction(() => {
       for (const row of changed) {
@@ -2143,32 +2257,27 @@ export class Store {
     return changed.length;
   }
 
-  /** 库内已有行的内容指纹(id+全部业务列),供重扫去 churn。分块走主键索引。 */
-  private existingMessageFingerprints(rows: SessionMessageRow[]): Set<string> {
-    const fingerprints = new Set<string>();
-    const ids = [...new Set(rows.map((row) => row.id))];
-    for (let i = 0; i < ids.length; i += 500) {
-      const chunk = ids.slice(i, i + 500);
-      const placeholders = chunk.map(() => '?').join(', ');
-      const stored = this.db.query(
-        `SELECT id, seq, role, kind, tool_name, text, timestamp, model,
-                input_tokens, output_tokens, full_text, parser_version
-         FROM session_messages WHERE id IN (${placeholders})`,
-      ).all(...chunk) as Array<{
-        id: string; seq: number; role: string; kind: string;
-        tool_name: string | null; text: string | null; timestamp: number | null;
-        model: string | null; input_tokens: number | null; output_tokens: number | null;
-        full_text: string | null; parser_version: number | null;
-      }>;
-      for (const row of stored) {
-        fingerprints.add(messageFingerprint(
-          row.id, row.seq, row.role, row.kind, row.tool_name, row.text,
-          row.timestamp, row.model, row.input_tokens, row.output_tokens,
-          row.full_text, row.parser_version,
-        ));
-      }
+  /** 库内已有行的内容比对(id+全部业务列),供重扫去 churn。逐行主键点查,
+   *  绑定参数在 SQLite 侧用 IS 逐列比较——NULL 与空串判异,与旧指纹口径
+   *  一致。存量 full_text 不再整串拉回 JS 堆(实测重扫堆峰值 470MB→
+   *  ~200MB,INV-1329)。 */
+  private unchangedMessageIds(rows: SessionMessageRow[]): Set<string> {
+    const unchanged = new Set<string>();
+    const stmt = this.db.query(
+      `SELECT id FROM session_messages
+       WHERE id = ? AND seq IS ? AND role IS ? AND kind IS ?
+         AND tool_name IS ? AND text IS ? AND timestamp IS ? AND model IS ?
+         AND input_tokens IS ? AND output_tokens IS ? AND full_text IS ? AND parser_version IS ?`,
+    );
+    for (const row of rows) {
+      const hit = stmt.get(
+        row.id, row.seq, row.role, row.kind, row.toolName ?? null, row.text ?? null,
+        row.timestamp ?? null, row.model ?? null, row.inputTokens ?? null, row.outputTokens ?? null,
+        row.fullText ?? null, row.parserVersion ?? null,
+      );
+      if (hit != null) unchanged.add(row.id);
     }
-    return fingerprints;
+    return unchanged;
   }
 
   deleteSessionMessages(sessionId: string): void {
@@ -2505,6 +2614,19 @@ export class Store {
        WHERE role = 'user' AND kind = 'text' AND text IS NOT NULL
        ORDER BY session_id, seq`,
     ).all() as Array<{ sessionId: string; seq: number; ts: number | null; text: string }>;
+  }
+
+  /** listUserMessageRows 的流式版(INV-1329):需求物化按 session 分组消费,
+   *  组内派生完即弃,不再把全量消息文本物化成数组。ORDER BY session_id 保证
+   *  分组连续,调用方据此切片。迭代完成前不要在同连接上写。 */
+  *iterateUserMessageRows(): Generator<{ sessionId: string; seq: number; ts: number | null; text: string }> {
+    const stmt = this.db.query(
+      `SELECT session_id AS sessionId, seq, timestamp AS ts, text
+       FROM session_messages
+       WHERE role = 'user' AND kind = 'text' AND text IS NOT NULL
+       ORDER BY session_id, seq`,
+    );
+    yield* stmt.iterate() as Generator<{ sessionId: string; seq: number; ts: number | null; text: string }>;
   }
 
   /** 需求物化专用:全量替换(确定性 id,重导即幂等)。 */

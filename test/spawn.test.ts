@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { childProcessArgs } from '../src/spawn.ts';
+import { childProcessArgs, childEnv } from '../src/spawn.ts';
 
 describe('childProcessArgs（daemon 重执行本 CLI 的 spawn 参数）', () => {
   test('解释模式（bun test 运行，src/cli.ts 在旁边）：带上脚本路径', () => {
@@ -31,5 +31,25 @@ describe('childProcessArgs（daemon 重执行本 CLI 的 spawn 参数）', () =>
     expect(code).toBe(0);
     expect(stdout).not.toContain('用法');
     expect(stdout).toContain('价格快照');
+  }, 30_000);
+});
+
+describe('子进程环境下发(INV-1329)', () => {
+  test('childEnv 快照包含运行时注入的变量,显式 env 让子进程可见', async () => {
+    // 事故实录:Bun.spawn 不传 env 时,preload 运行时注入的
+    // PLANOFPPLAN_HOME(临时隔离 home)不下发,扫描子进程落回真实
+    // ~/.planofplan,全量测试把真实库顺带扫描了一轮。
+    process.env.PLANOFPLAN_TEST_PROBE = 'runtime-injected';
+    try {
+      expect(childEnv().PLANOFPLAN_TEST_PROBE).toBe('runtime-injected');
+      const child = Bun.spawn(
+        [process.execPath, '-e', 'console.log(process.env.PLANOFPLAN_TEST_PROBE ?? "MISSING")'],
+        { stdout: 'pipe', stderr: 'pipe', stdin: 'ignore', env: childEnv() },
+      );
+      const stdout = await new Response(child.stdout).text();
+      expect(stdout.trim()).toBe('runtime-injected');
+    } finally {
+      delete process.env.PLANOFPLAN_TEST_PROBE;
+    }
   }, 30_000);
 });

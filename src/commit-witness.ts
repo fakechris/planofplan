@@ -246,11 +246,12 @@ export function commitKindLabel(kind: SessionCommit['kind']): string {
  * zcode 目击:tool part 的 state.input.command 与 state.output 同 part 存放
  * (无配对问题);output 过大时 zcode 换成 persisted-output 指针 + 2KB 预览,
  * 预览含 sha 即可命中,截断的接受部分覆盖(钩子兜底)。
+ * shared:调用方持有的只读连接(整库单连接单趟,INV-1329);不传则自开自关。
  */
-export function commitWitnessesFromZcodeDb(path: string, nativeId: string, sessionId: string): CommitWitness[] {
+export function commitWitnessesFromZcodeDb(path: string, nativeId: string, sessionId: string, shared?: Database): CommitWitness[] {
   const out: CommitWitness[] = [];
   try {
-    const db = new Database(path, { readonly: true });
+    const db = shared ?? new Database(path, { readonly: true });
     try {
       const rows = db.query(
         `SELECT p.data AS part, m.time_created AS created
@@ -276,7 +277,7 @@ export function commitWitnessesFromZcodeDb(path: string, nativeId: string, sessi
         }
       }
     } finally {
-      db.close();
+      if (!shared) db.close();
     }
   } catch {
     /* zcode db 不可读:跳过 */

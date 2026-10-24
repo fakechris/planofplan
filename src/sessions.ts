@@ -39,6 +39,7 @@ import {
 } from './session-origin.ts';
 import { claudeParentOfPath, materializeSessionLinks } from './session-links.ts';
 import { materializeRequirements } from './requirements.ts';
+import { extractZcodeSessionStreaming } from './zcode-index.ts';
 import { refineRequirements } from './requirement-llm.ts';
 import { forEachJsonlLine } from './jsonl-stream.ts';
 import { loadConfig } from './config.ts';
@@ -781,7 +782,7 @@ function readClaudeHistoryTitles(options: SessionCollectOptions): Map<string, st
   return map;
 }
 
-const CATALOG_YIELD_BATCH = 8;
+const CATALOG_YIELD_BATCH = 4;
 
 async function yieldEventLoop(): Promise<void> {
   // A scan can decode gigabytes without going idle. Collect between file groups
@@ -858,14 +859,18 @@ function streamJsonlFrom(
       }
     })();
     let lines = 0;
+    // 累计字节偏移充当 end:压缩行的 repoRecords 截断与未压缩同语义
+    //(只保留头部 TOUCH_BYTES 内的记录),不再整文件持有全部解析对象
+    let offset = 0;
     let batch: StreamedLine[] = [];
     for (const line of raw.split('\n')) {
+      offset += line.length + 1;
       if (!line.trim()) continue;
       lines += 1;
       try {
         const value = JSON.parse(line) as unknown;
         if (value && typeof value === 'object') {
-          batch.push({ record: value as Record<string, unknown>, line: baseLines + lines, end: 0 });
+          batch.push({ record: value as Record<string, unknown>, line: baseLines + lines, end: offset });
         }
       } catch {
         /* truncated or malformed line */
@@ -1006,7 +1011,8 @@ function indexSessionFileMessages(
           && record.aiTitle.trim()) {
           aiTitle = record.aiTitle.trim();
         }
-        if (end > TOUCH_BYTES && !isCompressedLog(readPath)) continue;
+        // 压缩路径现在也带累计字节偏移:头部截断对两种形态统一生效
+        if (end > TOUCH_BYTES) continue;
         repoRecords.push(record);
       }
     });
@@ -1042,6 +1048,28 @@ export function pathPresence(path: string): 'present' | 'missing' | 'unknown' {
   }
 }
 
+/** 只读打开一个外部 sqlite;不可读(权限/不存在/TCC)返回 null,调用方走
+ *  抽取器自带的自开路径或跳过。zcode/opencode 的整库单连接复用入口(INV-1329)。 */
+function openReadonlySqlite(path: string): Database | null {
+  try {
+    return new Database(path, { readonly: true });
+  } catch {
+    return null;
+  }
+}
+
+/** 扫描相位追踪(运维排障用):PLANOFPLAN_SCAN_TRACE=1 时向 stderr 打相位
+ * 耗时与 RSS 水位,平时零成本。定位重扫内存/耗时回归(INV-1329)用。 */
+const SCAN_TRACE = process.env.PLANOFPLAN_SCAN_TRACE === '1';
+let scanTraceStartedAt = Date.now();
+function scanTrace(phase: string): void {
+  if (!SCAN_TRACE) return;
+  const elapsedS = ((Date.now() - scanTraceStartedAt) / 1000).toFixed(1);
+  const rssMb = Math.round(process.memoryUsage.rss() / 1_048_576);
+  console.error(`[scan-trace] +${elapsedS}s ${phase} rss=${rssMb}MB`);
+  scanTraceStartedAt = Date.now();
+}
+
 export async function collectSessionCatalog(store: Store, options: SessionCollectOptions = {}): Promise<number> {
   const since = options.since ?? Date.now() - 30 * DAY_MS;
   const until = options.until ?? Date.now();
@@ -1057,15 +1085,52 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
   // 续扫(只 parse 新增行),截断/轮换/解析器版本变了才全量重扫。
   // zcode 的 db.sqlite 有 WAL,主文件 mtime 不可信,总是重扫(part id 稳定,
   // 消息 upsert 幂等)。
+  // 目录行全程只加载这一次(INV-1329):此前的墓碑清理、cwd 回填各自再拉
+  // 一次全表;现在三处共用同一快照——本轮新入库的行不在这份快照里,但它们
+  // 既未被墓碑标记、源文件又刚被发现存在,清理语义不受影响。
+  const allRows = store.listSessionRows();
   const existingByFile = new Map<string, SessionRecord[]>();
-  for (const row of store.listSessionRows()) {
+  for (const row of allRows) {
     if (!row.sourceFile) continue;
     const list = existingByFile.get(row.sourceFile) ?? [];
     list.push(row);
     existingByFile.set(row.sourceFile, list);
   }
 
-  const rows: SessionRecord[] = [];
+  // 标题补充源提前加载(codex 官方线程名覆盖启发式;claude history 兜底
+  // 无标题 session——信封开头的会话头部解析抽不出标题):在行入列时即时
+  // 应用,对复用行同样生效,配合分块落库不再需要扫描后的整批回写。
+  const codexIndexTitles = readCodexIndexTitles(options);
+  const claudeHistoryTitles = readClaudeHistoryTitles(options);
+  const applySupplementalTitles = (row: SessionRecord): void => {
+    if (row.provider === 'codex') {
+      const official = codexIndexTitles.get(row.nativeId);
+      if (official) row.title = official;
+    } else if (row.provider === 'claude' && !row.title) {
+      const fallback = claudeHistoryTitles.get(row.nativeId);
+      if (fallback) row.title = fallback;
+    }
+  };
+
+  // 分块落库(INV-1329):90 天窗口的全量目录行不再整程驻留,攒满一批就
+  // upsert + repo 替换后释放。seenIds 供 usage stub 去重(替代整程持有 rows)。
+  const CATALOG_FLUSH_ROWS = 256;
+  const seenIds = new Set<string>();
+  let pendingRows: SessionRecord[] = [];
+  const flushRows = (): void => {
+    if (pendingRows.length === 0) return;
+    store.upsertSessions(pendingRows);
+    for (const row of pendingRows) store.replaceSessionRepos(row.id, row.repos ?? []);
+    pendingRows = [];
+  };
+  const pushRow = (row: SessionRecord): void => {
+    applySupplementalTitles(row);
+    seenIds.add(row.id);
+    pendingRows.push(row);
+    if (pendingRows.length >= CATALOG_FLUSH_ROWS) flushRows();
+  };
+
+  scanTrace(`catalog-scan files=${discovered.length}`);
   let processed = 0;
   let bytesSinceYield = 0;
   let scanned = 0;
@@ -1105,23 +1170,31 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
       && state.parsedBytes <= state.size
       && compositeSize > 0;
     if (file.provider !== 'zcode' && existingRows && latestSeen >= compositeMtimeMs && indexFresh) {
-      rows.push(...existingRows);
+      for (const row of existingRows) pushRow(row);
       continue;
     }
     if (file.provider === 'opencode') {
       scanned += 1;
       const dbRows = extractSessionRecords(file.provider, file.path, file.mtimeMs);
       const opencodeRows: SessionRecord[] = [];
+      // 四个抽取器共用一个只读连接(INV-1329):此前每个 session 各自开库,
+      // 数百个 session 一轮要开关上千次同一文件。
+      const conn = openReadonlySqlite(file.path);
       try {
         store.withTransaction(() => {
+          let opencodeDone = 0;
           for (const row of dbRows) {
             if (tombstones.ids.has(row.id)) continue;
             const withWork = attachGit(row);
-            store.upsertSessionMessages(messagesFromOpencodeDb(file.path, row.nativeId, row.id));
-            store.upsertSessionTouches(touchesFromOpencodeDb(file.path, row.nativeId, row.id, row.cwd));
-            store.upsertSessionCommitWitnesses(commitWitnessesFromOpencodeDb(file.path, row.nativeId, row.id));
-            const repos = extractSessionRepos(withWork, { records: recordsFromOpencodeDb(file.path, row.nativeId) });
+            store.upsertSessionMessages(messagesFromOpencodeDb(file.path, row.nativeId, row.id, conn ?? undefined));
+            store.upsertSessionTouches(touchesFromOpencodeDb(file.path, row.nativeId, row.id, row.cwd, conn ?? undefined));
+            store.upsertSessionCommitWitnesses(commitWitnessesFromOpencodeDb(file.path, row.nativeId, row.id, conn ?? undefined));
+            const repos = extractSessionRepos(withWork, { records: recordsFromOpencodeDb(file.path, row.nativeId, conn ?? undefined) });
             opencodeRows.push(attachRepos(withWork, repos));
+            opencodeDone += 1;
+            // 四个抽取器各自 .all() + JSON.parse 的瞬态在数百 session 的
+            // 紧循环里同样堆高水位;每 8 个 session 强制回收(INV-1329)
+            if (opencodeDone % 8 === 0) Bun.gc(true);
           }
           store.upsertSessionIndexState({
             path: readPath,
@@ -1132,15 +1205,86 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
             parserVersion: MESSAGE_PARSER_VERSION,
           });
         });
-        rows.push(...opencodeRows);
+        for (const row of opencodeRows) pushRow(row);
+        scanTrace(`opencode-file sessions=${dbRows.length}`);
       } catch (error) {
         // 整库回滚、水位不前进;目录行沿用上一轮的,下一轮重试(INV-903)
         logIndexFailure(readPath, error);
-        if (existingRows) rows.push(...existingRows);
+        if (existingRows) for (const row of existingRows) pushRow(row);
+      } finally {
+        conn?.close();
       }
       processed += 1;
       bytesSinceYield += readSize;
-      if (processed % CATALOG_YIELD_BATCH === 0 || bytesSinceYield >= 32 * 1024 * 1024) {
+      if (processed % CATALOG_YIELD_BATCH === 0 || bytesSinceYield >= 8 * 1024 * 1024) {
+        bytesSinceYield = 0;
+        await yieldEventLoop();
+      }
+      continue;
+    }
+    if (file.provider === 'zcode') {
+      scanned += 1;
+      const dbRows = extractSessionRecords(file.provider, file.path, file.mtimeMs);
+      // zcode 专项(INV-1329):全部 session 同在一个 db.sqlite,单只读连接
+      // 走完(此前每 session 消息/touch/witness 三次独立开库,68 session 一轮
+      // 开关 200+ 次);入库按 session 分块包事务——此前逐语句自动提交,
+      // 4.7 万行每行一次 fsync,WAL 与耗时被放大一个数量级。块内先备料后
+      // 写库,JSON 解析留在事务外,缩短写锁持有窗口;单 session 抽取失败
+      // 只丢该 session 的消息(与此前逐语句提交的可见语义一致),写库失败
+      // 整块回滚、目录行照常保留,zcode 总是重扫,下一轮自动重试。
+      const conn = openReadonlySqlite(file.path);
+      const ZCODE_TX_SESSIONS = 8;
+      try {
+        for (let i = 0; i < dbRows.length; i += ZCODE_TX_SESSIONS) {
+          const batch = dbRows.slice(i, i + ZCODE_TX_SESSIONS)
+            .filter((row) => !tombstones.ids.has(row.id));
+          try {
+            store.withTransaction(() => {
+              for (const row of batch) {
+                const withWork = attachGit(row);
+                // conn 正常时由抽取器同趟产出的 headRecords 推导(省掉
+                // recordsFromZcodeDb 的第三趟全量解析);兜底路径才退回旧语义
+                let sessionRepos: ReturnType<typeof extractSessionRepos> | null = null;
+                try {
+                  if (conn) {
+                    // 单趟合并抽取:消息/touch/witness 一条流式游标出全;
+                    // 消息按 400 行分批回调落库,巨型会话不再整程驻留(INV-1329)
+                    let zcodeBatches = 0;
+                    const extracted = extractZcodeSessionStreaming(conn, row.nativeId, row.id, row.cwd, (batch) => {
+                      store.upsertSessionMessages(batch);
+                      // 巨型会话(数万条消息)的批间瞬态在没有 GC 点时会堆出
+                      // 高水位;每 4 批强制回收一次(INV-1329)
+                      zcodeBatches += 1;
+                      if (zcodeBatches % 4 === 0) Bun.gc(true);
+                    });
+                    store.upsertSessionTouches(extracted.touches);
+                    store.upsertSessionCommitWitnesses(extracted.witnesses);
+                    sessionRepos = extractSessionRepos(withWork, { records: extracted.headRecords });
+                  } else {
+                    store.upsertSessionMessages(messagesFromZcodeDb(file.path, row.nativeId, row.id));
+                    store.upsertSessionCommitWitnesses(commitWitnessesFromZcodeDb(file.path, row.nativeId, row.id));
+                    store.upsertSessionTouches(touchesFromOpencodeDb(file.path, row.nativeId, row.id, row.cwd));
+                  }
+                } catch {
+                  /* 单个 session 的消息抽取失败不拖垮目录 */
+                }
+                pushRow(attachRepos(withWork, sessionRepos ?? extractSessionRepos(withWork)));
+              }
+            });
+          } catch (error) {
+            logIndexFailure(readPath, error);
+          }
+          // 原生 JSON 解析的海量临时对象在紧循环里不会触发 JSC 主动回收,
+          // 实测把 RSS 推到 1.2GB;每块收尾强制回收,压住高水位(INV-1329)
+          Bun.gc(true);
+        }
+      } finally {
+        conn?.close();
+      }
+      processed += 1;
+      bytesSinceYield += readSize;
+      scanTrace(`zcode-file sessions=${dbRows.length}`);
+      if (processed % CATALOG_YIELD_BATCH === 0 || bytesSinceYield >= 8 * 1024 * 1024) {
         bytesSinceYield = 0;
         await yieldEventLoop();
       }
@@ -1163,6 +1307,7 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
         }
         repos = extractSessionRepos(withWork);
       } else if (file.provider === 'amp') {
+        scanTrace(`amp-file ${Math.round(readSize / 1024)}KB`);
         if (!indexFresh && readSize > 0) {
           try {
             store.withTransaction(() => {
@@ -1195,6 +1340,10 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
           const indexed = indexSessionFileMessages(store, withWork, readPath, readMtimeMs, readSize, state);
           repos = indexed.repos;
           if (indexed.aiTitle) withWork.title = titleify(indexed.aiTitle);
+          scanTrace(`file ${file.provider} ${Math.round(readSize / 1024)}KB compressed=${isCompressedLog(readPath) ? 1 : 0}`);
+          // 压缩日志的解压瞬态(≤8MB 字符串 + split 行数组 + 解析对象)远超
+          // 其压缩体积,yield 的字节阈值按压缩体积计数会漏掉它们——逐文件回收
+          if (isCompressedLog(readPath)) Bun.gc(true);
         } catch (error) {
           logIndexFailure(readPath, error);
           repos = store.listSessionRepos(row.id);
@@ -1202,37 +1351,29 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
       } else {
         repos = extractSessionRepos(withWork);
       }
-      rows.push(attachRepos(withWork, repos));
+      pushRow(attachRepos(withWork, repos));
     }
     processed += 1;
     bytesSinceYield += readSize;
-    if (processed % CATALOG_YIELD_BATCH === 0 || bytesSinceYield >= 32 * 1024 * 1024) {
+    if (processed % CATALOG_YIELD_BATCH === 0 || bytesSinceYield >= 8 * 1024 * 1024) {
       bytesSinceYield = 0;
+      // JSON.parse/解压的海量临时对象在紧循环里不触发 JSC 主动回收,
+      // 数百个压缩文件实测把 RSS 推到 600MB+;yield 点同步强制回收压水位
+      Bun.gc(true);
       await yieldEventLoop();
     }
   }
-  // 标题补充源,对复用行同样生效:codex 官方线程名覆盖启发式,claude history
-  // 兜底无标题 session(信封开头的会话头部解析抽不出标题)
-  const codexIndexTitles = readCodexIndexTitles(options);
-  const claudeHistoryTitles = readClaudeHistoryTitles(options);
-  for (const row of rows) {
-    if (row.provider === 'codex') {
-      const official = codexIndexTitles.get(row.nativeId);
-      if (official) row.title = official;
-    } else if (row.provider === 'claude' && !row.title) {
-      const fallback = claudeHistoryTitles.get(row.nativeId);
-      if (fallback) row.title = fallback;
-    }
-  }
-  store.upsertSessions(rows);
-  for (const row of rows) store.replaceSessionRepos(row.id, row.repos ?? []);
+  scanTrace(`catalog-done scanned=${scanned}`);
+  flushRows();
   store.upsertSessions(
-    sessionStubsFromUsage(store, since, until, new Set(rows.map((row) => row.id)))
+    sessionStubsFromUsage(store, since, until, seenIds)
       .filter((stub) => !tombstones.ids.has(stub.id)),
   );
   // 清理:墓碑期间漏进库的行先删;源文件确认已被删除/轮换(ENOENT)的 session,
-  // 连同消息索引和 repo 归属一起删;读不到(权限等)的保留
-  for (const row of store.listSessionRows()) {
+  // 连同消息索引和 repo 归属一起删;读不到(权限等)的保留。
+  // 复用开头的 allRows 快照(INV-1329):本轮新入库的行源文件刚被发现存在,
+  // 不存在"新行即失效"的清理场景。
+  for (const row of allRows) {
     if (tombstones.ids.has(row.id)) {
       store.deleteSession(row.id);
       continue;
@@ -1256,10 +1397,20 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
     if (Number.isFinite(retentionDays) && retentionDays > 0) {
       store.pruneSessionDataBefore(Date.now() - retentionDays * DAY_MS);
     }
+    // 库空间治理(INV-1329):空闲页超阈值才动手(未激活的老库一次性
+    // auto_vacuum=INCREMENTAL + VACUUM,已激活的增量回收),并截断 WAL。
+    // 均为 best-effort:库忙(BUSY)时留给下一轮扫描。
+    const reclaimed = store.reclaimDbSpace();
+    if (!reclaimed.skipped && reclaimed.afterBytes < reclaimed.beforeBytes) {
+      console.error(`[maintenance] reclaimed ${Math.round((reclaimed.beforeBytes - reclaimed.afterBytes) / 1_048_576)}MB free pages (vacuum)`);
+    }
+    store.walCheckpoint();
   } catch {
     /* maintenance is best-effort */
   }
+  scanTrace('maintenance-prune');
   applySessionUsage(store, since, until);
+  scanTrace('usage-apply');
   // commit 归因(第二环):有界 git 调用(每 repo 一次 git log + timeout),
   // 失败不拖垮目录扫描
   try {
@@ -1278,12 +1429,13 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
     /* origin attribution is best-effort */
   }
   // 无 git cwd 的存量会话补目录身份(新扫描由 workRepoOf 兜底;这里覆盖
-  // 修复前的老行)。必须在 projects/requirements 物化之前跑。
+  // 修复前的老行)。必须在 projects/requirements 物化之前跑。复用 allRows
+  // 快照(INV-1329):本轮新行已由 workRepoOf 兜底,快照只服务"老行"。
   try {
     const home = homedir();
     const withWork = store.sessionIdsWithWorkRepo();
     const patches: Array<{ sessionId: string; role: 'work'; url: string; root: string; name: string; evidenceKind: 'observed' }> = [];
-    for (const row of store.listSessionRows()) {
+    for (const row of allRows) {
       if (withWork.has(row.id)) continue;
       if (!row.cwd || !row.cwd.startsWith('/') || row.cwd === home || row.cwd === '/' || row.cwd === '/tmp' || row.cwd === '/private/tmp' || row.cwd.startsWith('/var/folders/') || row.cwd.startsWith('/private/var/folders/')) continue;
       patches.push({ sessionId: row.id, role: 'work', url: row.cwd, root: row.cwd, name: basename(row.cwd), evidenceKind: 'observed' });
@@ -1307,6 +1459,7 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
   }
   // 需求实体物化(IA 第三步):user 消息流规则抽取 + span 级项目归因,
   // 全量重导,确定性 id,幂等
+  scanTrace('origin-attr');
   try {
     materializeRequirements(store);
     // 需求 LLM 精炼(显式 opt-in + 已配置 LLM 才生效;每轮限量,best-effort)
@@ -1321,6 +1474,7 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
   }
   // 计划态物化(计划研究 §5.3):TodoWrite 消息快照(纯库内)+ plan 文件
   // 扫盘(mtime 门控,增量快照)
+  scanTrace('launch-links');
   try {
     materializeTodoSnapshots(store);
     materializeProgressNotes(store);
@@ -1332,6 +1486,7 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
   } catch {
     /* plan file materialization is best-effort */
   }
+  scanTrace('plan-files');
   return scanned;
 }
 
@@ -1342,7 +1497,7 @@ function sessionStubsFromUsage(
   knownIds: Set<string>,
 ): SessionRecord[] {
   const stubs = new Map<string, SessionRecord>();
-  for (const record of store.getUsageRecords(since, until)) {
+  for (const record of store.iterateUsageRecords(since, until)) {
     if (record.source !== 'local' || !record.sessionId) continue;
     const provider = catalogProviderOf(record.provider);
     const id = sessionKey(provider, record.sessionId);
@@ -1400,7 +1555,9 @@ function addAgg(map: Map<string, TokenAgg>, key: string, record: {
 function applySessionUsage(store: Store, since: number, until: number): void {
   const byId = new Map<string, TokenAgg>();
   const byFile = new Map<string, TokenAgg>();
-  for (const record of store.getUsageRecords(since, until)) {
+  // 流式聚合(INV-1329):90 天窗口 ~10 万行不再物化成数组,聚合 map 的
+  // 规模由 session 数决定,与窗口长度无关。迭代完成前不写库。
+  for (const record of store.iterateUsageRecords(since, until)) {
     if (record.source !== 'local') continue;
     const provider = catalogProviderOf(record.provider);
     if (record.sessionId) addAgg(byId, sessionKey(provider, record.sessionId), record);

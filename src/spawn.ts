@@ -23,3 +23,26 @@ export function childProcessArgs(cliArgs: string[]): string[] {
     || !existsSync(devEntry);
   return [process.execPath, ...(compiled ? [] : [devEntry]), ...cliArgs];
 }
+
+/** 子进程环境:Bun.spawn 不传 env 时只继承「进程启动时」的环境快照,
+ *  运行时注入的变量(测试 preload 的 PLANOFPLAN_HOME、daemon 运行中的
+ *  环境调整)不会下发——实测 bun 1.3.14 上扫描子进程因此落回真实
+ *  ~/.planofplan,测试全量跑时真实库被顺带扫描/回收(INV-1329)。 */
+export function childEnv(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined) env[key] = value;
+  }
+  return env;
+}
+
+/** daemon 重执行本 CLI 的统一 spawn:stderr 继承(扫描日志进 serve.log),
+ *  环境显式快照(见 childEnv)。 */
+export function spawnSelf(cliArgs: string[]): Bun.Subprocess {
+  return Bun.spawn(childProcessArgs(cliArgs), {
+    stdout: 'ignore',
+    stderr: 'inherit',
+    stdin: 'ignore',
+    env: childEnv(),
+  });
+}

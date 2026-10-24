@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Database } from 'bun:sqlite';
-import { openDb, openMemoryDb, SNAPSHOT_RETENTION_DAYS } from '../src/db.ts';
+import { openDb, openMemoryDb, snapshotRetentionDays } from '../src/db.ts';
 import type { QuotaWindow, SessionMessageRow, UsageRecord } from '../src/types.ts';
 
 function dbOf(store: unknown): Database {
@@ -116,7 +116,8 @@ describe('snapshots 保留期', () => {
     const store = openMemoryDb();
     try {
       const win: QuotaWindow = { window: 'rolling_5h', label: '5H', used: 1, total: 100, unit: 'percent', percentage: 1, resetAt: null, note: null };
-      store.insertWindows('p', [win], Date.now() - (SNAPSHOT_RETENTION_DAYS + 5) * DAY);
+      const RETENTION = snapshotRetentionDays();
+      store.insertWindows('p', [win], Date.now() - (RETENTION + 5) * DAY);
       store.insertWindows('p', [{ ...win }], Date.now());
       const usage: UsageRecord = {
         id: 'u1', day: '2026-09-17', timestamp: Date.now() - 200 * DAY,
@@ -126,7 +127,7 @@ describe('snapshots 保留期', () => {
         estimatedCostUsd: null, source: 'local', confidence: 'measured',
       };
       store.upsertUsageRecords([usage]);
-      const pruned = store.pruneSnapshotsBefore(Date.now() - SNAPSHOT_RETENTION_DAYS * DAY);
+      const pruned = store.pruneSnapshotsBefore(Date.now() - RETENTION * DAY);
       expect(pruned).toBe(1);
       const snaps = dbOf(store).query('SELECT COUNT(*) AS n FROM snapshots').get() as { n: number };
       expect(snaps.n).toBe(1);
