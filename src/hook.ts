@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { chmodSync, existsSync, readFileSync, rmSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 // ── commit trailer 声明通道 ─────────────────────────────────────────
@@ -10,8 +10,31 @@ import { join } from 'node:path';
 
 const HOOK_MARKER = '# planofplan:commit-trailer v1';
 
+/**
+ * 解析 repo 的 git hooks 目录。`.git` 为文件的 linked worktree,gitdir 指向
+ * `<main>/.git/worktrees/<name>`,而 git 实际从公共目录 `<main>/.git/hooks`
+ * 执行钩子(worktrees 共享 hooks),固定拼接 `.git/hooks` 会 ENOTDIR(INV-1428)。
+ */
+export function resolveGitHooksDir(repo: string): string {
+  const dotGit = join(repo, '.git');
+  if (existsSync(dotGit)) {
+    try {
+      if (statSync(dotGit).isFile()) {
+        const content = readFileSync(dotGit, 'utf8').trim();
+        const gitdir = content.match(/^gitdir:\s*(.+)$/m)?.[1]?.trim();
+        if (gitdir) {
+          const common = gitdir.match(/^(.*\/\.git)\/worktrees\/[^/]+$/)?.[1];
+          return join(common ?? gitdir, 'hooks');
+        }
+      }
+    } catch { /* 读取失败按普通仓库处理 */
+    }
+  }
+  return join(dotGit, 'hooks');
+}
+
 export function prepareCommitMsgPath(repo: string): string {
-  return join(repo, '.git', 'hooks', 'prepare-commit-msg');
+  return join(resolveGitHooksDir(repo), 'prepare-commit-msg');
 }
 
 function hookScript(port: number): string {
@@ -53,7 +76,7 @@ export function installCommitHook(repo: string, port: number): HookResult {
     }
     return { ok: true, status: 'already', path: hookPath };
   }
-  mkdirSync(join(repo, '.git', 'hooks'), { recursive: true });
+  mkdirSync(resolveGitHooksDir(repo), { recursive: true });
   writeFileSync(hookPath, hookScript(port));
   chmodSync(hookPath, 0o755);
   return { ok: true, status: 'installed', path: hookPath };

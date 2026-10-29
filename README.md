@@ -106,6 +106,11 @@ daemon 在 `POST http://localhost:<port>/mcp` 提供只读 MCP（streamable HTTP
 - `lineage_report` 需求 × commit × token 消耗的谱系周报
 - `search_skills` 跨本机 150+ coding agent skills 库快速检索与路由
 - `inspect_project_context` 跨项目切换时的上下文透视（需求、落地 commits、活跃会话与 zg 语义索引就绪状态）
+- `planofplan_task_brief` 任务开始前的项目简报:给定项目与本次任务,组合相关历史需求
+  (带 span commit 证据等级)、已审核经验卡、近期 commit、文件触碰流与 zg 状态;
+  `exclude_session` 排除调用者自己
+- `knowledge_query` 查询已人工审核且未过期的经验卡(约束/决定/失败尝试,INV-485);
+  待审核候选需显式 `include_candidates` 且不作依据
 
 交接包（handoff）与 agent 产出文本中的会话指针统一为 `@session:{<sessionId>}`
 引用格式：后继 agent 拿到引用可直接调 `read_session` 深读，

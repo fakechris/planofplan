@@ -382,3 +382,35 @@ export function deliverHandoff(
   });
   return result;
 }
+
+// ── 交接回链(INV-1427)──────────────────────────────────────────────
+// 交付(mode=agent)之后,目标 CLI 在 target_dir 起新会话把包作为首条消息。
+// 扫描期把这样的「接手会话」回链到 handoff.target_session_id:provider 相同、
+// startedAt 落在 [交付前 2min, 交付后 30min]、cwd 在 target_dir 内(或
+// gitRoot 等于 target_dir)。多候选视为歧义不链接(宁缺勿错);已链接行
+// 不再改写。回链只说明「被接住」,不证明读完了包、更不证明验收完成。
+
+export function linkHandoffTargets(store: Store, now = Date.now()): number {
+  const pending = store.handoffsPendingLink(now - 7 * 86_400_000);
+  if (pending.length === 0) return 0;
+  const sessions = store.listSessionRows();
+  const norm = (path: string | null): string | null => (
+    path ? path.replace(/\/+$/, '').replace(/^\/private(?=\/)/, '') : null
+  );
+  let linked = 0;
+  for (const handoff of pending) {
+    const dir = norm(handoff.targetDir);
+    if (!dir) continue;
+    const matches = sessions.filter((session) => {
+      if (session.provider !== handoff.provider || session.startedAt == null) return false;
+      if (session.startedAt < handoff.createdAt - 2 * 60_000 || session.startedAt > handoff.createdAt + 30 * 60_000) return false;
+      const cwd = norm(session.cwd);
+      const root = norm(session.gitRoot ?? null);
+      return cwd === dir || (cwd != null && cwd.startsWith(`${dir}/`)) || root === dir;
+    });
+    if (matches.length === 1 && store.linkHandoffTarget(handoff.id, matches[0]!.id)) {
+      linked += 1;
+    }
+  }
+  return linked;
+}

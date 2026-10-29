@@ -15,6 +15,7 @@ import type {
   RequirementRecord,
   SessionCommit,
   SessionFileTouch,
+  KnowledgeCardRecord,
   SessionLink,
   SessionLinkView,
   TodoSnapshotRecord,
@@ -378,6 +379,8 @@ CREATE TABLE IF NOT EXISTS progress_notes (
 );
 CREATE INDEX IF NOT EXISTS idx_progress_notes_session ON progress_notes(session_id, seq);
 -- Handoff(§1.7):一次导出动作一行,交接链可观测。源悬空也保留(历史)。
+-- target_session_id/linked_at(INV-1427):交付后被目标 provider 在 target_dir
+-- 新起的会话接住时回链;只说明「被接住」,不证明读完包或验收完成。
 CREATE TABLE IF NOT EXISTS handoffs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   source_type TEXT NOT NULL,
@@ -387,9 +390,33 @@ CREATE TABLE IF NOT EXISTS handoffs (
   target_dir TEXT NOT NULL,
   package_path TEXT NOT NULL,
   ok INTEGER NOT NULL,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  target_session_id TEXT,
+  linked_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_handoffs_source ON handoffs(source_type, source_id, created_at);
+-- 经验卡(INV-485):约束/决定/失败尝试的证据化沉淀。candidate/reviewed/rejected
+-- 与 INV 任务状态独立;过期(expires_at)由查询层按时间推导,不改写存储状态。
+CREATE TABLE IF NOT EXISTS knowledge_cards (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  problem TEXT NOT NULL,
+  action TEXT NOT NULL,
+  preconditions TEXT,
+  repo TEXT,
+  scope_paths TEXT NOT NULL DEFAULT '[]',
+  repo_revision TEXT,
+  version_range TEXT,
+  source_refs TEXT NOT NULL DEFAULT '[]',
+  counterexamples TEXT NOT NULL DEFAULT '[]',
+  status TEXT NOT NULL DEFAULT 'candidate',
+  reviewer TEXT,
+  reviewed_at INTEGER,
+  expires_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_cards_repo ON knowledge_cards(repo, status, updated_at);
 `;
 
 interface SnapshotRow {
@@ -487,6 +514,13 @@ export class Store {
     for (const column of ['git_root TEXT', 'git_url TEXT', 'git_name TEXT']) {
       try {
         db.exec(`ALTER TABLE sessions ADD COLUMN ${column}`);
+      } catch {
+        // Existing databases already have the column, or were created by the current schema.
+      }
+    }
+    for (const column of ['target_session_id TEXT', 'linked_at INTEGER']) {
+      try {
+        db.exec(`ALTER TABLE handoffs ADD COLUMN ${column}`);
       } catch {
         // Existing databases already have the column, or were created by the current schema.
       }
@@ -2846,12 +2880,14 @@ export class Store {
 
   handoffsFor(sourceType: string, sourceId: string): Array<{
     mode: string; provider: string | null; targetDir: string; packagePath: string; ok: boolean; createdAt: number;
+    targetSessionId: string | null; linkedAt: number | null;
   }> {
     const rows = this.db.query(
-      `SELECT mode, provider, target_dir, package_path, ok, created_at
+      `SELECT mode, provider, target_dir, package_path, ok, created_at, target_session_id, linked_at
        FROM handoffs WHERE source_type = ? AND source_id = ? ORDER BY created_at DESC LIMIT 10`,
     ).all(sourceType, sourceId) as Array<{
       mode: string; provider: string | null; target_dir: string; package_path: string; ok: number; created_at: number;
+      target_session_id: string | null; linked_at: number | null;
     }>;
     return rows.map((row) => ({
       mode: row.mode,
@@ -2860,7 +2896,174 @@ export class Store {
       packagePath: row.package_path,
       ok: row.ok !== 0,
       createdAt: row.created_at,
+      targetSessionId: row.target_session_id,
+      linkedAt: row.linked_at,
     }));
+  }
+
+  // ── 交接回链(INV-1427)──────────────────────────────────────────
+
+  /** 近期待回链的 agent 交付(mode=agent 且 ok):created_at 在 since 之后。 */
+  handoffsPendingLink(since: number): Array<{
+    id: number; provider: string | null; targetDir: string; createdAt: number;
+  }> {
+    const rows = this.db.query(
+      `SELECT id, provider, target_dir, created_at FROM handoffs
+       WHERE mode = 'agent' AND ok = 1 AND target_session_id IS NULL AND created_at >= ?
+       ORDER BY created_at`,
+    ).all(since) as Array<{ id: number; provider: string | null; target_dir: string; created_at: number }>;
+    return rows
+      .filter((row) => row.provider != null)
+      .map((row) => ({ id: row.id, provider: row.provider!, targetDir: row.target_dir, createdAt: row.created_at }));
+  }
+
+  linkHandoffTarget(handoffId: number, sessionId: string): boolean {
+    const result = this.db.query(
+      'UPDATE handoffs SET target_session_id = ?, linked_at = ? WHERE id = ? AND target_session_id IS NULL',
+    ).run(sessionId, Date.now(), handoffId);
+    return result.changes > 0;
+  }
+
+  // ── 经验卡(INV-485)──────────────────────────────────────────────
+
+  private knowledgeCardRowToRecord(row: {
+    id: string; kind: string; problem: string; action: string; preconditions: string | null;
+    repo: string | null; scope_paths: string; repo_revision: string | null; version_range: string | null;
+    source_refs: string; counterexamples: string; status: string; reviewer: string | null;
+    reviewed_at: number | null; expires_at: number | null; created_at: number; updated_at: number;
+  }): KnowledgeCardRecord {
+    return {
+      id: row.id,
+      kind: row.kind as KnowledgeCardRecord['kind'],
+      problem: row.problem,
+      action: row.action,
+      preconditions: row.preconditions,
+      repo: row.repo,
+      scopePaths: JSON.parse(row.scope_paths || '[]') as string[],
+      repoRevision: row.repo_revision,
+      versionRange: row.version_range,
+      sourceRefs: JSON.parse(row.source_refs || '[]') as KnowledgeCardRecord['sourceRefs'],
+      counterexamples: JSON.parse(row.counterexamples || '[]') as KnowledgeCardRecord['counterexamples'],
+      status: row.status as KnowledgeCardRecord['status'],
+      reviewer: row.reviewer,
+      reviewedAt: row.reviewed_at,
+      expiresAt: row.expires_at,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  private static readonly KNOWLEDGE_CARD_COLUMNS = 'id, kind, problem, action, preconditions, repo, scope_paths, repo_revision, version_range, source_refs, counterexamples, status, reviewer, reviewed_at, expires_at, created_at, updated_at';
+
+  upsertKnowledgeCard(card: KnowledgeCardRecord): KnowledgeCardRecord {
+    const now = Date.now();
+    const id = card.id || `kc_${Math.random().toString(36).slice(2, 10)}${now.toString(36)}`;
+    this.db.query(
+      `INSERT INTO knowledge_cards (id, kind, problem, action, preconditions, repo, scope_paths, repo_revision, version_range, source_refs, counterexamples, status, reviewer, reviewed_at, expires_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         kind = excluded.kind, problem = excluded.problem, action = excluded.action,
+         preconditions = excluded.preconditions, repo = excluded.repo, scope_paths = excluded.scope_paths,
+         repo_revision = excluded.repo_revision, version_range = excluded.version_range,
+         source_refs = excluded.source_refs, counterexamples = excluded.counterexamples,
+         status = excluded.status, reviewer = excluded.reviewer, reviewed_at = excluded.reviewed_at,
+         expires_at = excluded.expires_at, updated_at = excluded.updated_at`,
+    ).run(
+      id, card.kind, card.problem, card.action, card.preconditions, card.repo,
+      JSON.stringify(card.scopePaths ?? []), card.repoRevision, card.versionRange,
+      JSON.stringify(card.sourceRefs ?? []), JSON.stringify(card.counterexamples ?? []),
+      card.status, card.reviewer, card.reviewedAt, card.expiresAt, card.createdAt || now, now,
+    );
+    return this.knowledgeCardById(id)!;
+  }
+
+  knowledgeCardById(id: string): KnowledgeCardRecord | null {
+    const row = this.db.query(
+      `SELECT ${Store.KNOWLEDGE_CARD_COLUMNS} FROM knowledge_cards WHERE id = ?`,
+    ).get(id) as Parameters<Store['knowledgeCardRowToRecord']>[0] | undefined;
+    return row ? this.knowledgeCardRowToRecord(row) : null;
+  }
+
+  /**
+   * 查询经验卡。`effective` 视图 = reviewed 且未过期(INV-485 默认返回面);
+   * candidate/rejected/expired 只有显式指定才可见,未审核卡绝不混入默认结果。
+   * 过期是推导属性:expires_at 已过的 reviewed 卡在 effective 视图中按 expired 排除。
+   */
+  listKnowledgeCards(filter: {
+    view?: 'effective' | 'candidate' | 'reviewed' | 'rejected' | 'all';
+    repo?: string;
+    q?: string;
+    limit?: number;
+  } = {}): KnowledgeCardRecord[] {
+    const view = filter.view ?? 'effective';
+    const now = Date.now();
+    const where: string[] = [];
+    const params: Array<string | number> = [];
+    if (view === 'effective') {
+      where.push(`status = 'reviewed' AND (expires_at IS NULL OR expires_at > ?)`);
+      params.push(now);
+    } else if (view !== 'all') {
+      where.push('status = ?');
+      params.push(view);
+    }
+    if (filter.repo) {
+      where.push('(repo IS NULL OR repo = ? OR instr(repo, ?) > 0 OR ? LIKE \'%\' || repo || \'%\')');
+      params.push(filter.repo, filter.repo, filter.repo);
+    }
+    if (filter.q) {
+      const needle = `%${filter.q}%`;
+      where.push('(problem LIKE ? OR action LIKE ? OR preconditions LIKE ? OR version_range LIKE ?)');
+      params.push(needle, needle, needle, needle);
+    }
+    const sql = `SELECT ${Store.KNOWLEDGE_CARD_COLUMNS} FROM knowledge_cards`
+      + (where.length > 0 ? ` WHERE ${where.join(' AND ')}` : '')
+      + ' ORDER BY updated_at DESC LIMIT ?';
+    params.push(Math.min(200, Math.max(1, filter.limit ?? 50)));
+    const rows = this.db.query(sql).all(...params) as Array<Parameters<Store['knowledgeCardRowToRecord']>[0]>;
+    return rows.map((row) => this.knowledgeCardRowToRecord(row));
+  }
+
+  /** 人工审核动作:reviewed 需 reviewer;状态与 INV 任务状态完全独立。 */
+  updateKnowledgeCardStatus(
+    id: string,
+    status: KnowledgeCardRecord['status'],
+    reviewer: string | null,
+  ): KnowledgeCardRecord | null {
+    const now = Date.now();
+    const result = this.db.query(
+      `UPDATE knowledge_cards SET status = ?, reviewer = ?, reviewed_at = ?, updated_at = ? WHERE id = ?`,
+    ).run(status, reviewer, status === 'reviewed' ? now : null, now, id);
+    if (result.changes === 0) return null;
+    return this.knowledgeCardById(id);
+  }
+
+  addKnowledgeCardCounterexample(
+    id: string,
+    entry: { text: string; source?: string },
+  ): KnowledgeCardRecord | null {
+    const card = this.knowledgeCardById(id);
+    if (!card) return null;
+    card.counterexamples.push({ text: entry.text, source: entry.source, at: Date.now() });
+    this.db.query(
+      'UPDATE knowledge_cards SET counterexamples = ?, updated_at = ? WHERE id = ?',
+    ).run(JSON.stringify(card.counterexamples), Date.now(), id);
+    return this.knowledgeCardById(id);
+  }
+
+  /** 统计待审核候选数,供管理面提示(不进默认建议)。 */
+  knowledgeCardCounts(): { candidate: number; reviewed: number; rejected: number; expired: number } {
+    const rows = this.db.query(
+      'SELECT status, expires_at FROM knowledge_cards',
+    ).all() as Array<{ status: string; expires_at: number | null }>;
+    const counts = { candidate: 0, reviewed: 0, rejected: 0, expired: 0 };
+    const now = Date.now();
+    for (const row of rows) {
+      if (row.status === 'reviewed' && row.expires_at != null && row.expires_at <= now) counts.expired += 1;
+      else if (row.status === 'candidate') counts.candidate += 1;
+      else if (row.status === 'reviewed') counts.reviewed += 1;
+      else if (row.status === 'rejected') counts.rejected += 1;
+    }
+    return counts;
   }
 
   todoSnapshotsForSession(sessionId: string): TodoSnapshotRecord[] {
