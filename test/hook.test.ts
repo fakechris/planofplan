@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from '../src/server.ts';
@@ -24,6 +24,7 @@ function app(repoDir?: string) {
   const store = openMemoryDb();
   for (const plan of DEFAULT_PLANS) store.syncPlan(plan);
   store.upsertSessions([
+    sessionRow('claude:solo', '/solo/repo', '/solo/repo', NOW - 60_000),
     sessionRow('claude:active', '/work/repo', '/work/repo', NOW - 60_000),
     sessionRow('claude:subdir', '/work/repo/packages/ui', '/work/repo', NOW - 120_000),
     sessionRow('claude:stale', '/work/repo', '/work/repo', NOW - 10 * 3_600_000),
@@ -35,14 +36,24 @@ function app(repoDir?: string) {
 }
 
 describe('/api/sessions/current', () => {
-  test('精确 cwd 命中最新;子目录提交命中 gitRoot;过期与他人排除', async () => {
+  test('INV-1428:唯一候选盖章;多候选歧义不盖章且响应不含 sessionId 字段;过期与他人排除', async () => {
     const server = app();
-    const exact = await (await server.request('http://localhost/api/sessions/current?cwd=/work/repo')).json() as { session: { sessionId: string } | null };
-    expect(exact.session?.sessionId).toBe('claude:active');
-    const subdir = await (await server.request('http://localhost/api/sessions/current?cwd=/work/repo/pkg/deep')).json() as { session: { sessionId: string } | null };
-    expect(subdir.session?.sessionId).toBe('claude:active'); // gitRoot 匹配,最新者胜
-    const none = await (await server.request('http://localhost/api/sessions/current?cwd=/nowhere')).json() as { session: null };
+    // 唯一候选:正常返回,钩子可盖章
+    const solo = await (await server.request('http://localhost/api/sessions/current?cwd=/solo/repo')).json() as { session: { sessionId: string } | null };
+    expect(solo.session?.sessionId).toBe('claude:solo');
+    // 多候选(active + subdir 同 repo):不能猜最新,session 必须为 null
+    const ambiguous = await (await server.request('http://localhost/api/sessions/current?cwd=/work/repo')).json() as {
+      session: null; ambiguous?: boolean; candidates?: Array<{ id: string }>;
+    };
+    expect(ambiguous.session).toBeNull();
+    expect(ambiguous.ambiguous).toBe(true);
+    expect(ambiguous.candidates?.map((row) => row.id)).toEqual(['claude:active', 'claude:subdir']);
+    // 关键兼容性:旧版已安装钩子脚本的 sed 抓 "sessionId"——歧义响应里绝不能出现该字段名
+    expect(JSON.stringify(ambiguous)).not.toContain('"sessionId"');
+    // 过期(stale)不参与:6h 窗口外
+    const none = await (await server.request('http://localhost/api/sessions/current?cwd=/nowhere')).json() as { session: null; ambiguous?: boolean };
     expect(none.session).toBeNull();
+    expect(none.ambiguous).toBeUndefined();
     const bad = await server.request('http://localhost/api/sessions/current?cwd=relative');
     expect(bad.status).toBe(400);
   });
@@ -83,6 +94,30 @@ describe('commit hook 安装管理', () => {
       expect(installCommitHook(dir, 9291).status).toBe('no-repo');
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('INV-1428:linked worktree(.git 为文件)安装到公共 .git/hooks,不再 ENOTDIR', () => {
+    const main = mkdtempSync(join(tmpdir(), 'pop-hook-main-'));
+    mkdirSync(join(main, '.git', 'hooks'), { recursive: true });
+    const wt = mkdtempSync(join(tmpdir(), 'pop-hook-wt-'));
+    // linked worktree 的 .git 是文件,gitdir 指向主仓 worktrees 目录
+    writeFileSync(join(wt, '.git'), `gitdir: ${main}/.git/worktrees/wt\n`);
+    try {
+      const sharedHook = join(main, '.git', 'hooks', 'prepare-commit-msg');
+      expect(prepareCommitMsgPath(wt)).toBe(sharedHook);
+      const r = installCommitHook(wt, 9291);
+      expect(r.ok).toBe(true);
+      expect(r.status).toBe('installed');
+      expect(r.path).toBe(sharedHook);
+      expect(existsSync(sharedHook)).toBe(true);
+      expect(readFileSync(sharedHook, 'utf8')).toContain('Harness-Session');
+      expect(installCommitHook(wt, 9291).status).toBe('already');
+      expect(uninstallCommitHook(wt).status).toBe('uninstalled');
+      expect(existsSync(sharedHook)).toBe(false);
+    } finally {
+      rmSync(main, { recursive: true, force: true });
+      rmSync(wt, { recursive: true, force: true });
     }
   });
 });

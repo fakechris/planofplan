@@ -708,14 +708,19 @@ const TOOLS: ToolDef[] = [
       const report = buildLineageReport(store, now - days * DAY_MS, now);
       const t = report.totals;
       const landedPct = t.requirements > 0 ? Math.round((t.landed / t.requirements) * 100) : 0;
+      const costNote = t.estimatedCostUsd != null
+        ? ` · 估算 $${t.estimatedCostUsd.toFixed(2)}${t.costUnknownSessions > 0 ? `(另有 ${t.costUnknownSessions} 会话成本未知)` : ''}`
+        : '';
       const lines = [
-        `谱系周报(近 ${days} 天):${t.requirements} 个需求 · ${landedPct}% 落地`,
-        `commits: ${t.commits}(声明 ${t.declaredCommits} / 目击 ${t.witnessedCommits} / 其余时间窗推断)`,
-        `tokens: ${fmtCount(t.totalTokens)}${t.estimatedCostUsd != null ? ` · 估算 $${t.estimatedCostUsd.toFixed(2)}` : ''}`,
+        `谱系周报(近 ${days} 天):${t.requirements} 个需求 · ${landedPct}% 落地(declared/witnessed 口径)`,
+        `commits: ${t.commits}(声明 ${t.declaredCommits} / 目击 ${t.witnessedCommits} / 时间窗推断 ${t.candidateCommits})`,
+        `tokens: ${fmtCount(t.totalTokens)}${costNote}`,
         '',
       ];
       for (const item of report.items.slice(0, limit)) {
-        const mark = item.landed ? `[✓${item.commits.length}]` : '[…]';
+        const mark = item.landed
+          ? `[✓${item.commits.length}]`
+          : item.landedBasis === 'candidate-only' ? `[?${item.candidateCommits}]` : '[…]';
         const cost = item.estimatedCostUsd != null ? ` · $${item.estimatedCostUsd.toFixed(2)}` : '';
         lines.push(`- ${mark} ${clipLine(item.text, 60)}(${item.provider}${item.project ? ` · ${item.project}` : ''}${cost})`);
       }

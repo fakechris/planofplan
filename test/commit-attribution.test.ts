@@ -76,6 +76,37 @@ describe('attributeRepoCommits', () => {
     expect(rows[0]).toMatchObject({ sessionId: 'claude:s1', sha: SHA_A, kind: 'declared', fileOverlap: true });
   });
 
+  test('INV-1428:错误 trailer 不压制其他会话的 witnessed 证据(多档并存)', () => {
+    // s1 是真实作者(transcript 目击该 sha);s2 是并行 review 会话,被钩子误盖章
+    const s1 = session({ id: 'claude:s1', nativeId: 's1' });
+    const s2 = session({ id: 'codex:s2', nativeId: 's2', provider: 'codex' });
+    const git = () => gitLogRaw([
+      { sha: SHA_A, iso: '2026-08-20T10:30:00.000Z', subject: 'feat', body: 'x\n\nHarness-Session: codex:s2\n', files: ['src/db.ts'] },
+    ]);
+    const rows = attributeRepoCommits({
+      repo, sessions: [s1, s2], touchesBySession: touches,
+      witnessesBySession: new Map([['claude:s1', new Set([SHA_A])]]),
+      git,
+    });
+    expect(rows).toHaveLength(2);
+    expect(rows.find((r) => r.sessionId === 'codex:s2')).toMatchObject({ kind: 'declared', sha: SHA_A });
+    expect(rows.find((r) => r.sessionId === 'claude:s1')).toMatchObject({ kind: 'witnessed', sha: SHA_A, fileOverlap: true });
+  });
+
+  test('INV-1428:同一 session declared+witnessed 并存时只取最高档 declared', () => {
+    const s1 = session({ id: 'claude:s1', nativeId: 's1' });
+    const git = () => gitLogRaw([
+      { sha: SHA_A, iso: '2026-08-20T10:30:00.000Z', subject: 'feat', body: 'Harness-Session: claude:s1\n', files: ['src/db.ts'] },
+    ]);
+    const rows = attributeRepoCommits({
+      repo, sessions: [s1], touchesBySession: touches,
+      witnessesBySession: new Map([['claude:s1', new Set([SHA_A])]]),
+      git,
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ sessionId: 'claude:s1', kind: 'declared' });
+  });
+
   test('时间窗内 → candidate;有 touch 数据的 session 必须有文件交集;窗外不关联', () => {
     const s1 = session({ id: 'claude:s1', nativeId: 's1' });
     const git = () => gitLogRaw([
