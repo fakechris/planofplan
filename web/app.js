@@ -2168,6 +2168,27 @@ async function loadHandoffPanel(type, sourceId) {
         `<option value="${escapeHtml(p.id)}"${llm?.llm?.provider === p.id ? ' selected' : ''}>${escapeHtml(p.label)}${p.hasKey ? '' : '(无 key)'}</option>`
       )))
       .join('');
+    // 额度感知(INV-1427):按可用度排序(ok → tight → unknown),下拉带窗口
+    // 摘要;不同订阅单位不等价,只展示真实窗口与重置时间,不折算 token。
+    const QUOTA_RANK = { ok: 0, tight: 1, unknown: 2 };
+    const quotaByProvider = new Map((data.providerQuota || []).map((q) => [q.provider, q]));
+    const injectProviders = (data.providers || ['claude'])
+      .map((p) => ({ provider: p, quota: quotaByProvider.get(p) || { availability: 'unknown', quotaLabel: '', windows: [] } }))
+      .sort((a, b) => (QUOTA_RANK[a.quota.availability] ?? 2) - (QUOTA_RANK[b.quota.availability] ?? 2));
+    const quotaTip = (q) => (q.windows || []).map((w) =>
+      `${escapeHtml(w.plan || '')} ${escapeHtml(w.label)}:${w.percentage != null ? `${Math.round(w.percentage)}%` : '?'}${w.resetAt ? ` · ${fmtAgo(w.resetAt, Date.now())}重置` : ''}`).join('\n');
+    const injectOptions = injectProviders.map(({ provider, quota }) => {
+      const badge = quota.availability === 'ok' ? '' : quota.availability === 'tight' ? ' ⚠' : '';
+      return `<option value="${escapeHtml(provider)}"${quota.availability === 'unknown' ? ' data-unknown="1"' : ''}>${escapeHtml(provider)} · ${escapeHtml(quota.quotaLabel || '额度未知')}${badge}</option>`;
+    }).join('');
+    const historyRow = data.history?.[0];
+    const historyHtml = data.history?.length ? `
+      <div class="muted">
+        交接记录 ${data.history.length} 次(最近 ${fmtAgo(historyRow.createdAt, Date.now())} · ${escapeHtml(historyRow.mode)}${historyRow.provider ? ` · ${escapeHtml(historyRow.provider)}` : ''})
+        ${historyRow.targetSessionId
+          ? ` · 已接手:<button type="button" class="inline-link" data-nav="sessions" data-nav-id="${escapeHtml(historyRow.targetSessionId)}">${escapeHtml(historyRow.targetSessionId.slice(0, 24))}…</button>`
+          : ' · 接手会话:待扫描回链'}
+      </div>` : '';
     wrap.innerHTML = `
       <div class="session-attrs">
         <h3>交接 <span class="muted">指针 + 摘要,不搬运 transcript</span></h3>
@@ -2181,8 +2202,8 @@ async function loadHandoffPanel(type, sourceId) {
         <div class="handoff-actions">
           <button type="button" class="secondary-btn" data-handoff-copy>复制包</button>
           <button type="button" class="secondary-btn" data-handoff-file>导出 .md</button>
-          <select id="handoffProvider" aria-label="注入的 agent">
-            ${(data.providers || ['claude']).map((p) => `<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`).join('')}
+          <select id="handoffProvider" aria-label="注入的 agent(按额度可用度排序)" title="${escapeHtml(injectProviders.map(({ provider, quota }) => `${provider}: ${quotaTip(quota) || '无窗口'}`).join('\n\n'))}">
+            ${injectOptions}
           </select>
           <input id="handoffDir" type="text" placeholder="目标目录" value="${escapeHtml(data.defaultDir || '~/Downloads')}" size="24" />
           <button type="button" class="secondary-btn" data-handoff-agent>起新会话</button>
@@ -2192,9 +2213,14 @@ async function loadHandoffPanel(type, sourceId) {
           <summary>预览包内容</summary>
           <pre>${escapeHtml(data.markdown)}</pre>
         </details>
-        ${data.history?.length ? `<div class="muted">交接记录 ${data.history.length} 次(最近 ${fmtAgo(data.history[0].createdAt, Date.now())} · ${escapeHtml(data.history[0].mode)})</div>` : ''}
+        ${historyHtml}
       </div>
     `;
+    wrap.querySelectorAll('[data-nav]').forEach((el) => {
+      el.addEventListener('click', () => {
+        navigate(el.getAttribute('data-nav'), el.getAttribute('data-nav-id') || undefined);
+      });
+    });
     wrap.querySelector('[data-llm-save]')?.addEventListener('click', async () => {
       const result = () => document.getElementById('handoffResult');
       try {

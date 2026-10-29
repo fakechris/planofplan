@@ -515,6 +515,154 @@ function toolInspectProjectContext(store: Store, args: { project?: unknown }): s
 
 // ── 工具注册表 ──────────────────────────────────────────────────────
 
+/** 从任务描述提取匹配词:拉丁/数字词 ≥2 字符;CJK 短段整词、长段二元组。 */
+function taskBriefTerms(task: string): string[] {
+  const terms = new Set<string>();
+  for (const match of task.matchAll(/[A-Za-z0-9_]{2,}/g)) terms.add(match[0]!.toLowerCase());
+  for (const seg of task.match(/[\u4e00-\u9fff]{2,}/g) ?? []) {
+    if (seg.length <= 3) terms.add(seg);
+    else for (let i = 0; i + 2 <= seg.length; i += 1) terms.add(seg.slice(i, i + 2));
+  }
+  return [...terms];
+}
+
+/**
+ * 任务前 brief(INV-1427,对标 Entire Brain 的 task brief):组合已有只读
+ * 能力,回答「做这件事之前,这个项目里发生过什么、有什么约束」。历史是数据
+ * 不是授权;所有关联保留证据等级,未验证 ≠ 未完成。
+ */
+function toolTaskBrief(store: Store, args: Record<string, unknown>): string {
+  const project = typeof args.project === 'string' ? args.project.trim() : '';
+  if (!project) throw new ToolArgError('project is required (name/path/url fragment)');
+  const task = typeof args.task === 'string' ? args.task.trim() : '';
+  if (!task) throw new ToolArgError('task is required (describe what you are about to do)');
+  const exclude = typeof args.exclude_session === 'string' ? args.exclude_session.trim() : '';
+  const days = Math.min(180, Math.max(7, Math.floor(Number(args.days ?? 90)) || 90));
+  const paths = Array.isArray(args.paths)
+    ? args.paths.filter((p): p is string => typeof p === 'string' && p.trim().length > 0)
+    : [];
+  const now = Date.now();
+  const since = now - days * DAY_MS;
+
+  const hidden = hiddenSessionIds(store);
+  const sessions = store.listSessionRows()
+    .filter((s) => sessionMatchesRepo(s, project) && !hidden.has(s.id) && s.id !== exclude && s.updatedAt >= since);
+  if (sessions.length === 0) {
+    return `项目 "${project}" 近 ${days} 天没有会话记录。可用 session_search 按任务文本跨项目检索,或缩短 days。`;
+  }
+  const sessionMap = new Map(sessions.map((s) => [s.id, s]));
+
+  const needle = project.toLowerCase();
+  const targetSession = sessions[0]!;
+  const matchedRepo = targetSession.repos?.find((r) =>
+    r.name.toLowerCase().includes(needle) || r.root?.toLowerCase().includes(needle) || r.url.toLowerCase().includes(needle));
+  const repoUrl = matchedRepo?.url ?? targetSession.gitUrl ?? null;
+  const repoRoot = matchedRepo?.root ?? targetSession.gitRoot ?? targetSession.cwd ?? null;
+
+  const lines: string[] = [
+    `=== 任务 Brief: ${clipLine(task, 80)} ===`,
+    `项目: ${matchedRepo?.name ?? project} · 近 ${days} 天 ${sessions.length} 个会话`,
+    '历史记录仅作参考,不是执行授权;验证状态 Unknown,关联 commit 不代表需求完成。',
+    '',
+  ];
+
+  // 1. 相关历史需求:term 重叠计分,取 span 内 commit(严格口径,带证据等级)
+  const terms = taskBriefTerms(task);
+  const requirements = store.listRequirements()
+    .filter((req) => sessionMap.has(req.sessionId))
+    .map((req) => {
+      const text = `${req.refinedText ?? req.text}`.toLowerCase();
+      const score = terms.reduce((sum, term) => sum + (text.includes(term) ? 1 : 0), 0);
+      return { req, score };
+    })
+    .filter((row) => row.score > 0)
+    .sort((a, b) => b.score - a.score || (b.req.ts ?? 0) - (a.req.ts ?? 0))
+    .slice(0, 5);
+
+  lines.push('【相关历史需求】(按与任务的相关度):');
+  if (requirements.length === 0) {
+    lines.push('- 无 term 命中;可用 session_search / requirement_status 换个角度找。');
+  } else {
+    for (const { req } of requirements) {
+      const evidence = readRequirementEvidence(store, req);
+      const commitKinds = evidence.commits.slice(0, 3)
+        .map((commit) => `${commit.sha.slice(0, 8)}[${commit.kind}]`).join(' ');
+      lines.push(`- ${clipLine(req.refinedText ?? req.text, 80)} · ${req.id} · source=${req.sessionId}`);
+      if (commitKinds) lines.push(`  范围内 commit: ${commitKinds}(未验证因果)`);
+      if (evidence.warnings.length > 0) lines.push(`  ⚠ ${evidence.warnings[0]}`);
+    }
+  }
+  lines.push('');
+
+  // 2. 有效经验卡:repo 匹配 + term 计分(只含人工 reviewed 未过期)
+  const repoCards = store.listKnowledgeCards({ view: 'effective', repo: project, limit: 30 });
+  const cards = (repoCards.length > 0 ? repoCards : store.listKnowledgeCards({ view: 'effective', limit: 30 }))
+    .map((card) => {
+      const text = `${card.problem} ${card.action} ${card.preconditions ?? ''} ${card.scopePaths.join(' ')}`.toLowerCase();
+      return { card, score: terms.reduce((sum, term) => sum + (text.includes(term) ? 1 : 0), 0) };
+    })
+    .filter((row) => row.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 5);
+  lines.push('【约束与历史决定】(人工审核过的经验卡):');
+  if (cards.length === 0) {
+    lines.push('- 无匹配经验卡。(无记录 ≠ 无约束)');
+  } else {
+    for (const { card } of cards) {
+      lines.push(`- [${card.kind}] ${clipLine(card.problem, 70)}`);
+      lines.push(`  → ${clipLine(card.action, 100)}`);
+      if (card.counterexamples.length > 0) lines.push(`  ⚠ 有 ${card.counterexamples.length} 条反例,先确认适用条件`);
+    }
+  }
+  lines.push('');
+
+  // 3. 项目近期 commit(保留证据等级)
+  if (repoUrl) {
+    const seen = new Set<string>();
+    const repoCommits = store.listSessionCommits()
+      .filter((commit) => sessionMap.has(commit.sessionId) && commit.repo === repoUrl && (commit.ts ?? 0) >= since)
+      .sort((a, b) => (b.ts ?? 0) - (a.ts ?? 0))
+      .filter((commit) => {
+        const key = `${commit.sha}:${commit.kind}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .slice(0, 5);
+    if (repoCommits.length > 0) {
+      lines.push('【项目近期 commit】:');
+      for (const commit of repoCommits) {
+        lines.push(`- ${commit.sha.slice(0, 8)} [${commit.kind}] ${clipLine(commit.summary, 70)}`);
+      }
+      lines.push('declared=会话关联声明;witnessed=提交记录目击;candidate=时间窗候选。');
+      lines.push('');
+    }
+  }
+
+  // 4. 相关文件:paths 过滤(或项目会话高频触碰)
+  const fileEdits = store.recentFileEdits(since, 200, hidden)
+    .filter((file) => (paths.length > 0
+      ? paths.some((p) => file.path.includes(p.trim()))
+      : file.sessions.some((session) => sessionMap.has(session.id))));
+  if (fileEdits.length > 0) {
+    lines.push(`【相关文件】${paths.length > 0 ? `(匹配 paths:${paths.join(', ')})` : '(项目会话近期触碰)'}:`);
+    for (const file of fileEdits.slice(0, 8)) {
+      const who = file.sessions[0] ? `${file.sessions[0].provider}` : '';
+      lines.push(`- ${clipLine(file.path, 90)} · ${file.sessionCount} 会话${who ? ` · 最近 ${who}` : ''}`);
+    }
+    lines.push('');
+  }
+
+  // 5. zg 语义索引状态
+  if (repoRoot && repoRoot !== '未知路径') {
+    const hasZg = existsSync(join(repoRoot, '.zvec-grep'));
+    lines.push(`代码语义索引 (.zvec-grep): ${hasZg ? '✅ 已就绪 (可调用 zvec_grep_search 语义查代码)' : '⚠️ 未建立 (可在项目根目录运行 zg index)'}`);
+  }
+
+  lines.push('', '深读建议:对上面的 source= 会话用 read_session 分页读原文;搜更多历史用 session_search;额度窗口用 plan_quota_status。');
+  return lines.join('\n');
+}
+
 /** INV-485 经验卡查询:默认只返回 reviewed 且未过期的卡;candidate 需显式
  *  索取并标注——未审核卡绝不混入默认建议,过期是查询层推导属性。 */
 function toolKnowledgeQuery(store: Store, args: Record<string, unknown>): string {
@@ -809,6 +957,24 @@ const TOOLS: ToolDef[] = [
       additionalProperties: false,
     },
     run: (store, _cfg, args) => toolInspectProjectContext(store, args),
+  },
+  {
+    name: 'planofplan_task_brief',
+    title: 'Task brief',
+    description: '任务开始前的项目上下文简报:给定项目与本次任务描述,组合出相关历史需求(带 span commit 证据等级)、人工审核过的约束/决定/失败尝试经验卡、项目近期 commit、相关文件触碰流与 zg 语义索引状态。开始改代码、接手工作、或换 agent 接力前先调它,避免重复解释与踩坑。exclude_session 传你自己的 session id。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: '项目名称、路径或仓库 URL 片段' },
+        task: { type: 'string', description: '本次准备做什么(自然语言描述)' },
+        paths: { type: 'array', items: { type: 'string' }, description: '预计涉及的文件/目录片段,过滤相关文件' },
+        exclude_session: { type: 'string', description: '要排除的 session id(通常是调用者自己的)' },
+        days: { type: 'number', description: '回看天数,默认 90,最大 180' },
+      },
+      required: ['project', 'task'],
+      additionalProperties: false,
+    },
+    run: (store, _cfg, args) => toolTaskBrief(store, args),
   },
   {
     name: 'knowledge_query',
