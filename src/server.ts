@@ -619,8 +619,25 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
       .filter((row) => (row.origin ?? 'user') === 'user')
       .filter(match)
       .sort((a, b) => b.updatedAt - a.updatedAt);
-    const session = rows[0];
-    if (!session) return c.json({ ok: true, session: null });
+    // INV-1428:唯一候选才返回 session——多候选时盖章只是「猜最新」,并行
+    // Agent(实现+review)场景必错且错成 declared 档。歧义时归因退回 candidate
+    // 档(那里有文件交集置信度与条数上限)。候选行用 `id` 字段:旧版已安装
+    // 钩子脚本的 sed 抓 "sessionId",字段名不同即安全跳过,无需重装钩子。
+    const session = rows.length === 1 ? rows[0] : undefined;
+    if (!session) {
+      return c.json({
+        ok: true,
+        session: null,
+        ...(rows.length > 1
+          ? {
+            ambiguous: true,
+            candidates: rows.slice(0, 5).map((row) => ({
+              id: row.id, provider: row.provider, title: row.title, updatedAt: row.updatedAt,
+            })),
+          }
+          : {}),
+      });
+    }
     return c.json({
       ok: true,
       session: { sessionId: session.id, provider: session.provider, title: session.title, updatedAt: session.updatedAt },

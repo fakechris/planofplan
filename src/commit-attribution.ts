@@ -175,7 +175,36 @@ export function attributeRepoCommits(options: AttributeRepoOptions): SessionComm
     const declared = sessions.filter((session) => (
       parseTrailers(commit.body).some((trailer) => sessionMatchesTrailer(session, trailer.value))
     ));
-    if (declared.length > 0) {
+    // 同一 commit 同一 session 只取最高档(declared > witnessed);不同 session 的
+    // declared 与 witnessed 并存落表——错误 trailer 不再压制其他会话的目击证据,
+    // 消费侧可对照两种证据自行判断(INV-1428)
+    if (options.witnessesBySession) {
+      const declaredIds = new Set(declared.map((session) => session.id));
+      const witnessed = sessions.filter((session) => {
+        if (declaredIds.has(session.id)) return false;
+        const set = options.witnessesBySession!.get(session.id);
+        if (!set) return false;
+        for (const sha of set) {
+          if (witnessMatchesSha(sha, commit.sha)) return true;
+        }
+        return false;
+      });
+      if (declared.length > 0 || witnessed.length > 0) {
+        for (const session of [...declared, ...witnessed]) {
+          out.push({
+            sessionId: session.id,
+            repo: repo.url,
+            sha: commit.sha,
+            kind: declaredIds.has(session.id) ? 'declared' : 'witnessed',
+            ts: commit.committedAt,
+            summary: commit.subject,
+            fileOverlap: overlapOf(session),
+            pushed: pushedOf(commit.sha),
+          });
+        }
+        continue;
+      }
+    } else if (declared.length > 0) {
       for (const session of declared) {
         out.push({
           sessionId: session.id,
@@ -189,33 +218,6 @@ export function attributeRepoCommits(options: AttributeRepoOptions): SessionComm
         });
       }
       continue;
-    }
-    // witnessed:transcript 目击(session 的 git commit tool_result 里有该 sha
-    // 前缀)。确定性证据,优先于时间窗推断;同一 commit 同一 session 只取最高档。
-    if (options.witnessesBySession) {
-      const witnessed = sessions.filter((session) => {
-        const set = options.witnessesBySession!.get(session.id);
-        if (!set) return false;
-        for (const sha of set) {
-          if (witnessMatchesSha(sha, commit.sha)) return true;
-        }
-        return false;
-      });
-      if (witnessed.length > 0) {
-        for (const session of witnessed) {
-          out.push({
-            sessionId: session.id,
-            repo: repo.url,
-            sha: commit.sha,
-            kind: 'witnessed',
-            ts: commit.committedAt,
-            summary: commit.subject,
-            fileOverlap: overlapOf(session),
-            pushed: pushedOf(commit.sha),
-          });
-        }
-        continue;
-      }
     }
     // candidate:时间窗重叠;stash 类提交不进 candidate;有 touch 数据的
     // session 必须有文件交集;文件交集提高置信度,排序优先并截断上限

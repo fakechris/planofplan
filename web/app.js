@@ -1018,10 +1018,16 @@ function renderLineageReport(report) {
     return;
   }
   const landedPct = Math.round((t.landed / t.requirements) * 100);
-  const cost = t.estimatedCostUsd != null ? `$${t.estimatedCostUsd.toFixed(2)}` : '--';
+  const cost = t.estimatedCostUsd != null ? `$${t.estimatedCostUsd.toFixed(2)}${t.costUnknownSessions ? '+' : ''}` : '--';
+  const badge = (item) => {
+    if (item.landed) return `<span class="lineage-landed ok" title="范围内 ${item.commits.length} 个 commit(声明 ${item.declaredCommits}/目击 ${item.witnessedCommits});未验证验收">✓</span>`;
+    if (item.landedBasis === 'candidate-only') return `<span class="lineage-landed pending" title="仅时间窗推断关联 ${item.candidateCommits} 个 commit,不算落地">?</span>`;
+    if (item.landedBasis === 'unknown-time') return `<span class="lineage-landed pending" title="时间边界不完整,commit 归属 Unknown">!</span>`;
+    return `<span class="lineage-landed pending" title="尚未落地(未验证≠未完成)">…</span>`;
+  };
   const top = (report.items || []).slice(0, 6).map((item) => `
     <div class="lineage-item">
-      <span class="lineage-landed ${item.landed ? 'ok' : 'pending'}" title="${item.landed ? `落了 ${item.commits.length} 个 commit` : '尚未落地'}">${item.landed ? '✓' : '…'}</span>
+      ${badge(item)}
       <span class="lineage-text">${escapeHtml((item.text || '').slice(0, 80))}</span>
       <span class="muted">${escapeHtml(item.provider)}${item.project ? ` · ${escapeHtml(item.project)}` : ''} · ${fmtAgo(item.updatedAt, Date.now())}${item.totalTokens ? ` · ${fmtTokens(item.totalTokens)}` : ''}</span>
     </div>`).join('');
@@ -1029,7 +1035,7 @@ function renderLineageReport(report) {
   box.innerHTML = `
     <div class="lineage-summary">
       <strong>本周谱系</strong>
-      <span>${t.requirements} 个需求 · ${landedPct}% 落地(${t.commits} commit,${t.declaredCommits} 声明,${t.witnessedCommits ?? 0} 目击) · ${fmtTokens(t.totalTokens)} tokens · ${cost} 估算</span>
+      <span>${t.requirements} 个需求 · ${landedPct}% 落地(${t.commits} commit,${t.declaredCommits} 声明,${t.witnessedCommits ?? 0} 目击,${t.candidateCommits ?? 0} 时间窗推断) · ${fmtTokens(t.totalTokens)} tokens · ${cost}${t.costUnknownSessions ? ` 估算(另有 ${t.costUnknownSessions} 会话成本未知)` : ' 估算'}</span>
     </div>
     ${top}
   `;
