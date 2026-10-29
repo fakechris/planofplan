@@ -1129,6 +1129,100 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
     return c.json({ ...result, summaryError }, result.ok ? 200 : 400);
   });
 
+  // ── 经验卡(INV-485):约束/决定/失败尝试的人工证据沉淀 ─────────────
+  // 创建永远落 candidate;reviewed 是唯一人工晋级路径,无来源的卡不允许晋级。
+
+  const KNOWLEDGE_KINDS = ['constraint', 'decision', 'failed-attempt'] as const;
+
+  app.get('/api/knowledge/cards', (c) => {
+    const view = String(c.req.query('view') ?? 'effective');
+    const allowed = ['effective', 'candidate', 'reviewed', 'rejected', 'all'];
+    if (!allowed.includes(view)) return c.json({ ok: false, error: `view 必须是:${allowed.join('/')}` }, 400);
+    return c.json({
+      ok: true,
+      view,
+      cards: store.listKnowledgeCards({
+        view: view as 'effective' | 'candidate' | 'reviewed' | 'rejected' | 'all',
+        repo: c.req.query('repo')?.trim() || undefined,
+        q: c.req.query('q')?.trim() || undefined,
+        limit: Number(c.req.query('limit') ?? 50) || 50,
+      }),
+      counts: store.knowledgeCardCounts(),
+    });
+  });
+
+  app.post('/api/knowledge/cards', async (c) => {
+    const body = await c.req.json().catch(() => null) as {
+      kind?: string; problem?: string; action?: string; preconditions?: string;
+      repo?: string; scopePaths?: string[]; repoRevision?: string; versionRange?: string;
+      sourceRefs?: Array<{ ref?: string; note?: string }>; expiresAt?: number | null;
+    } | null;
+    const kind = KNOWLEDGE_KINDS.find((k) => k === body?.kind);
+    if (!kind) return c.json({ ok: false, error: `kind 必须是:${KNOWLEDGE_KINDS.join('/')}` }, 400);
+    const problem = body?.problem?.trim() ?? '';
+    const action = body?.action?.trim() ?? '';
+    if (!problem || !action) return c.json({ ok: false, error: 'problem 与 action 必填(什么情况 / 什么结论)' }, 400);
+    const sourceRefs = (body?.sourceRefs ?? [])
+      .filter((ref) => typeof ref?.ref === 'string' && ref.ref.trim())
+      .map((ref) => ({ ref: ref.ref!.trim(), note: ref.note?.trim() || undefined }));
+    if (sourceRefs.length === 0) {
+      return c.json({ ok: false, error: 'sourceRefs 必填:经验卡必须带可回溯来源(session/需求/commit)' }, 400);
+    }
+    const expiresAt = typeof body?.expiresAt === 'number' && body.expiresAt > Date.now() ? body.expiresAt : null;
+    const card = store.upsertKnowledgeCard({
+      id: '',
+      kind,
+      problem,
+      action,
+      preconditions: body?.preconditions?.trim() || null,
+      repo: body?.repo?.trim() || null,
+      scopePaths: Array.isArray(body?.scopePaths) ? body!.scopePaths!.filter((p) => typeof p === 'string' && p) : [],
+      repoRevision: body?.repoRevision?.trim() || null,
+      versionRange: body?.versionRange?.trim() || null,
+      sourceRefs,
+      counterexamples: [],
+      status: 'candidate', // 创建即候选,状态不接收外部传入
+      reviewer: null,
+      reviewedAt: null,
+      expiresAt,
+      createdAt: 0,
+      updatedAt: 0,
+    });
+    return c.json({ ok: true, card }, 201);
+  });
+
+  app.post('/api/knowledge/cards/:id/status', async (c) => {
+    const id = c.req.param('id');
+    const body = await c.req.json().catch(() => null) as { status?: string; reviewer?: string } | null;
+    const status = body?.status;
+    if (status !== 'reviewed' && status !== 'rejected' && status !== 'candidate') {
+      return c.json({ ok: false, error: 'status 必须是:reviewed/rejected/candidate' }, 400);
+    }
+    if (status === 'reviewed') {
+      const card = store.knowledgeCardById(id);
+      if (!card) return c.json({ ok: false, error: 'unknown card' }, 404);
+      if (card.sourceRefs.length === 0) {
+        return c.json({ ok: false, error: '没有来源证据的卡不能晋级 reviewed' }, 400);
+      }
+      if (!body?.reviewer?.trim()) {
+        return c.json({ ok: false, error: 'reviewer 必填(人工审核署名)' }, 400);
+      }
+    }
+    const card = store.updateKnowledgeCardStatus(id, status, body?.reviewer?.trim() || null);
+    if (!card) return c.json({ ok: false, error: 'unknown card' }, 404);
+    return c.json({ ok: true, card });
+  });
+
+  app.post('/api/knowledge/cards/:id/counterexamples', async (c) => {
+    const id = c.req.param('id');
+    const body = await c.req.json().catch(() => null) as { text?: string; source?: string } | null;
+    const text = body?.text?.trim() ?? '';
+    if (!text) return c.json({ ok: false, error: 'text 必填(反例描述)' }, 400);
+    const card = store.addKnowledgeCardCounterexample(id, { text, source: body?.source?.trim() || undefined });
+    if (!card) return c.json({ ok: false, error: 'unknown card' }, 404);
+    return c.json({ ok: true, card });
+  });
+
   // ── LLM 配置(provider = 已配置 key 的;model 自由填)─────────────
 
   app.get('/api/llm/config', (c) => {

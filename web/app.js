@@ -1843,6 +1843,7 @@ async function loadRequirementDetail(id) {
       });
     });
     bindHandoffButton(readerEl);
+    bindKnowledgeCaptureButton(readerEl, detail);
   } catch {
     readerEl.innerHTML = '<div class="usage-empty"><strong>详情加载失败</strong><span>稍后再试。</span></div>';
   }
@@ -1886,13 +1887,271 @@ function requirementDetailHtml(detail) {
     <div class="session-attrs"><h3>span 内文件 <span class="muted">${detail.filesTotal || 0} 个,按触碰次数</span></h3>${filesHtml || '<div class="muted">span 内没有文件触碰</div>'}</div>
     <div class="session-attrs"><h3>span 内 commit <span class="muted">● 声明 · ○ 时间窗</span></h3>${commitsHtml || '<div class="muted">span 内没有归因 commit</div>'}</div>
     <button type="button" class="secondary-btn handoff-btn" data-handoff="requirement" data-handoff-id="${escapeHtml(req.id || '')}">交接…</button>
+    <button type="button" class="secondary-btn handoff-btn" data-knowledge-capture>存为经验卡</button>
     <div id="handoffPanel"></div>
+    <div id="knowledgeCapturePanel"></div>
   `;
 }
 
 ['reqProject', 'reqProvider', 'reqLevel'].forEach((id) => {
   document.getElementById(id)?.addEventListener('change', renderRequirements);
 });
+
+// ── 经验卡(INV-485):约束/决定/失败尝试的人工证据沉淀 ─────────────
+// 边界:candidate 不进 agent 默认查询;审核(reviewer 署名)是唯一晋级路径;
+// 过期由查询层按时间推导。这里只做管理与人工核对。
+
+let latestKnowledge = null;
+let openKnowledgeId = null;
+const KNOWLEDGE_KIND_LABELS = { constraint: '约束', decision: '决定', 'failed-attempt': '失败尝试' };
+
+async function refreshKnowledge() {
+  if (!document.getElementById('knowledgeList')) return;
+  try {
+    const view = document.getElementById('knowledgeView')?.value || 'effective';
+    latestKnowledge = await request(`/api/knowledge/cards?view=${encodeURIComponent(view)}&limit=100`);
+  } catch {
+    latestKnowledge = null;
+  }
+  renderKnowledge();
+}
+
+function knowledgeStatusBadge(card, now = Date.now()) {
+  if (card.status === 'reviewed' && card.expiresAt && card.expiresAt <= now) return '<span class="muted">已过期</span>';
+  if (card.status === 'reviewed') return '<span class="lineage-landed ok" title="已人工审核">✓</span>';
+  if (card.status === 'rejected') return '<span class="muted">驳回</span>';
+  return '<span class="plan-audit-warn">待审核</span>';
+}
+
+function knowledgeCardHtml(card) {
+  const now = Date.now();
+  const scope = [card.repo, (card.scopePaths || []).join(', '), card.versionRange].filter(Boolean).join(' · ');
+  const sourcesHtml = (card.sourceRefs || []).map((ref) => `
+    <div class="attr-row"><span class="attr-path">${escapeHtml(ref.ref)}</span>${ref.note ? `<span class="attr-meta">${escapeHtml(ref.note)}</span>` : ''}</div>
+  `).join('');
+  const counterHtml = (card.counterexamples || []).map((cx) => `
+    <div class="attr-row attr-dim"><span class="attr-summary">⚠ ${escapeHtml(cx.text)}</span><span class="attr-meta">${cx.at ? fmtAgo(cx.at, now) : ''}</span></div>
+  `).join('');
+  const actionsHtml = card.status === 'candidate'
+    ? `
+      <div class="handoff-actions">
+        <input id="kcReviewer" type="text" placeholder="审核人署名" size="10" />
+        <button type="button" class="secondary-btn" data-kc-review>✓ 审核通过</button>
+        <button type="button" class="secondary-btn" data-kc-reject>驳回</button>
+      </div>`
+    : card.status === 'reviewed'
+      ? `
+      <div class="handoff-actions">
+        <button type="button" class="secondary-btn" data-kc-reopen>退回待审核</button>
+      </div>`
+      : '';
+  return `
+    <div class="session-detail-grid">
+      <dt>类型</dt><dd>${KNOWLEDGE_KIND_LABELS[card.kind] || card.kind} ${knowledgeStatusBadge(card)}</dd>
+      <dt>问题/场景</dt><dd>${escapeHtml(card.problem)}</dd>
+      <dt>结论/动作</dt><dd>${escapeHtml(card.action)}</dd>
+      ${card.preconditions ? `<dt>前置条件</dt><dd>${escapeHtml(card.preconditions)}</dd>` : ''}
+      ${scope ? `<dt>适用范围</dt><dd>${escapeHtml(scope)}</dd>` : ''}
+      ${card.expiresAt ? `<dt>到期</dt><dd>${fmtAgo(card.expiresAt, now)}${card.expiresAt <= now ? '(已过期,不再作为建议)' : ''}</dd>` : ''}
+      <dt>审核</dt><dd>${card.reviewer ? `${escapeHtml(card.reviewer)} · ${card.reviewedAt ? fmtAgo(card.reviewedAt, now) : '--'}` : '未审核'}</dd>
+    </div>
+    <div class="session-attrs"><h3>来源证据 <span class="muted">${(card.sourceRefs || []).length} 条</span></h3>${sourcesHtml || '<div class="muted">无</div>'}</div>
+    ${counterHtml ? `<div class="session-attrs"><h3>反例 <span class="muted">${card.counterexamples.length} 条</span></h3>${counterHtml}</div>` : ''}
+    ${actionsHtml}
+    <div class="handoff-actions">
+      <input id="kcCounterText" type="text" placeholder="记录反例:什么情况下这条不成立" size="28" />
+      <button type="button" class="secondary-btn" data-kc-counter>加反例</button>
+    </div>
+    <div id="kcResult" class="muted"></div>
+  `;
+}
+
+function knowledgeFormHtml(prefill = {}) {
+  return `
+    <div class="session-attrs">
+      <h3>新建经验卡 <span class="muted">创建后为待审核,不进默认建议</span></h3>
+      <div class="handoff-llm">
+        <select id="kcKind" aria-label="类型">
+          <option value="constraint"${prefill.kind === 'constraint' ? ' selected' : ''}>约束(什么不允许)</option>
+          <option value="decision"${prefill.kind === 'decision' ? ' selected' : ''}>决定(为什么选 A 不选 B)</option>
+          <option value="failed-attempt"${prefill.kind === 'failed-attempt' ? ' selected' : ''}>失败尝试(什么条件下不行)</option>
+        </select>
+      </div>
+      <div class="session-attrs" style="margin-top:8px">
+        <textarea id="kcProblem" rows="2" placeholder="问题/场景:什么情况下查这张卡" style="width:100%">${escapeHtml(prefill.problem || '')}</textarea>
+        <textarea id="kcAction" rows="3" placeholder="结论/动作:约束是什么、决定了什么、什么尝试失败" style="width:100%">${escapeHtml(prefill.action || '')}</textarea>
+        <textarea id="kcPreconditions" rows="2" placeholder="前置条件/适用范围说明(可空)" style="width:100%">${escapeHtml(prefill.preconditions || '')}</textarea>
+        <div class="handoff-llm">
+          <input id="kcRepo" type="text" placeholder="适用仓库(可空=不限)" value="${escapeHtml(prefill.repo || '')}" size="18" />
+          <input id="kcVersionRange" type="text" placeholder="适用版本(可空)" size="14" />
+          <input id="kcExpiresDays" type="number" placeholder="N 天后到期(可空)" min="1" size="10" />
+        </div>
+        <textarea id="kcSources" rows="2" placeholder="来源(必填,每行一条:session id / 需求 id / commit sha)" style="width:100%">${escapeHtml((prefill.sources || []).join('\n'))}</textarea>
+      </div>
+      <div class="handoff-actions">
+        <button type="button" class="button-primary" data-kc-create>创建候选卡</button>
+        <span id="kcResult" class="muted"></span>
+      </div>
+    </div>
+  `;
+}
+
+function bindKnowledgeReaderActions(readerEl, cardId) {
+  const result = () => readerEl.querySelector('#kcResult');
+  readerEl.querySelector('[data-kc-review]')?.addEventListener('click', async () => {
+    const reviewer = readerEl.querySelector('#kcReviewer')?.value?.trim();
+    if (!reviewer) { result().textContent = '审核需要署名。'; return; }
+    try {
+      await request(`/api/knowledge/cards/${encodeURIComponent(cardId)}/status`, {
+        method: 'POST', body: { status: 'reviewed', reviewer },
+      });
+      result().textContent = '已审核通过。';
+      void refreshKnowledge();
+    } catch (error) { result().textContent = `审核失败:${error?.message || error}`; }
+  });
+  readerEl.querySelector('[data-kc-reject]')?.addEventListener('click', async () => {
+    try {
+      await request(`/api/knowledge/cards/${encodeURIComponent(cardId)}/status`, {
+        method: 'POST', body: { status: 'rejected' },
+      });
+      result().textContent = '已驳回(保留存档,不再作为建议)。';
+      void refreshKnowledge();
+    } catch (error) { result().textContent = `驳回失败:${error?.message || error}`; }
+  });
+  readerEl.querySelector('[data-kc-reopen]')?.addEventListener('click', async () => {
+    try {
+      await request(`/api/knowledge/cards/${encodeURIComponent(cardId)}/status`, {
+        method: 'POST', body: { status: 'candidate' },
+      });
+      result().textContent = '已退回待审核。';
+      void refreshKnowledge();
+    } catch (error) { result().textContent = `退回失败:${error?.message || error}`; }
+  });
+  readerEl.querySelector('[data-kc-counter]')?.addEventListener('click', async () => {
+    const text = readerEl.querySelector('#kcCounterText')?.value?.trim();
+    if (!text) return;
+    try {
+      await request(`/api/knowledge/cards/${encodeURIComponent(cardId)}/counterexamples`, {
+        method: 'POST', body: { text },
+      });
+      result().textContent = '已记录反例。';
+      void refreshKnowledge();
+    } catch (error) { result().textContent = `记录失败:${error?.message || error}`; }
+  });
+}
+
+async function submitKnowledgeForm(readerEl, extra = {}) {
+  const result = readerEl.querySelector('#kcResult');
+  const kind = readerEl.querySelector('#kcKind')?.value || 'constraint';
+  const problem = readerEl.querySelector('#kcProblem')?.value?.trim() || '';
+  const action = readerEl.querySelector('#kcAction')?.value?.trim() || '';
+  const sources = (readerEl.querySelector('#kcSources')?.value || '')
+    .split('\n').map((line) => line.trim()).filter(Boolean);
+  if (!problem || !action || sources.length === 0) {
+    result.textContent = '问题、结论、来源都必填(经验卡必须可回溯)。';
+    return;
+  }
+  const expiresDays = Number(readerEl.querySelector('#kcExpiresDays')?.value);
+  try {
+    const res = await request('/api/knowledge/cards', {
+      method: 'POST',
+      body: {
+        kind,
+        problem,
+        action,
+        preconditions: readerEl.querySelector('#kcPreconditions')?.value?.trim() || undefined,
+        repo: readerEl.querySelector('#kcRepo')?.value?.trim() || extra.repo || undefined,
+        versionRange: readerEl.querySelector('#kcVersionRange')?.value?.trim() || undefined,
+        sourceRefs: sources.map((ref) => ({ ref, note: extra.note })),
+        expiresAt: expiresDays >= 1 ? Date.now() + expiresDays * 86_400_000 : undefined,
+      },
+    });
+    result.textContent = `已创建候选卡 ${res?.card?.id || ''},待人工审核。`;
+    void refreshKnowledge();
+  } catch (error) {
+    result.textContent = `创建失败:${error?.message || error}`;
+  }
+}
+
+function bindKnowledgeCreateForm(readerEl, extra = {}) {
+  readerEl.querySelector('[data-kc-create]')?.addEventListener('click', () => {
+    void submitKnowledgeForm(readerEl, extra);
+  });
+}
+
+function renderKnowledge() {
+  const listEl = document.getElementById('knowledgeList');
+  const readerEl = document.getElementById('knowledgeReader');
+  if (!listEl || !readerEl) return;
+  const footEl = document.getElementById('knowledgeFoot');
+  if (!latestKnowledge) {
+    listEl.innerHTML = '<div class="usage-empty"><strong>经验卡数据不可用</strong><span>daemon 连接失败。</span></div>';
+    return;
+  }
+  const counts = latestKnowledge.counts || {};
+  if (footEl) {
+    footEl.textContent = `有效 ${counts.reviewed || 0} · 待审核 ${counts.candidate || 0} · 已过期 ${counts.expired || 0} · 已驳回 ${counts.rejected || 0}。未审核卡不进 agent 默认查询。`;
+  }
+  const cards = latestKnowledge.cards || [];
+  listEl.innerHTML = cards.length > 0
+    ? cards.map((card) => `
+      <button type="button" class="session-item${card.id === openKnowledgeId ? ' active' : ''}" data-knowledge-open="${escapeHtml(card.id)}">
+        <strong>${knowledgeStatusBadge(card)} ${escapeHtml((card.problem || '').slice(0, 70))}</strong>
+        <span>${KNOWLEDGE_KIND_LABELS[card.kind] || card.kind} · ${escapeHtml(card.repo || '不限仓库')} · ${fmtAgo(card.updatedAt, Date.now())}</span>
+      </button>`).join('')
+    : '<div class="usage-empty"><strong>这个视图没有卡片</strong><span>从需求详情「存为经验卡」,或点右上「新建」。</span></div>';
+  listEl.querySelectorAll('[data-knowledge-open]').forEach((row) => {
+    row.addEventListener('click', () => {
+      openKnowledgeId = row.getAttribute('data-knowledge-open');
+      renderKnowledge();
+    });
+  });
+  const open = (latestKnowledge.cards || []).find((card) => card.id === openKnowledgeId);
+  if (open) {
+    readerEl.innerHTML = knowledgeCardHtml(open);
+    bindKnowledgeReaderActions(readerEl, open.id);
+  } else {
+    readerEl.innerHTML = `
+      <div class="usage-empty">
+        <strong>从左边选一张卡</strong>
+        <span>或在这里新建。</span>
+      </div>
+      ${knowledgeFormHtml()}
+    `;
+    bindKnowledgeCreateForm(readerEl);
+  }
+}
+
+document.getElementById('knowledgeView')?.addEventListener('change', () => {
+  openKnowledgeId = null;
+  void refreshKnowledge();
+});
+document.getElementById('knowledgeCreateBtn')?.addEventListener('click', () => {
+  openKnowledgeId = null;
+  renderKnowledge();
+});
+
+// 需求详情 → 沉淀经验卡(预填来源:需求 id + 源 session 引用)
+function bindKnowledgeCaptureButton(readerEl, detail) {
+  const btn = readerEl.querySelector('[data-knowledge-capture]');
+  if (!btn) return;
+  btn.addEventListener('click', () => {
+    const panel = readerEl.querySelector('#knowledgeCapturePanel');
+    if (!panel) return;
+    if (panel.innerHTML) { panel.innerHTML = ''; return; }
+    const req = detail.requirement || {};
+    const session = detail.session || {};
+    panel.innerHTML = knowledgeFormHtml({
+      problem: req.text || '',
+      repo: (req.repoNames || [])[0] || '',
+      sources: [
+        req.id,
+        session.id ? `@session:{${session.id}}` : '',
+      ].filter(Boolean),
+    });
+    bindKnowledgeCreateForm(panel, { note: 'requirement capture' });
+  });
+}
 
 // ── Handoff(§2.5:指针 + 摘要,三通道交付)────────────────────────
 
@@ -3098,7 +3357,7 @@ document.querySelectorAll('[data-session-view]').forEach((btn) => {
 
 function currentTab() {
   const raw = (location.hash || '#plans').replace('#', '');
-  return ['plans', 'sessions', 'projects', 'requirements', 'planfiles', 'graph', 'usage', 'settings'].includes(raw.split('/')[0])
+  return ['plans', 'sessions', 'files', 'projects', 'requirements', 'planfiles', 'knowledge', 'graph', 'usage', 'settings'].includes(raw.split('/')[0])
     ? raw.split('/')[0] : 'plans';
 }
 
@@ -3130,7 +3389,7 @@ function applyRoute() {
 }
 
 function showTab(name) {
-  if (!['plans', 'sessions', 'files', 'projects', 'requirements', 'planfiles', 'graph', 'usage', 'settings'].includes(name)) name = 'plans';
+  if (!['plans', 'sessions', 'files', 'projects', 'requirements', 'planfiles', 'knowledge', 'graph', 'usage', 'settings'].includes(name)) name = 'plans';
   const hash = `#${name}`;
   // 深链(#tab/id)不回写成裸 #tab,避免路由器丢 id 死循环
   if (location.hash !== hash && !location.hash.startsWith(`${hash}/`)) location.hash = hash;
@@ -3146,6 +3405,7 @@ function showTab(name) {
   if (name === 'projects') void refreshProjects();
   if (name === 'requirements') void refreshRequirements();
   if (name === 'planfiles') void refreshPlans();
+  if (name === 'knowledge') void refreshKnowledge();
   if (name === 'settings') void refreshSettings();
 }
 

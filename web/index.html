@@ -22,6 +22,7 @@
       <button type="button" role="tab" data-tab="projects" aria-selected="false">项目</button>
       <button type="button" role="tab" data-tab="requirements" aria-selected="false">需求</button>
       <button type="button" role="tab" data-tab="planfiles" aria-selected="false">计划</button>
+      <button type="button" role="tab" data-tab="knowledge" aria-selected="false">经验卡</button>
       <button type="button" role="tab" data-tab="graph" aria-selected="false">图谱</button>
       <button type="button" role="tab" data-tab="usage" aria-selected="false">Token</button>
       <span class="tabs-sep" aria-hidden="true"></span>
@@ -191,6 +192,35 @@
         <div class="usage-empty">
           <strong>从左边选一个计划文件</strong>
           <span>看快照时间线(checkbox 进度 + 所在 commit)、当前阶段和谁在推进。</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="panel-knowledge" class="tab-panel" data-panel="knowledge" hidden>
+    <section class="hero">
+      <div>
+        <p class="eyebrow">KNOWLEDGE CARDS</p>
+        <h1>经验卡</h1>
+        <p class="hero-copy">约束、决定、失败尝试的证据化沉淀。未审核的卡不会进入 agent 的默认查询——先人工核对,再复用。</p>
+      </div>
+      <div class="usage-actions">
+        <select id="knowledgeView" aria-label="卡片视图">
+          <option value="effective">有效(已审核未过期)</option>
+          <option value="candidate">待审核</option>
+          <option value="rejected">已驳回</option>
+          <option value="all">全部</option>
+        </select>
+        <button id="knowledgeCreateBtn" class="secondary-btn" type="button">新建</button>
+      </div>
+    </section>
+    <p class="session-foot" id="knowledgeFoot">来源:需求详情「存为经验卡」或手工新建;审核通过后 task_brief / knowledge_query 才会把它作为建议返回。</p>
+    <div class="session-workbench">
+      <div id="knowledgeList" class="session-list"></div>
+      <div id="knowledgeReader" class="session-reader">
+        <div class="usage-empty">
+          <strong>从左边选一张卡</strong>
+          <span>看结论、适用范围、来源证据与反例;待审核卡在这里人工核对。</span>
         </div>
       </div>
     </div>

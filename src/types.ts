@@ -646,3 +646,49 @@ export interface SkillHit {
   triggers?: string[];
   score?: number;
 }
+
+/** INV-485 经验卡:约束/决定/失败尝试的证据化沉淀。状态与 INV 任务状态完全独立;
+ *  candidate 卡绝不进入默认建议,审核(reviewed)是唯一人工晋级的有效态。 */
+export type KnowledgeCardKind = 'constraint' | 'decision' | 'failed-attempt';
+export type KnowledgeCardStatus = 'candidate' | 'reviewed' | 'rejected';
+
+export interface KnowledgeCardSourceRef {
+  /** @session:{id} / requirement id / commit sha / 自由 url */
+  ref: string;
+  note?: string;
+}
+
+export interface KnowledgeCardCounterexample {
+  text: string;
+  source?: string;
+  at: number;
+}
+
+export interface KnowledgeCardRecord {
+  id: string;
+  kind: KnowledgeCardKind;
+  /** 问题/场景:什么情况下查这张卡。 */
+  problem: string;
+  /** 结论/动作:约束是什么、决定了什么、什么尝试失败。 */
+  action: string;
+  /** 前置条件与适用范围说明(自由文本)。 */
+  preconditions: string | null;
+  /** 适用仓库(url 或名称片段;null = 不限)。 */
+  repo: string | null;
+  /** 适用文件/模块(repo 相对路径)。 */
+  scopePaths: string[];
+  /** 建卡时的 commit 锚点(证据版本,供过期判断)。 */
+  repoRevision: string | null;
+  /** 适用版本范围说明(自由文本)。 */
+  versionRange: string | null;
+  /** 来源证据;没有来源的卡不允许进入 reviewed。 */
+  sourceRefs: KnowledgeCardSourceRef[];
+  counterexamples: KnowledgeCardCounterexample[];
+  status: KnowledgeCardStatus;
+  reviewer: string | null;
+  reviewedAt: number | null;
+  /** 到期时间(null=不过期);过期由查询层按时间推导,不改写存储状态。 */
+  expiresAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
