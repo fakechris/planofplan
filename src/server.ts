@@ -48,12 +48,31 @@ const WEB_DIR = (() => {
 })();
 
 
+/** usage 周期增量刷新的默认间隔:badge 阈值 24h 量级,30min 的新鲜度绰绰有余,
+ *  而增量扫描在水位未变时近零成本(实测 usage 部分 ~2s)。 */
+export const USAGE_REFRESH_INTERVAL_MS = 30 * 60_000;
+
+/**
+ * usage_records 的周期刷新间隔(INV-1355):长驻 daemon 下 usage 此前只有启动
+ * 一次自动刷新,fable 空闲 badge / Token 页随存活时长变旧。≤0 表示关闭(运维
+ * 逃生门);非法输入回退默认而非关闭——配置错误不该静默关掉新鲜度。
+ */
+export function usageRefreshIntervalMs(env: Record<string, string | undefined> = process.env): number {
+  const raw = env.PLANOFPLAN_USAGE_REFRESH_MINUTES;
+  if (raw == null || raw === '') return USAGE_REFRESH_INTERVAL_MS;
+  const minutes = Number(raw);
+  if (Number.isNaN(minutes)) return USAGE_REFRESH_INTERVAL_MS;
+  return minutes <= 0 ? 0 : minutes * 60_000;
+}
+
 export interface ServerOptions {
   /** true 时启动文件监听,变更自动触发 session 索引(demo 模式传 false)。 */
   live?: boolean;
   startupScan?: boolean;
   /** Injectable process boundary for isolated queue/API tests. */
   spawnScan?: (args: string[]) => Pick<Bun.Subprocess, 'exited'>;
+  /** 覆盖 usage 周期刷新间隔(测试注入);缺省走 usageRefreshIntervalMs(env)。 */
+  usageRefreshIntervalMs?: number;
   /** When set, every request must send `Authorization: Bearer <token>` (INV-897, see bind.ts). */
   authToken?: string | null;
 }
@@ -115,19 +134,20 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
   // 运行时注入的变量(preload 的测试隔离 home)不会下发(INV-1329)。
   const spawnScan = options.spawnScan ?? ((args: string[]) => spawnSelf(args));
   const scanQueue = new ScanQueue(async (request) => {
-    if (request.kind === 'usage') await runUsageRefresh(request.days, request.includeOfficial ?? false);
+    if (request.kind === 'usage') await runUsageRefresh(request.days, request.includeOfficial ?? false, request.source);
     else await runSessionIndex(request.days, request.source);
   }, (error) => console.error('[scan] failed:', error instanceof Error ? error.message : String(error)));
-  const startUsageRefresh = (days: number, includeOfficial: boolean): void => {
-    scanQueue.enqueue({ kind: 'usage', days, includeOfficial, source: 'page' });
+  const startUsageRefresh = (days: number, includeOfficial: boolean, source = 'page'): void => {
+    scanQueue.enqueue({ kind: 'usage', days, includeOfficial, source });
   };
-  const runUsageRefresh = async (days: number, includeOfficial: boolean): Promise<void> => {
+  const runUsageRefresh = async (days: number, includeOfficial: boolean, source = 'page'): Promise<void> => {
     usageRefreshError = null;
     usageRefreshStartedAt = Date.now();
     try {
       usageRefreshProcess = spawnScan(['tokens', '--days', String(days), ...(includeOfficial ? [] : ['--no-official'])]);
       const exitCode = await usageRefreshProcess.exited;
       if (exitCode !== 0) usageRefreshError = `本地日志扫描失败（exit ${exitCode}）`;
+      else if (source !== 'page') console.log(`[usage] ${source} scan completed`);
     } catch (error) {
       usageRefreshError = error instanceof Error ? error.message : '本地日志扫描失败';
     } finally {
@@ -1677,6 +1697,15 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
   if (options.startupScan) {
     startSessionIndex(90, 'startup');
     startUsageRefresh(3, false);
+    // INV-1355:usage_records 此前只有启动这一次自动刷新,长驻 daemon 下
+    // #plans 的 fable 空闲 badge / Token 页随存活时长变旧(实测 28h 误报)。
+    // 定时补一轮小窗口增量(行级水位,未变文件近零成本),经 ScanQueue 与
+    // watch/session 扫描串行;≤0 关闭(运维逃生门)。
+    const usageEveryMs = options.usageRefreshIntervalMs ?? usageRefreshIntervalMs();
+    if (usageEveryMs > 0) {
+      const usageTimer = setInterval(() => startUsageRefresh(3, false, 'periodic'), usageEveryMs);
+      usageTimer.unref?.();
+    }
   }
 
   return app;
