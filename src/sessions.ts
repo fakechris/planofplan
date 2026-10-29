@@ -27,6 +27,7 @@ import { messagesFromRecord, messagesFromZcodeDb, isClaudeMetaRecord, isClaudeCo
 import { touchesFromRecord } from './file-touches.ts';
 import { commitWitnessesFromRecord, commitWitnessesFromZcodeDb, type WitnessPairing } from './commit-witness.ts';
 import { collectSessionCommits } from './commit-attribution.ts';
+import { linkHandoffTargets } from './handoff.ts';
 import {
   ORIGIN_BACKFILL_STATE_PATHS,
   applyHerdrOrigin,
@@ -1417,6 +1418,13 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
     await collectSessionCommits(store, { since, until });
   } catch {
     /* commit attribution is best-effort */
+  }
+  // 交接回链(INV-1427):把 agent 交付后新起的接手会话链回 handoff 行。
+  // 纯本地 join,失败不拖垮目录扫描
+  try {
+    linkHandoffTargets(store);
+  } catch {
+    /* handoff linking is best-effort */
   }
   // origin 归因:一次性 backfill(user_version <4 时跑,重读 codex 文件头 +
   // claude 路径判断;dsh/factory 是独立哨兵的二次 pass)+ 每轮 herdr 升级。

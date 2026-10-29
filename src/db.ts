@@ -379,6 +379,8 @@ CREATE TABLE IF NOT EXISTS progress_notes (
 );
 CREATE INDEX IF NOT EXISTS idx_progress_notes_session ON progress_notes(session_id, seq);
 -- Handoff(§1.7):一次导出动作一行,交接链可观测。源悬空也保留(历史)。
+-- target_session_id/linked_at(INV-1427):交付后被目标 provider 在 target_dir
+-- 新起的会话接住时回链;只说明「被接住」,不证明读完包或验收完成。
 CREATE TABLE IF NOT EXISTS handoffs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   source_type TEXT NOT NULL,
@@ -388,7 +390,9 @@ CREATE TABLE IF NOT EXISTS handoffs (
   target_dir TEXT NOT NULL,
   package_path TEXT NOT NULL,
   ok INTEGER NOT NULL,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  target_session_id TEXT,
+  linked_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_handoffs_source ON handoffs(source_type, source_id, created_at);
 -- 经验卡(INV-485):约束/决定/失败尝试的证据化沉淀。candidate/reviewed/rejected
@@ -510,6 +514,13 @@ export class Store {
     for (const column of ['git_root TEXT', 'git_url TEXT', 'git_name TEXT']) {
       try {
         db.exec(`ALTER TABLE sessions ADD COLUMN ${column}`);
+      } catch {
+        // Existing databases already have the column, or were created by the current schema.
+      }
+    }
+    for (const column of ['target_session_id TEXT', 'linked_at INTEGER']) {
+      try {
+        db.exec(`ALTER TABLE handoffs ADD COLUMN ${column}`);
       } catch {
         // Existing databases already have the column, or were created by the current schema.
       }
@@ -2869,12 +2880,14 @@ export class Store {
 
   handoffsFor(sourceType: string, sourceId: string): Array<{
     mode: string; provider: string | null; targetDir: string; packagePath: string; ok: boolean; createdAt: number;
+    targetSessionId: string | null; linkedAt: number | null;
   }> {
     const rows = this.db.query(
-      `SELECT mode, provider, target_dir, package_path, ok, created_at
+      `SELECT mode, provider, target_dir, package_path, ok, created_at, target_session_id, linked_at
        FROM handoffs WHERE source_type = ? AND source_id = ? ORDER BY created_at DESC LIMIT 10`,
     ).all(sourceType, sourceId) as Array<{
       mode: string; provider: string | null; target_dir: string; package_path: string; ok: number; created_at: number;
+      target_session_id: string | null; linked_at: number | null;
     }>;
     return rows.map((row) => ({
       mode: row.mode,
@@ -2883,7 +2896,32 @@ export class Store {
       packagePath: row.package_path,
       ok: row.ok !== 0,
       createdAt: row.created_at,
+      targetSessionId: row.target_session_id,
+      linkedAt: row.linked_at,
     }));
+  }
+
+  // ── 交接回链(INV-1427)──────────────────────────────────────────
+
+  /** 近期待回链的 agent 交付(mode=agent 且 ok):created_at 在 since 之后。 */
+  handoffsPendingLink(since: number): Array<{
+    id: number; provider: string | null; targetDir: string; createdAt: number;
+  }> {
+    const rows = this.db.query(
+      `SELECT id, provider, target_dir, created_at FROM handoffs
+       WHERE mode = 'agent' AND ok = 1 AND target_session_id IS NULL AND created_at >= ?
+       ORDER BY created_at`,
+    ).all(since) as Array<{ id: number; provider: string | null; target_dir: string; created_at: number }>;
+    return rows
+      .filter((row) => row.provider != null)
+      .map((row) => ({ id: row.id, provider: row.provider!, targetDir: row.target_dir, createdAt: row.created_at }));
+  }
+
+  linkHandoffTarget(handoffId: number, sessionId: string): boolean {
+    const result = this.db.query(
+      'UPDATE handoffs SET target_session_id = ?, linked_at = ? WHERE id = ? AND target_session_id IS NULL',
+    ).run(sessionId, Date.now(), handoffId);
+    return result.changes > 0;
   }
 
   // ── 经验卡(INV-485)──────────────────────────────────────────────

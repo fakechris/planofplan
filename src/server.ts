@@ -1073,6 +1073,37 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
   const handoffLink = (type: string, id: string): string =>
     `http://localhost:${cfg.port}/#${type === 'planfile' ? 'planfiles' : type === 'session' ? 'sessions' : 'requirements'}/${encodeURIComponent(id)}`;
 
+  // 额度感知交接(INV-1427):每个可注入 provider 的窗口快照,供面板按可用度
+  // 展示与排序。不同订阅的额度单位不等价,只展示真实窗口与重置时间,不折算。
+  // availability: ok(任一窗口 <80%) / tight(任一窗口 ≥80%) / unknown(无窗口数据)。
+  const handoffProviderQuota = () => {
+    const overview = buildOverview(store, cfg.plans, Date.now());
+    return handoffProviders().map((provider) => {
+      const adapters = provider === 'factory' ? ['factory', 'droid'] : [provider];
+      const plans = overview.plans.filter((plan) => plan.enabled && adapters.includes(plan.adapter));
+      const windows = plans.flatMap((plan) => (plan.windows ?? []).map((win) => ({
+        plan: plan.slug,
+        label: win.label,
+        percentage: win.percentage,
+        used: win.used,
+        total: win.total,
+        unit: win.unit,
+        resetAt: win.resetAt,
+        note: win.note,
+      })));
+      if (windows.length === 0) {
+        return { provider, availability: 'unknown' as const, quotaLabel: plans.length > 0 ? '无窗口数据' : '未配置额度源', windows };
+      }
+      const tightest = windows.reduce((acc, win) => ((win.percentage ?? -1) > (acc.percentage ?? -1) ? win : acc));
+      const pct = tightest.percentage;
+      const availability = pct == null ? 'unknown' as const : pct >= 80 ? 'tight' as const : 'ok' as const;
+      const resetMins = tightest.resetAt != null ? Math.round((tightest.resetAt - Date.now()) / 60_000) : null;
+      const quotaLabel = `${tightest.label} ${pct != null ? `${Math.round(pct)}%` : '?'}`
+        + (resetMins != null && resetMins > 0 ? (resetMins >= 60 ? ` · ${Math.floor(resetMins / 60)}h${resetMins % 60}m 重置` : ` · ${resetMins}m 重置`) : '');
+      return { provider, availability, quotaLabel, windows };
+    });
+  };
+
   /** 已配置 LLM 时合成交接摘要头;失败退化纯证据包,错误带回给前端提示。 */
   const withLlmSummary = async (pkg: ReturnType<typeof buildHandoffPackage>): Promise<{
     pkg: NonNullable<ReturnType<typeof buildHandoffPackage>>;
@@ -1103,6 +1134,7 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
       ...pkg,
       deepLink: handoffLink(type, id),
       providers: handoffProviders(),
+      providerQuota: handoffProviderQuota(),
       history: store.handoffsFor(type, id),
       llmUsed: !!cfg.llm?.provider,
       summaryError,
