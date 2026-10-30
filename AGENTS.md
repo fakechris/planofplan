@@ -94,3 +94,15 @@
 6. **物证挂载与送审 (Attach Evidence)**：
    - 严禁空口汇报，必须调用 `involute___evidence_attach` 上传可追溯的单元测试路径或编译物证。物证挂载后，状态机将自动推进至 `In Review`。
    - **终态 Done 仅限人类评审确认**。
+
+## 4. 跨系统引用（INV-1434）
+
+planofplan 保存过程证据：会话、消息、提交归因。结论与决策归 Involute，外部资料加工成的知识归 OVP（决定 INV-1433）。三者之间只用文本引用互指，**planofplan 不在运行时调用另外两个系统**；只有客户端（agent 或 `recall`）解析引用，且每次只展开一跳。
+
+| 前缀 | 归属 | 解析方式 |
+|---|---|---|
+| `pop:<provider>:<session_id>#<message_id>@<source_revision>` | planofplan（本 MCP），即现有 `SourceRef` | `read_message` / `read_session` |
+| `ovp:source/<sha256>` · `ovp:claim/<claim_key>` | OVP（本机） | `find` / `claim` |
+| `inv:INV-<n>` | Involute（远端） | `work_get_context` |
+
+`SourceRef` 已经带内容版本与解析器版本，作为 `pop:` 引用时，带上 `@<source_revision>` 就能钉住当时的内容。完整格式与规则见 Involute 仓库的 `docs/cross-system-refs.md`。
