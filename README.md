@@ -46,9 +46,10 @@ planofplan auth clear <slug>             清掉手动 key
 - 默认只读本地 provider 日志：Antigravity `~/.gemini/antigravity/conversations/*.db`（gen_metadata protobuf）、Codex `~/.codex/sessions`、Claude
   `~/.claude/projects`、ZCode `~/.zcode/cli/rollout`、Kimi CLI
   `~/.kimi-code/sessions`、Grok CLI `~/.grok/logs/unified.jsonl`、DSH
-  `~/.dsh/sessions`。Codex 使用累计 token 的非负增量，Claude 使用
+  `~/.dsh/sessions`、WorkBuddy `~/.workbuddy/projects/**/*.jsonl`。Codex 使用累计 token 的非负增量，Claude 使用
   `message.id + requestId` 去重，DSH 只取最终 `assistant/message` 事件避免
-  streaming chunk 重复。
+  streaming chunk 重复；WorkBuddy 只入账 `function_call` 行 `providerData.usage`
+  记录到的请求（assistant 主响应不落 usage，不虚构）。
 - Droid/Factory 的 `~/.factory/sessions` 当前只有 session/message 元数据，没有可靠的
   per-turn token ledger，因此不会把 `summaryTokens` 或消息数伪装成 token usage；Droid
   的真实组织 token consumption 仍使用 Factory Analytics。

@@ -12,6 +12,7 @@ import { textOf } from './sessions.ts';
 import { sourcePathFor } from './session-repos.ts';
 import { resumeFor } from './resume.ts';
 import { messagesFromAntigravityRecord } from './antigravity-session.ts';
+import { messagesFromWorkBuddyRecord } from './workbuddy-session.ts';
 import { turnsFromOpencodeDb } from './opencode-session.ts';
 import { turnsFromAmpThread } from './amp-session.ts';
 
@@ -316,7 +317,9 @@ export const TOOL_INPUT_MAX = 2_000;
 // v9: 入库前脱敏(INV-898),全量重扫以清除存量明文密钥
 // v11: shell 类工具的命令作为可检索正文(INV-900)
 // v12: OpenCode 2 的 session_message 按 seq 展开助手正文与工具调用(INV-921)
-export const MESSAGE_PARSER_VERSION = 12;
+// v13: workbuddy provider 入目录(INV-1789):message 正文(function_call 工具行),
+//      user 信封(<system-reminder …>)不进消息索引
+export const MESSAGE_PARSER_VERSION = 13;
 
 function clipField(text: string, max = MESSAGE_TEXT_MAX): string {
   return text.length > max ? `${text.slice(0, max)}…` : text;
@@ -584,6 +587,8 @@ export function messagesFromRecord(
       return messagesFromKimiRecord(sessionId, record, seq);
     case 'antigravity':
       return messagesFromAntigravityRecord(sessionId, record, seq);
+    case 'workbuddy':
+      return messagesFromWorkBuddyRecord(sessionId, record, seq);
     default:
       return [];
   }

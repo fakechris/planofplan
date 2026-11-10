@@ -124,12 +124,21 @@ function specsFromRecord(record: Record<string, unknown>): TouchSpec[] {
     }
   }
 
-  // grok 风格:顶层 tool_call / backend_tool_call
-  if (record.type === 'backend_tool_call' || record.type === 'tool_call') {
+  // grok / workbuddy 风格:顶层 tool_call / backend_tool_call / function_call
+  // (workbuddy 的 arguments 是 JSON 字符串,parse 后才能取结构化 file_path)
+  if (record.type === 'backend_tool_call' || record.type === 'tool_call' || record.type === 'function_call') {
     if (typeof record.name === 'string') {
+      let input: unknown = record.arguments ?? record.input;
+      if (typeof input === 'string') {
+        try {
+          input = JSON.parse(input);
+        } catch {
+          /* 非 JSON 入参(如 shell command),不提取 */
+        }
+      }
       specs.push({
         toolName: record.name,
-        input: record.arguments ?? record.input,
+        input,
         timestamp: ts,
         cwd,
         index: specs.length,

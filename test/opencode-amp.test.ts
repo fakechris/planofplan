@@ -384,6 +384,7 @@ describe('Catalog collection and requirement materialization', () => {
         antigravityRoot: join(root, 'dummy-agy'),
         opencodeRoot: opencodeDir,
         ampRoot: ampDir,
+        workbuddyRoot: join(root, 'dummy-workbuddy'),
       });
 
       expect(count).toBe(2);

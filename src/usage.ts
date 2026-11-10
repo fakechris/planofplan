@@ -18,6 +18,7 @@ import { collectSessionCatalog } from './sessions.ts';
 import { modelPriceFor } from './pricing.ts';
 import { extractAntigravityUsage, antigravityConversationId } from './antigravity-usage.ts';
 import { wholeMtimeMs } from './mtime.ts';
+import { workBuddyModelOf, workBuddyNumericUsage, workbuddyProjectsRoot } from './workbuddy-session.ts';
 
 const DAY_MS = 86_400_000;
 
@@ -48,6 +49,7 @@ export interface CollectUsageOptions extends UsageScanOptions {
   antigravityRoot?: string;
   opencodeRoot?: string;
   ampRoot?: string;
+  workbuddyRoot?: string;
 }
 
 function finiteNumber(value: unknown): number {
@@ -561,6 +563,43 @@ export function scanDroidLogs(_root: string, _since = Date.now() - 30 * DAY_MS, 
   // Factory/Droid session JSONL currently has no per-turn usage record. Do not
   // treat compaction summaryTokens or message metadata as consumption.
   return [];
+}
+
+/** workbuddy:function_call 行的 providerData.usage(每条是一次独立 chatcmpl
+ *  请求,measured 口径);assistant 主响应不带 usage,本地只入账有记录的请求。 */
+function parseWorkBuddyRecord(
+  value: Record<string, unknown>,
+  file: string,
+  lineIndex: number,
+  since: number,
+  until: number,
+): UsageRecord | null {
+  if (value.type !== 'function_call') return null;
+  const providerData = value.providerData && typeof value.providerData === 'object'
+    ? value.providerData as Record<string, unknown>
+    : {};
+  if (!providerData.usage || typeof providerData.usage !== 'object') return null;
+  const timestamp = parseTimestamp(value.timestamp, wholeMtimeMs(statSync(file)));
+  if (!inRange(timestamp, since, until)) return null;
+  return record(
+    `local:workbuddy:${file}:${lineIndex}`,
+    'workbuddy',
+    workBuddyModelOf(value),
+    timestamp,
+    workBuddyNumericUsage(providerData.usage as Record<string, unknown>),
+    'local',
+    'measured',
+    { sessionId: typeof value.sessionId === 'string' ? value.sessionId : null },
+  );
+}
+
+/** 递归扫 projects 下全部 .jsonl(含 subagents 子会话,消耗同样真实)。
+ *  `.file-rollback.ndjson` 非 .jsonl 天然排除。 */
+export function scanWorkBuddyLogs(root: string, since = Date.now() - 30 * DAY_MS, until = Date.now()): UsageRecord[] {
+  return scanJsonlFiles(
+    jsonlFiles(root, since),
+    (value, file, lineIndex) => parseWorkBuddyRecord(value, file, lineIndex, since, until),
+  );
 }
 
 // cursor 版本：v1 错误地把 last_token_usage（每 turn 完整值）当累计值做差分，
@@ -1105,6 +1144,10 @@ function localScanFiles(options: CollectUsageOptions, since: number): LocalScanF
       provider: 'dsh',
       files: dshFiles(options.dshRoot ?? process.env.DSH_HOME ?? join(homedir(), '.dsh', 'sessions'), since),
     },
+    {
+      provider: 'workbuddy',
+      files: jsonlFiles(workbuddyProjectsRoot(options.workbuddyRoot), since),
+    },
   ];
   return roots.flatMap(({ provider, files, project }) => files.flatMap((path) => {
     try {
@@ -1178,6 +1221,8 @@ function scanLocalFile(
       return scanGrokLogs(file.path, since, until);
     case 'dsh':
       return scanDshLogs(file.path, since, until);
+    case 'workbuddy':
+      return scanWorkBuddyLogs(file.path, since, until);
     default:
       return [];
   }
