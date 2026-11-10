@@ -102,6 +102,7 @@ describe('库维护:孤儿水位与保留期', () => {
       antigravityRoot: join(root, 'antigravity'),
       opencodeRoot: join(root, 'opencode'),
       ampRoot: join(root, 'amp'),
+      workbuddyRoot: join(root, 'workbuddy'),
       since: Date.now() - 86_400_000,
       until: Date.now() + 86_400_000,
       ...extra,

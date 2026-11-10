@@ -62,6 +62,7 @@ import {
   recordsFromAmpThread,
 } from './amp-session.ts';
 import { wholeMtimeMs } from './mtime.ts';
+import { extractWorkBuddySession, isWorkBuddySessionFile, workbuddyProjectsRoot } from './workbuddy-session.ts';
 
 /** Subset of usage collect options — kept here to avoid a usage.ts cycle. */
 export interface SessionCollectOptions {
@@ -77,6 +78,7 @@ export interface SessionCollectOptions {
   antigravityRoot?: string;
   opencodeRoot?: string;
   ampRoot?: string;
+  workbuddyRoot?: string;
   /** 消息/touch/水位保留天数(目录行永久保留);0 = 关闭清理。默认取 PLANOFPLAN_MESSAGE_RETENTION_DAYS 或 60。 */
   messageRetentionDays?: number;
 }
@@ -104,7 +106,7 @@ const USAGE_PROVIDER_ALIAS: Record<string, string> = {
   'kimi-cli': 'kimi',
 };
 
-export const CATALOG_PROVIDERS = ['claude', 'codex', 'grok', 'dsh', 'kimi', 'zcode', 'factory', 'antigravity', 'opencode', 'amp'] as const;
+export const CATALOG_PROVIDERS = ['claude', 'codex', 'grok', 'dsh', 'kimi', 'zcode', 'factory', 'antigravity', 'opencode', 'amp', 'workbuddy'] as const;
 export type CatalogProvider = (typeof CATALOG_PROVIDERS)[number];
 
 export function sessionKey(provider: string, nativeId: string): string {
@@ -579,6 +581,8 @@ export function extractSessionFile(provider: string, path: string, mtimeMs: numb
       return extractKimiState(path, mtimeMs);
     case 'factory':
       return extractFactory(path, mtimeMs);
+    case 'workbuddy':
+      return extractWorkBuddySession(path, mtimeMs);
     default:
       return null;
   }
@@ -687,6 +691,14 @@ export function discoverSessionFiles(options: SessionCollectOptions, since: numb
         (name) => UUID_RE.test(name.replace(/\.db$/i, '')),
       ),
     },
+    {
+      provider: 'workbuddy',
+      files: walkFiles(
+        workbuddyProjectsRoot(options.workbuddyRoot),
+        since,
+        isWorkBuddySessionFile,
+      ),
+    },
   ];
   return groups.flatMap(({ provider, files }) => files.flatMap((path) => {
     try {
@@ -717,6 +729,7 @@ export function sessionWatchRoots(): string[] {
     process.env.ANTIGRAVITY_HOME ?? join(home, '.gemini', 'antigravity', 'conversations'),
     process.env.OPENCODE_HOME ?? join(home, '.local', 'share', 'opencode'),
     process.env.AMP_HOME ?? join(home, '.local', 'share', 'amp', 'threads'),
+    workbuddyProjectsRoot(),
   ])];
 }
 
@@ -1507,6 +1520,11 @@ function sessionStubsFromUsage(
   const stubs = new Map<string, SessionRecord>();
   for (const record of store.iterateUsageRecords(since, until)) {
     if (record.source !== 'local' || !record.sessionId) continue;
+    // subagents/ 来源的消耗(如 workbuddy agent-*.jsonl)不建目录 stub:
+    // 行内 sessionId 是子 agent 运行 id,建了只会得到无标题孤儿行;
+    // token 仍进全局/按日/provider 聚合。claude 的 subagent 有目录正式行,
+    // knownIds 已过滤,不走这里。
+    if (record.sourceFile?.includes('/subagents/')) continue;
     const provider = catalogProviderOf(record.provider);
     const id = sessionKey(provider, record.sessionId);
     if (knownIds.has(id)) continue;

@@ -407,6 +407,7 @@ describe('usage report', () => {
         antigravityRoot: join(root, 'antigravity'),
         opencodeRoot: join(root, 'opencode'),
         ampRoot: join(root, 'amp'),
+        workbuddyRoot: join(root, 'workbuddy'),
       };
 
       await collectUsageReport(store, options);
@@ -459,6 +460,7 @@ describe('usage report', () => {
         antigravityRoot: join(root, 'antigravity'),
         opencodeRoot: join(root, 'opencode'),
         ampRoot: join(root, 'amp'),
+        workbuddyRoot: join(root, 'workbuddy'),
       };
 
       await collectUsageReport(store, options);
