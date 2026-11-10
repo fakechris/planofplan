@@ -12,7 +12,7 @@ if(process.argv.includes('--many-files')) {
   for(let i=1;i<8;i++)linkSync(path,join(claude,`aaaaaaaa-aaaa-aaaa-aaaa-${String(i).padStart(12,'0')}.jsonl`));
 }
 Bun.gc(true);const store=openMemoryDb();
-try{await collectSessionCatalog(store,{since:0,until:Date.now()+1000,codexRoot:join(root,"absent"),claudeRoots:[claude],opencodeRoot:root,zcodeRoot:root,droidRoot:root,kimiRoot:root,grokRoot:root,dshRoot:root,antigravityRoot:root,ampRoot:root,workbuddyRoot:root,messageRetentionDays:0});
+try{await collectSessionCatalog(store,{since:0,until:Date.now()+1000,codexRoot:join(root,"absent"),claudeRoots:[claude],opencodeRoot:root,zcodeRoot:root,droidRoot:root,kimiRoot:root,grokRoot:root,dshRoot:root,antigravityRoot:root,ampRoot:root,workbuddyRoot:root,doubaoRoot:root,messageRetentionDays:0});
 const peak=process.resourceUsage().maxRSS; console.log(JSON.stringify({peakBytes:peak,memory:process.memoryUsage(),messages:store.countSessionMessages("claude:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")}));
 if(peak>(process.argv.includes('--many-files') ? 1024 : 640)*1024*1024)process.exitCode=1;
 }finally{store.close();rmSync(root,{recursive:true,force:true});}

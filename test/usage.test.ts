@@ -408,6 +408,7 @@ describe('usage report', () => {
         opencodeRoot: join(root, 'opencode'),
         ampRoot: join(root, 'amp'),
         workbuddyRoot: join(root, 'workbuddy'),
+        doubaoRoot: join(root, 'doubao'),
       };
 
       await collectUsageReport(store, options);
@@ -461,6 +462,7 @@ describe('usage report', () => {
         opencodeRoot: join(root, 'opencode'),
         ampRoot: join(root, 'amp'),
         workbuddyRoot: join(root, 'workbuddy'),
+        doubaoRoot: join(root, 'doubao'),
       };
 
       await collectUsageReport(store, options);

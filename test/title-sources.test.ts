@@ -26,6 +26,7 @@ function makeRoots(root: string) {
     opencodeRoot: join(root, 'opencode'),
     ampRoot: join(root, 'amp'),
     workbuddyRoot: join(root, 'workbuddy'),
+    doubaoRoot: join(root, 'doubao'),
     since: Date.now() - 86_400_000,
     until: Date.now() + 86_400_000,
   };

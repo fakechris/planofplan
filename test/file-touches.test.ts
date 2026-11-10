@@ -179,6 +179,7 @@ describe('collectSessionCatalog touch indexing', () => {
       opencodeRoot: join(root, 'missing-opencode'),
       ampRoot: join(root, 'missing-amp'),
       workbuddyRoot: join(root, 'missing-workbuddy'),
+      doubaoRoot: join(root, 'missing-doubao'),
     };
   }
 
