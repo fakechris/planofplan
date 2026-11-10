@@ -385,6 +385,7 @@ describe('Catalog collection and requirement materialization', () => {
         opencodeRoot: opencodeDir,
         ampRoot: ampDir,
         workbuddyRoot: join(root, 'dummy-workbuddy'),
+        doubaoRoot: join(root, 'dummy-doubao'),
       });
 
       expect(count).toBe(2);

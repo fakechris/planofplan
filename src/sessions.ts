@@ -63,6 +63,7 @@ import {
 } from './amp-session.ts';
 import { wholeMtimeMs } from './mtime.ts';
 import { extractWorkBuddySession, isWorkBuddySessionFile, workbuddyProjectsRoot } from './workbuddy-session.ts';
+import { collectDoubaoSnapshotTouches, doubaoChatLdbDir, doubaoSnapshotRoot, extractDoubaoSessions } from './doubao-session.ts';
 
 /** Subset of usage collect options — kept here to avoid a usage.ts cycle. */
 export interface SessionCollectOptions {
@@ -79,6 +80,7 @@ export interface SessionCollectOptions {
   opencodeRoot?: string;
   ampRoot?: string;
   workbuddyRoot?: string;
+  doubaoRoot?: string;
   /** 消息/touch/水位保留天数(目录行永久保留);0 = 关闭清理。默认取 PLANOFPLAN_MESSAGE_RETENTION_DAYS 或 60。 */
   messageRetentionDays?: number;
 }
@@ -106,7 +108,7 @@ const USAGE_PROVIDER_ALIAS: Record<string, string> = {
   'kimi-cli': 'kimi',
 };
 
-export const CATALOG_PROVIDERS = ['claude', 'codex', 'grok', 'dsh', 'kimi', 'zcode', 'factory', 'antigravity', 'opencode', 'amp', 'workbuddy'] as const;
+export const CATALOG_PROVIDERS = ['claude', 'codex', 'grok', 'dsh', 'kimi', 'zcode', 'factory', 'antigravity', 'opencode', 'amp', 'workbuddy', 'doubao'] as const;
 export type CatalogProvider = (typeof CATALOG_PROVIDERS)[number];
 
 export function sessionKey(provider: string, nativeId: string): string {
@@ -590,6 +592,7 @@ export function extractSessionFile(provider: string, path: string, mtimeMs: numb
 
 export function extractSessionRecords(provider: string, path: string, mtimeMs: number): SessionRecord[] {
   if (provider === 'zcode') return extractZcodeDb(path, mtimeMs);
+  if (provider === 'doubao') return extractDoubaoSessions(path, mtimeMs);
   if (provider === 'opencode') return extractOpencodeDb(path, mtimeMs);
   if (provider === 'amp') {
     const row = extractAmpThread(path, mtimeMs);
@@ -699,6 +702,15 @@ export function discoverSessionFiles(options: SessionCollectOptions, since: numb
         isWorkBuddySessionFile,
       ),
     },
+    {
+      // 豆包:一个发现单元 = chat leveldb 目录(SSTable+WAL 都在里面);
+      // mtime 由目录 stat 提供,无论 WAL 追加还是 compaction 都会变
+      provider: 'doubao',
+      files: (() => {
+        const dir = options.doubaoRoot ?? doubaoChatLdbDir();
+        return existsSync(dir) ? [dir] : [];
+      })(),
+    },
   ];
   return groups.flatMap(({ provider, files }) => files.flatMap((path) => {
     try {
@@ -730,6 +742,8 @@ export function sessionWatchRoots(): string[] {
     process.env.OPENCODE_HOME ?? join(home, '.local', 'share', 'opencode'),
     process.env.AMP_HOME ?? join(home, '.local', 'share', 'amp', 'threads'),
     workbuddyProjectsRoot(),
+    doubaoChatLdbDir(),
+    doubaoSnapshotRoot(),
   ])];
 }
 
@@ -1305,6 +1319,28 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
       continue;
     }
     scanned += 1;
+    if (file.provider === 'doubao') {
+      // 豆包:无消息 jsonl 正文(消息在 V8 value 里,本期不入消息索引);
+      // 文件触碰来自 coding/snapshot(独立根,一轮一次全量收集,幂等 id)。
+      // 任何一步失败只丢 touches,目录行照常入;leveldb 解析失败在
+      // extractDoubaoSessions 内部按文件容错。
+      const snapshotTouches = collectDoubaoSnapshotTouches();
+      for (const row of extractSessionRecords(file.provider, file.path, file.mtimeMs)) {
+        if (tombstones.ids.has(row.id)) continue;
+        const withWork = attachGit(row);
+        try {
+          store.withTransaction(() => {
+            store.deleteSessionTouches(row.id);
+            store.upsertSessionTouches(snapshotTouches.get(row.id) ?? []);
+          });
+        } catch (error) {
+          logIndexFailure(file.path, error);
+        }
+        pushRow(attachRepos(withWork, extractSessionRepos(withWork)));
+      }
+      processed += 1;
+      continue;
+    }
     for (const row of extractSessionRecords(file.provider, file.path, file.mtimeMs)) {
       if (tombstones.ids.has(row.id)) continue;
       const withWork = attachGit(row);
