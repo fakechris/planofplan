@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openMemoryDb } from '../src/db.ts';
@@ -208,6 +208,63 @@ describe('local token usage scanners', () => {
     }
   });
 
+  test('Codex last 直加不受 resume 链 total 延续影响;subagent 重放段被跳过', () => {
+    const root = tempRoot();
+    try {
+      const dir = join(root, '2026', '08', '19');
+      mkdirSync(dir, { recursive: true });
+      const subagentFile = join(dir, 'rollout-sub.jsonl');
+      writeFileSync(subagentFile, jsonl([
+        // subagent:session_meta 带 thread_spawn;创建分钟 10:05
+        { type: 'session_meta', timestamp: `${DAY}T10:05:00.000Z`, payload: { source: { subagent: { thread_spawn: { parent_thread_id: 'p', depth: 1 } } } } },
+        // 重放段(与创建同分钟):父历史 last 会被双计,必须跳过
+        { type: 'event_msg', timestamp: `${DAY}T10:05:00.000Z`, payload: { type: 'token_count', info: { last_token_usage: { input_tokens: 900, cached_input_tokens: 0, output_tokens: 90, total_tokens: 990 } } } },
+        // 边界后:subagent 自己的量,正常入账
+        { type: 'turn_context', timestamp: `${DAY}T10:06:00.000Z`, payload: { model: 'gpt-5' } },
+        { type: 'event_msg', timestamp: `${DAY}T10:06:30.000Z`, payload: { type: 'token_count', info: { last_token_usage: { input_tokens: 20, cached_input_tokens: 5, output_tokens: 2, total_tokens: 22 } } } },
+      ]), 'utf8');
+      // resume 文件:total 从父终值 990 延续(990→992),但 last 是本 turn 真实值
+      const resumeFile = join(dir, 'rollout-resume.jsonl');
+      writeFileSync(resumeFile, jsonl([
+        { type: 'session_meta', payload: { session_id: 's-resume' } },
+        { type: 'turn_context', timestamp: `${DAY}T10:07:00.000Z`, payload: { model: 'gpt-5' } },
+        { type: 'event_msg', timestamp: `${DAY}T10:07:01.000Z`, payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 992, output_tokens: 95, total_tokens: 1087 }, last_token_usage: { input_tokens: 2, cached_input_tokens: 1, output_tokens: 5, total_tokens: 7 } } } },
+      ]), 'utf8');
+
+      const records = scanCodexLogs(root, SINCE, UNTIL);
+      // 重放的 990M 被跳过;只留 resume 1 条 + subagent 自己 1 条
+      // (文件名字典序 rollout-resume 先于 rollout-sub)
+      expect(records).toHaveLength(2);
+      expect(records[0]).toMatchObject({ inputTokens: 1, cachedInputTokens: 1, outputTokens: 5 });
+      expect(records[1]).toMatchObject({ inputTokens: 15, cachedInputTokens: 5, outputTokens: 2 });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('jsonlFiles 收跨天常驻文件(路径日期早但 mtime 新)', () => {
+    const root = tempRoot();
+    try {
+      // 老日期目录里的文件,mtime 设为现在(codex resume 常驻会话形态)
+      const dir = join(root, '2026', '07', '01');
+      mkdirSync(dir, { recursive: true });
+      const file = join(dir, 'rollout-old.jsonl');
+      // 事件时间戳用动态时刻(窗口也是动态 7 天)
+      const eventTs = new Date(Date.now() - 3_600_000).toISOString();
+      writeFileSync(file, jsonl([
+        { type: 'turn_context', timestamp: eventTs, payload: { model: 'gpt-5' } },
+        { type: 'event_msg', timestamp: eventTs, payload: { type: 'token_count', info: { last_token_usage: { input_tokens: 10, output_tokens: 1, total_tokens: 11 } } } },
+      ]), 'utf8');
+      const now = Date.now() / 1000;
+      utimesSync(file, now, now);
+      const records = scanCodexLogs(root, Date.now() - 7 * 86_400_000, Date.now());
+      expect(records).toHaveLength(1);
+      expect(records[0]).toMatchObject({ inputTokens: 10, outputTokens: 1 });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test('Codex cumulative token_count records are emitted as deltas', () => {
     const root = tempRoot();
     try {
@@ -314,17 +371,18 @@ describe('local token usage scanners', () => {
 
       const records = scanCodexLogs(root, SINCE, UNTIL);
 
-      expect(records).toHaveLength(3);
-      // OpenAI 语义 input_tokens 含 cached,入库前拆列:拆分后累计差分
-      // 6+5+5=16(旧口径全量 20);INPUT+CACHE READ+OUTPUT 与 TOTAL 差分自洽
-      expect(records.reduce((sum, record) => sum + record.inputTokens, 0)).toBe(16);
-      expect(records.reduce((sum, record) => sum + record.outputTokens, 0)).toBe(6);
+      expect(records).toHaveLength(4);
+      // v3(INV-1789 后续对账 ccusage):last_token_usage 优先直加(每 turn 完整值,
+      // 不受 resume 链 total 延续影响);OpenAI 语义 input 含 cached,入库前拆列。
+      // 4 条 last: (8-2)+(8-2)+(7-2)+(5-0) = 6+6+5+5 = 22
+      expect(records.reduce((sum, record) => sum + record.inputTokens, 0)).toBe(22);
+      expect(records.reduce((sum, record) => sum + record.outputTokens, 0)).toBe(8);
       expect(records[1]).toMatchObject({
         provider: 'codex',
         model: 'gpt-5',
-        inputTokens: 5,
+        inputTokens: 6,
         cachedInputTokens: 2,
-        outputTokens: 3,
+        outputTokens: 2,
         reasoningOutputTokens: 1,
         totalTokens: 10,
         source: 'local',

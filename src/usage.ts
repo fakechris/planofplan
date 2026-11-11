@@ -290,10 +290,14 @@ function jsonlFiles(root: string, since: number): string[] {
           const pathDay = datedPath
             ? Date.parse(`${datedPath[1]}-${datedPath[2]}-${datedPath[3]}T00:00:00.000Z`)
             : null;
-          if (
-            (pathDay != null && pathDay + DAY_MS >= since)
-            || (pathDay == null && wholeMtimeMs(stat) >= since - 2 * DAY_MS)
-          ) {
+          // 路径日期与 mtime 任一在窗口附近即收(取较新者):跨天常驻会话
+          // (10-24 创建、被反复 resume、事件持续写入今天,mtime=今天)不能按
+          // 路径日期当旧档排除——实测漏掉 459MB/3.4B tokens 的常驻文件,
+          // 7 天窗少算 ~1.3B(ccusage glob 全量收,对照发现)。
+          const freshest = pathDay != null
+            ? Math.max(pathDay, wholeMtimeMs(stat))
+            : wholeMtimeMs(stat);
+          if (freshest + DAY_MS >= since || wholeMtimeMs(stat) >= since - 2 * DAY_MS) {
             files.push(path);
           }
         } catch {
@@ -661,9 +665,12 @@ export function scanWorkBuddyLogs(root: string, since = Date.now() - 30 * DAY_MS
 
 // cursor 版本：v1 错误地把 last_token_usage（每 turn 完整值）当累计值做差分，
 // 跨 turn 大幅少算。v2 改用 total_token_usage（session 级累计，实测单调递增）
-// 做差分。旧 cursor 解析失败 → 触发全量重扫，DB 里被低估的记录随
-// replaceUsageRecordsForFiles 自愈。
-const CODEX_CURSOR_VERSION = 2;
+// 做差分。v3(2026-11-10) 改回 last_token_usage 优先直加 + 元组去重 +
+// subagent 重放过滤:total 在 resume 链上延续(新文件从父终值继续),per-file
+// 差分把父历史双计到 resume 文件首事件(ccusage 对照实测 7 天窗多 ~830M);
+// 同时补 jsonlFiles 的跨天常驻文件按路径日期漏收。旧 cursor 解析失败 →
+// 触发全量重扫，DB 里的记录随 replaceUsageRecordsForFiles 自愈。
+const CODEX_CURSOR_VERSION = 3;
 
 interface CodexCursor {
   v: number;
@@ -674,6 +681,11 @@ interface CodexCursor {
   previous: NumericUsage | null;
   eventIndex: number;
   cwd: string | null;
+  subagent: boolean;
+  replayBoundary: boolean;
+  creationMinute: string | null;
+  /** last 直加口径的去重键(滚动上限,防 cursor 无界膨胀)。 */
+  dedupeKeys: string[];
 }
 
 function emptyCodexCursor(): CodexCursor {
@@ -686,6 +698,10 @@ function emptyCodexCursor(): CodexCursor {
     previous: null,
     eventIndex: 0,
     cwd: null,
+    subagent: false,
+    replayBoundary: false,
+    creationMinute: null,
+    dedupeKeys: [],
   };
 }
 
@@ -718,6 +734,12 @@ function parseCodexCursor(value: string | null | undefined): CodexCursor | null 
       cwd: typeof parsed.cwd === 'string' ? parsed.cwd : null,
       previous,
       eventIndex: Math.max(0, parsed.eventIndex),
+      subagent: parsed.subagent === true,
+      replayBoundary: parsed.replayBoundary === true,
+      creationMinute: typeof parsed.creationMinute === 'string' ? parsed.creationMinute : null,
+      dedupeKeys: Array.isArray(parsed.dedupeKeys)
+        ? parsed.dedupeKeys.filter((k): k is string => typeof k === 'string').slice(-4096)
+        : [],
     };
   } catch {
     return null;
@@ -737,6 +759,7 @@ function scanCodexFile(
   } catch { return { records: [], cursor: initialCursor ?? emptyCodexCursor() }; }
   const start = initialCursor && initialCursor.parsedBytes <= fileSize ? initialCursor.parsedBytes : 0;
   const cursor = initialCursor && start > 0 ? { ...initialCursor } : emptyCodexCursor();
+  const dedupeCache = new Set(cursor.dedupeKeys);
   const result: UsageRecord[] = [];
   try {
     forEachJsonlLine(file, start, (line, end) => {
@@ -756,6 +779,21 @@ function scanCodexFile(
       if (rootRecord.type === 'session_meta') {
         const session = payloadRecord.session_id ?? payloadRecord.id;
         if (typeof session === 'string') cursor.sessionId = session;
+        // subagent 检测(借鉴 ccusage):subagent rollout 重放父会话的全部
+        // token 历史,last 直加口径会把父历史双计。重放事件全部共享创建
+        // 时刻(同一分钟),首个不同分钟即重放边界;边界前只推进差分基准。
+        if (!cursor.subagent) {
+          const source = payloadRecord.source && typeof payloadRecord.source === 'object'
+            ? payloadRecord.source as Record<string, unknown> : null;
+          const subagent = source && typeof source.subagent === 'object'
+            ? source.subagent as Record<string, unknown> : null;
+          if (payloadRecord.forked_from_id != null || subagent?.thread_spawn != null) {
+            cursor.subagent = true;
+            if (cursor.creationMinute == null && typeof rootRecord.timestamp === 'string') {
+              cursor.creationMinute = rootRecord.timestamp.slice(0, 16);
+            }
+          }
+        }
       }
       if (rootRecord.type === 'turn_context') {
         cursor.model = stableModel(payloadRecord.model);
@@ -767,20 +805,47 @@ function scanCodexFile(
       if (rootRecord.type !== 'event_msg' || payloadRecord.type !== 'token_count') return;
       const info = payloadRecord.info;
       if (!info || typeof info !== 'object') return;
-      // total_token_usage 是 session 级累计值（实测文件内单调递增，重复
-      // token_count 事件差分为 0 自然去重）；last_token_usage 是每 turn 完整
-      // 值，不能跨事件做差分。旧 codex 版本缺 total 时退回 last。
       const infoRecord = info as Record<string, unknown>;
-      const usageValue = infoRecord.total_token_usage ?? infoRecord.last_token_usage;
-      if (!usageValue || typeof usageValue !== 'object') return;
-      // codex 的 input_tokens 是 OpenAI 语义(含 cached),入库前拆列;
-      // 差分在拆分后的口径上进行,与存储一致
-      const current = splitCachedInput(usageFromRecord(usageValue as Record<string, unknown>));
-      const delta = subtractUsage(current, cursor.previous);
-      cursor.previous = current;
-      if (!hasTokens(delta)) return;
       const timestamp = parseTimestamp(rootRecord.timestamp, Date.now());
+      // subagent 重放段(与创建同分钟的事件是父历史重放)在任何口径下都
+      // 跳过:last 直加会把重放的 last 全量双计,total 差分需推进基准。
+      // 首个不同分钟 = 重放结束,此后正常入账(同 ccusage)。
+      if (cursor.subagent && !cursor.replayBoundary && cursor.creationMinute != null) {
+        const minute = typeof rootRecord.timestamp === 'string' ? rootRecord.timestamp.slice(0, 16) : '';
+        if (minute === cursor.creationMinute) {
+          const replayedTotal = infoRecord.total_token_usage;
+          if (replayedTotal && typeof replayedTotal === 'object') {
+            cursor.previous = splitCachedInput(usageFromRecord(replayedTotal as Record<string, unknown>));
+          }
+          return;
+        }
+        cursor.replayBoundary = true;
+      }
+      // total_token_usage 是 session 级累计值:跨 resume 链延续(resume 新文件
+      // 从父文件终值继续),per-file 差分会把父历史双计到 resume 文件首事件
+      // (实测 11-05/11-09 各多 ~300-500M,ccusage 对照发现)。因此改为
+      // last_token_usage 优先直加(每 turn 完整值,不受 resume 影响,同
+      // ccusage);无 last 的旧格式才退回 total 差分。
+      const lastValue = infoRecord.last_token_usage;
+      const totalValue = infoRecord.total_token_usage;
+      let delta: NumericUsage | null = null;
+      if (lastValue && typeof lastValue === 'object') {
+        delta = splitCachedInput(usageFromRecord(lastValue as Record<string, unknown>));
+      } else if (totalValue && typeof totalValue === 'object') {
+        const current = splitCachedInput(usageFromRecord(totalValue as Record<string, unknown>));
+        delta = subtractUsage(current, cursor.previous);
+        cursor.previous = current;
+      }
+      if (!delta || !hasTokens(delta)) return;
       if (!inRange(timestamp, since, until)) return;
+      // (timestamp, in, out, cached) 元组去重:last 直加口径下 codex 偶发
+      // 重发的 token_count(同刻同量)不再被差分自然吸收,显式去重(同 ccusage)。
+      // 滚动上限防 cursor 无界膨胀(重发只会紧跟原发,近邻窗口足够)。
+      const dedupeKey = `${timestamp}:${delta.inputTokens}:${delta.outputTokens}:${delta.cachedInputTokens}`;
+      if (dedupeCache.has(dedupeKey)) return;
+      dedupeCache.add(dedupeKey);
+      cursor.dedupeKeys.push(dedupeKey);
+      if (cursor.dedupeKeys.length > 4096) cursor.dedupeKeys.splice(0, cursor.dedupeKeys.length - 4096);
       cursor.eventIndex += 1;
       result.push(record(
         `local:codex:${file}:${cursor.eventIndex}`,
