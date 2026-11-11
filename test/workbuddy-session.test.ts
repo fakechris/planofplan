@@ -140,7 +140,9 @@ describe('workbuddy usage 行级解析', () => {
         outputTokens: 221,
         totalTokens: 46496,
       });
-      expect(records[0]!.estimatedCostUsd).toBeNull(); // hy4free 无价格,不虚构
+      // hy4free = 混元 hy4 家族(¥6/¥0.3/¥18 ≈ $0.83/$0.04/$2.50 per MTok):
+      // (2179×0.83 + 44096×0.04 + 221×2.5)/1e6 ≈ $0.0041249
+      expect(records[0]!.estimatedCostUsd).toBeCloseTo(0.0041249, 6);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

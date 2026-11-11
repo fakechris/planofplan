@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openMemoryDb } from '../src/db.ts';
@@ -123,12 +123,37 @@ describe('local token usage scanners', () => {
       expect(records[0]).toMatchObject({
         provider: 'grok-cli',
         cachedInputTokens: 15,
-        inputTokens: 70,
+        // prompt_tokens(70)是含 cached 的全量,入库前拆列:非缓存输入 55
+        inputTokens: 55,
         outputTokens: 20,
         reasoningOutputTokens: 5,
         totalTokens: 90,
         sessionId: 'grok-session',
       });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('Grok CLI 模型回填:catalog 事件就近 + 全文件唯一模型作默认', () => {
+    const root = tempRoot();
+    try {
+      const file = join(root, 'unified.jsonl');
+      writeFileSync(file, jsonl([
+        // 首条 usage 在任何 catalog 事件之前:默认模型由全文件唯一 current_model_id 回填
+        { ts: `${DAY}T10:00:00.000Z`, ctx: { prompt_tokens: 10, completion_tokens: 2 } },
+        { ts: `${DAY}T10:00:01.000Z`, ctx: { current_model_id: 'grok-4.7', model_count: 4 } },
+        { ts: `${DAY}T10:00:02.000Z`, ctx: { prompt_tokens: 20, completion_tokens: 3 } },
+      ]), 'utf8');
+      const records = scanGrokLogs(file, SINCE, UNTIL);
+      expect(records).toHaveLength(2);
+      expect(records[0]).toMatchObject({ model: 'grok-4.7' });
+      expect(records[1]).toMatchObject({ model: 'grok-4.7' });
+      // 无 catalog 事件的文件保持 unknown(不虚构)
+      const other = join(root, 'other.jsonl');
+      writeFileSync(other, jsonl([{ ts: `${DAY}T10:00:03.000Z`, ctx: { prompt_tokens: 5, completion_tokens: 1 } }]), 'utf8');
+      const lone = scanGrokLogs(other, SINCE, UNTIL);
+      expect(lone[0]).toMatchObject({ model: 'unknown' });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -178,6 +203,63 @@ describe('local token usage scanners', () => {
       ]), 'utf8');
 
       expect(scanDroidLogs(root, SINCE, UNTIL)).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('Codex last 直加不受 resume 链 total 延续影响;subagent 重放段被跳过', () => {
+    const root = tempRoot();
+    try {
+      const dir = join(root, '2026', '08', '19');
+      mkdirSync(dir, { recursive: true });
+      const subagentFile = join(dir, 'rollout-sub.jsonl');
+      writeFileSync(subagentFile, jsonl([
+        // subagent:session_meta 带 thread_spawn;创建分钟 10:05
+        { type: 'session_meta', timestamp: `${DAY}T10:05:00.000Z`, payload: { source: { subagent: { thread_spawn: { parent_thread_id: 'p', depth: 1 } } } } },
+        // 重放段(与创建同分钟):父历史 last 会被双计,必须跳过
+        { type: 'event_msg', timestamp: `${DAY}T10:05:00.000Z`, payload: { type: 'token_count', info: { last_token_usage: { input_tokens: 900, cached_input_tokens: 0, output_tokens: 90, total_tokens: 990 } } } },
+        // 边界后:subagent 自己的量,正常入账
+        { type: 'turn_context', timestamp: `${DAY}T10:06:00.000Z`, payload: { model: 'gpt-5' } },
+        { type: 'event_msg', timestamp: `${DAY}T10:06:30.000Z`, payload: { type: 'token_count', info: { last_token_usage: { input_tokens: 20, cached_input_tokens: 5, output_tokens: 2, total_tokens: 22 } } } },
+      ]), 'utf8');
+      // resume 文件:total 从父终值 990 延续(990→992),但 last 是本 turn 真实值
+      const resumeFile = join(dir, 'rollout-resume.jsonl');
+      writeFileSync(resumeFile, jsonl([
+        { type: 'session_meta', payload: { session_id: 's-resume' } },
+        { type: 'turn_context', timestamp: `${DAY}T10:07:00.000Z`, payload: { model: 'gpt-5' } },
+        { type: 'event_msg', timestamp: `${DAY}T10:07:01.000Z`, payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 992, output_tokens: 95, total_tokens: 1087 }, last_token_usage: { input_tokens: 2, cached_input_tokens: 1, output_tokens: 5, total_tokens: 7 } } } },
+      ]), 'utf8');
+
+      const records = scanCodexLogs(root, SINCE, UNTIL);
+      // 重放的 990M 被跳过;只留 resume 1 条 + subagent 自己 1 条
+      // (文件名字典序 rollout-resume 先于 rollout-sub)
+      expect(records).toHaveLength(2);
+      expect(records[0]).toMatchObject({ inputTokens: 1, cachedInputTokens: 1, outputTokens: 5 });
+      expect(records[1]).toMatchObject({ inputTokens: 15, cachedInputTokens: 5, outputTokens: 2 });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('jsonlFiles 收跨天常驻文件(路径日期早但 mtime 新)', () => {
+    const root = tempRoot();
+    try {
+      // 老日期目录里的文件,mtime 设为现在(codex resume 常驻会话形态)
+      const dir = join(root, '2026', '07', '01');
+      mkdirSync(dir, { recursive: true });
+      const file = join(dir, 'rollout-old.jsonl');
+      // 事件时间戳用动态时刻(窗口也是动态 7 天)
+      const eventTs = new Date(Date.now() - 3_600_000).toISOString();
+      writeFileSync(file, jsonl([
+        { type: 'turn_context', timestamp: eventTs, payload: { model: 'gpt-5' } },
+        { type: 'event_msg', timestamp: eventTs, payload: { type: 'token_count', info: { last_token_usage: { input_tokens: 10, output_tokens: 1, total_tokens: 11 } } } },
+      ]), 'utf8');
+      const now = Date.now() / 1000;
+      utimesSync(file, now, now);
+      const records = scanCodexLogs(root, Date.now() - 7 * 86_400_000, Date.now());
+      expect(records).toHaveLength(1);
+      expect(records[0]).toMatchObject({ inputTokens: 10, outputTokens: 1 });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -289,15 +371,18 @@ describe('local token usage scanners', () => {
 
       const records = scanCodexLogs(root, SINCE, UNTIL);
 
-      expect(records).toHaveLength(3);
-      expect(records.reduce((sum, record) => sum + record.inputTokens, 0)).toBe(20);
-      expect(records.reduce((sum, record) => sum + record.outputTokens, 0)).toBe(6);
+      expect(records).toHaveLength(4);
+      // v3(INV-1789 后续对账 ccusage):last_token_usage 优先直加(每 turn 完整值,
+      // 不受 resume 链 total 延续影响);OpenAI 语义 input 含 cached,入库前拆列。
+      // 4 条 last: (8-2)+(8-2)+(7-2)+(5-0) = 6+6+5+5 = 22
+      expect(records.reduce((sum, record) => sum + record.inputTokens, 0)).toBe(22);
+      expect(records.reduce((sum, record) => sum + record.outputTokens, 0)).toBe(8);
       expect(records[1]).toMatchObject({
         provider: 'codex',
         model: 'gpt-5',
-        inputTokens: 7,
+        inputTokens: 6,
         cachedInputTokens: 2,
-        outputTokens: 3,
+        outputTokens: 2,
         reasoningOutputTokens: 1,
         totalTokens: 10,
         source: 'local',
@@ -566,6 +651,36 @@ describe('usage report', () => {
     expect(store.getUsageReport(SINCE, UNTIL).totals.totalTokens)
       .toBe(130);
   });
+});
+
+describe('2026-11 价格家族补录(gpt-6.1-sol / grok-4.7 / 混元 hy4)', () => {
+  test('三家官方牌价命中,单位 USD/MTok,来源见 usage.ts 注释', () => {
+    const mk = (model: string, input: number, cached: number, output: number) =>
+      scanRecordsFor(model, input, cached, output);
+    // gpt-6.1-sol: $2 / $0.10 / $10 → (1M 输入 + 1M cached + 1M 输出) = $12.10
+    expect(mk('gpt-6.1-sol', 1e6, 1e6, 1e6)!.estimatedCostUsd).toBeCloseTo(12.1, 6);
+    // grok-4.7(<200K 档): $2.20 / $0.55 / $6.60 → $9.35
+    expect(mk('grok-4.7', 1e6, 1e6, 1e6)!.estimatedCostUsd).toBeCloseTo(9.35, 6);
+    // 混元 hy4(hy4free):¥6/¥0.3/¥18 ≈ $0.83/$0.04/$2.50 → $3.37
+    expect(mk('hy4free', 1e6, 1e6, 1e6)!.estimatedCostUsd).toBeCloseTo(3.37, 6);
+    // 无价格家族仍为 null(不虚构)
+    expect(mk('mystery-model', 1e6, 0, 1e6)!.estimatedCostUsd).toBeNull();
+  });
+
+  function scanRecordsFor(model: string, input: number, cached: number, output: number) {
+    const root = tempRoot();
+    try {
+      const file = join(root, 'session.jsonl');
+      writeFileSync(file, jsonl([{
+        type: 'assistant',
+        timestamp: `${DAY}T10:00:00.000Z`,
+        message: { id: `m-${model}`, model, usage: { input_tokens: input, cached_input_tokens: cached, output_tokens: output } },
+      }]), 'utf8');
+      return scanClaudeLogs(root, SINCE, UNTIL)[0] ?? null;
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
 });
 
 describe('usage byPlan 归属', () => {
