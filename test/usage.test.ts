@@ -661,10 +661,12 @@ describe('2026-11 价格家族补录(gpt-6.1-sol / grok-4.7 / 混元 hy4)', () =
     expect(mk('gpt-6.1-sol', 1e6, 1e6, 1e6)!.estimatedCostUsd).toBeCloseTo(12.1, 6);
     // gpt-6-astra: $10 / $1.00 / $50 → $61(官方同页)
     expect(mk('gpt-6-astra', 1e6, 1e6, 1e6)!.estimatedCostUsd).toBeCloseTo(61, 6);
-    // claude-opus-5-5 走 opus 5 系现价 $5/$0.50/$6.25/$25;claude 是 Anthropic
-    // 语义(input 天然不含 cache read,不拆列): 5+0.5+25 = $30.5
-    // (旧 /opus/ 兜底是 Opus 3 价 $15/$1.5/$18.75/$75 = $92.25,虚高 3 倍)
-    expect(mk('claude-opus-5-5', 1e6, 1e6, 1e6)!.estimatedCostUsd).toBeCloseTo(30.5, 6);
+    // claude-opus-5-5 走 opus 5 系现价 $4/$0.20/$5/$20(与 2026-11 快照同步);
+    // claude 是 Anthropic 语义(input 天然不含 cache read,不拆列): 4+0.2+20 = $24.2
+    // (旧 /opus/ 兜底是 Opus 3 价 $15/$1.5/$18.75/$75 = $92.25,虚高近 4 倍)
+    expect(mk('claude-opus-5-5', 1e6, 1e6, 1e6)!.estimatedCostUsd).toBeCloseTo(24.2, 6);
+    // fable 是旗舰档 $10/$0.25/$12.5/$50(此前误按 sonnet 档,偏低 3 倍): 10+0.25+50 = $60.25
+    expect(mk('claude-fable-5-1', 1e6, 1e6, 1e6)!.estimatedCostUsd).toBeCloseTo(60.25, 6);
     // 初代 opus-4 仍是 $15/$75 老价(未降价型号):15+1.5+75 = $91.5
     expect(mk('claude-opus-4-20250514', 1e6, 1e6, 1e6)!.estimatedCostUsd).toBeCloseTo(91.5, 6);
     // grok-4.7(<200K 档): $2.20 / $0.55 / $6.60 → $9.35

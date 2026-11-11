@@ -168,16 +168,17 @@ const MODEL_PRICE_FAMILIES: Array<{
   cacheCreation: number;
   output: number;
 }> = [
-  // opus 5 系现价(LiteLLM 快照 claude-opus-5:$5/$25/cache read $0.50/write $6.25,
-  // 4.5 降价起全系此价)。快照只到 claude-opus-5,opus-5-5 等新名匹配不到快照,
-  // 旧 /opus/ 家族价($15/$75)是 Opus 3 时代价,会让 cache read 占比高的
-  // claude 轨道虚高约 3 倍(实测 7 天 $4,372 → 正确约 $1,458)。
-  { match: /opus-5|opus-4-[5-9]|opus-4\.5/, input: 5, cached: 0.5, cacheCreation: 6.25, output: 25 },
+  // opus 5 系现价(LiteLLM 快照 claude-opus-5-5:$4/$20/cache read $0.20/write $5;
+  // 快照缺席时的家族兜底,数值与 2026-11 快照同步)。旧 /opus/ 兜底($15/$75)
+  // 是 Opus 3 时代价,cache read 占比高的轨道会虚高 3 倍以上。
+  { match: /opus-5|opus-4-[5-9]|opus-4\.5/, input: 4, cached: 0.2, cacheCreation: 5, output: 20 },
+  // fable 是旗舰档(claude-fable-5-1 快照价 $10/$50/cache $0.25/write $12.5),
+  // 不是 sonnet 档——此前按 sonnet 价算,7 天偏低 3 倍。
+  { match: /fable/, input: 10, cached: 0.25, cacheCreation: 12.5, output: 50 },
   // Opus 3 等历史模型兜底(2024-02 牌价)
   { match: /opus/, input: 15, cached: 1.5, cacheCreation: 18.75, output: 75 },
   { match: /sonnet/, input: 3, cached: 0.3, cacheCreation: 3.75, output: 15 },
   { match: /haiku/, input: 1, cached: 0.1, cacheCreation: 1.25, output: 5 },
-  { match: /fable/, input: 3, cached: 0.3, cacheCreation: 3.75, output: 15 },
   { match: /^gpt-5/, input: 1.25, cached: 0.125, cacheCreation: 1.25, output: 10 },
   // gpt-6.1-sol(developers.openai.com/api/docs/pricing,2026-11):input $2 /
   // cached $0.10 / cache write $2.50 / output $10。terra 价格不同,不泛化到 6.1。
