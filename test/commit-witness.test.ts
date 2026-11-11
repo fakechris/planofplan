@@ -175,6 +175,7 @@ describe('扫描集成:fixture 文件 → witness 落库', () => {
         ampRoot: join(root, 'amp'),
         workbuddyRoot: join(root, 'workbuddy'),
         doubaoRoot: join(root, 'doubao'),
+        minimaxCodeRoot: join(root, 'minimax-code'),
         since: Date.now() - 86_400_000,
         until: Date.now() + 86_400_000,
       });
