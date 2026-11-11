@@ -168,6 +168,12 @@ const MODEL_PRICE_FAMILIES: Array<{
   cacheCreation: number;
   output: number;
 }> = [
+  // opus 5 系现价(LiteLLM 快照 claude-opus-5:$5/$25/cache read $0.50/write $6.25,
+  // 4.5 降价起全系此价)。快照只到 claude-opus-5,opus-5-5 等新名匹配不到快照,
+  // 旧 /opus/ 家族价($15/$75)是 Opus 3 时代价,会让 cache read 占比高的
+  // claude 轨道虚高约 3 倍(实测 7 天 $4,372 → 正确约 $1,458)。
+  { match: /opus-5|opus-4-[5-9]|opus-4\.5/, input: 5, cached: 0.5, cacheCreation: 6.25, output: 25 },
+  // Opus 3 等历史模型兜底(2024-02 牌价)
   { match: /opus/, input: 15, cached: 1.5, cacheCreation: 18.75, output: 75 },
   { match: /sonnet/, input: 3, cached: 0.3, cacheCreation: 3.75, output: 15 },
   { match: /haiku/, input: 1, cached: 0.1, cacheCreation: 1.25, output: 5 },
