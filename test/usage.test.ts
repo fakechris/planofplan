@@ -661,6 +661,12 @@ describe('2026-11 价格家族补录(gpt-6.1-sol / grok-4.7 / 混元 hy4)', () =
     expect(mk('gpt-6.1-sol', 1e6, 1e6, 1e6)!.estimatedCostUsd).toBeCloseTo(12.1, 6);
     // gpt-6-astra: $10 / $1.00 / $50 → $61(官方同页)
     expect(mk('gpt-6-astra', 1e6, 1e6, 1e6)!.estimatedCostUsd).toBeCloseTo(61, 6);
+    // claude-opus-5-5 走 opus 5 系现价 $5/$0.50/$6.25/$25;claude 是 Anthropic
+    // 语义(input 天然不含 cache read,不拆列): 5+0.5+25 = $30.5
+    // (旧 /opus/ 兜底是 Opus 3 价 $15/$1.5/$18.75/$75 = $92.25,虚高 3 倍)
+    expect(mk('claude-opus-5-5', 1e6, 1e6, 1e6)!.estimatedCostUsd).toBeCloseTo(30.5, 6);
+    // 初代 opus-4 仍是 $15/$75 老价(未降价型号):15+1.5+75 = $91.5
+    expect(mk('claude-opus-4-20250514', 1e6, 1e6, 1e6)!.estimatedCostUsd).toBeCloseTo(91.5, 6);
     // grok-4.7(<200K 档): $2.20 / $0.55 / $6.60 → $9.35
     expect(mk('grok-4.7', 1e6, 1e6, 1e6)!.estimatedCostUsd).toBeCloseTo(9.35, 6);
     // 混元 hy4(hy4free):¥6/¥0.3/¥18 ≈ $0.83/$0.04/$2.50 → $3.37
