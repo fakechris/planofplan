@@ -1,5 +1,5 @@
 import { forEachJsonlLine } from './jsonl-stream.ts';
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join, relative, sep } from 'node:path';
@@ -173,12 +173,32 @@ const MODEL_PRICE_FAMILIES: Array<{
   { match: /haiku/, input: 1, cached: 0.1, cacheCreation: 1.25, output: 5 },
   { match: /fable/, input: 3, cached: 0.3, cacheCreation: 3.75, output: 15 },
   { match: /^gpt-5/, input: 1.25, cached: 0.125, cacheCreation: 1.25, output: 10 },
+  // gpt-6.1-sol(developers.openai.com/api/docs/pricing,2026-11):input $2 /
+  // cached $0.10 / cache write $2.50 / output $10。terra 价格不同,不泛化到 6.1。
+  { match: /gpt-6\.1-sol/, input: 2, cached: 0.1, cacheCreation: 2.5, output: 10 },
+  // grok-4.7(docs.x.ai/developers/pricing,2026-11):<200K prompt 档 $2.20/
+  // $0.55/$6.60;>200K 档翻倍,coding plan 会话多数在低档,按低档估。
+  { match: /grok-4\.7/, input: 2.2, cached: 0.55, cacheCreation: 0, output: 6.6 },
+  // 混元 hy4(hunyuan.tencent.com,2026-11):¥6/¥0.3(缓存命中)/¥18 每百万,
+  // 按 ≈7.24 折美元;限时 5 折不折入,保持牌价。
+  { match: /hy4|hunyuan/i, input: 0.83, cached: 0.04, cacheCreation: 0, output: 2.5 },
   { match: /deepseek.*flash/, input: 0.1, cached: 0.01, cacheCreation: 0.13, output: 0.4 },
   { match: /deepseek/, input: 0.5, cached: 0.05, cacheCreation: 0.63, output: 2 },
   { match: /^glm-?5/, input: 0.6, cached: 0.06, cacheCreation: 0.75, output: 2.2 },
   { match: /kimi/, input: 0.6, cached: 0.06, cacheCreation: 0.75, output: 2.2 },
   { match: /minimax-m/i, input: 0.6, cached: 0.06, cacheCreation: 0.75, output: 2.2 },
 ];
+
+/**
+ * OpenAI 语义归一:prompt(input_tokens)全量含 cached 与 cache_creation,拆成
+ * 「非缓存输入 + cached」两列,使 INPUT + CACHE READ + OUTPUT = TOTAL 与
+ * Anthropic 口径(claude 的 input_tokens 天然不含 cache read)一致——存储、
+ * 展示、costFor 三处统一,cached 不再被重复计价或对不上账。
+ */
+export function splitCachedInput(usage: NumericUsage): NumericUsage {
+  const overlap = Math.min(usage.cachedInputTokens + usage.cacheCreationInputTokens, usage.inputTokens);
+  return { ...usage, inputTokens: usage.inputTokens - overlap };
+}
 
 function costFor(model: string, usage: NumericUsage): number | null {
   const normalized = model.toLowerCase();
@@ -189,11 +209,10 @@ function costFor(model: string, usage: NumericUsage): number | null {
     return family ? { input: family.input, cached: family.cached, cacheCreation: family.cacheCreation, output: family.output } : null;
   })();
   if (!price) return null;
-  const billableInput = normalized.includes('claude')
-    ? usage.inputTokens
-    : Math.max(0, usage.inputTokens - usage.cachedInputTokens);
+  // 存储口径统一后 inputTokens 已是非缓存输入(OpenAI 语义在入库前
+  // splitCachedInput 拆开,Anthropic 语义天然不含),直接计价
   return (
-    (billableInput * price.input
+    (usage.inputTokens * price.input
       + usage.cachedInputTokens * price.cached
       + usage.cacheCreationInputTokens * price.cacheCreation
       + usage.outputTokens * price.output) / 1_000_000
@@ -445,10 +464,17 @@ function parseGrokRecord(
   lineIndex: number,
   since: number,
   until: number,
+  modelState: { lastModel: string | null },
 ): UsageRecord | null {
   const ctx = value.ctx;
   if (!ctx || typeof ctx !== 'object') return null;
   const context = ctx as Record<string, unknown>;
+  // "model catalog: notifying clients" 事件带 current_model_id:顺序扫描
+  // 就近记忆,usage 行自身的 ctx 里没有模型字段(实测 15977 行零命中)
+  if (typeof context.current_model_id === 'string' && context.current_model_id) {
+    modelState.lastModel = context.current_model_id;
+    return null;
+  }
   if (
     context.prompt_tokens == null
     && context.completion_tokens == null
@@ -456,18 +482,18 @@ function parseGrokRecord(
   ) return null;
   const timestamp = parseTimestamp(value.ts, wholeMtimeMs(statSync(file)));
   if (!inRange(timestamp, since, until)) return null;
-  const numeric: NumericUsage = {
+  const numeric = splitCachedInput({
     inputTokens: finiteNumber(context.prompt_tokens),
     cachedInputTokens: finiteNumber(context.cached_prompt_tokens),
     cacheCreationInputTokens: 0,
     outputTokens: finiteNumber(context.completion_tokens),
     reasoningOutputTokens: finiteNumber(context.reasoning_tokens),
     totalTokens: finiteNumber(context.prompt_tokens) + finiteNumber(context.completion_tokens),
-  };
+  });
   return record(
     `local:grok-cli:${file}:${lineIndex}`,
     'grok-cli',
-    stableModel(context.model ?? context.model_id ?? 'unknown'),
+    stableModel(context.model ?? context.model_id ?? modelState.lastModel ?? 'unknown'),
     timestamp,
     numeric,
     'local',
@@ -476,11 +502,42 @@ function parseGrokRecord(
   );
 }
 
+/** unified.jsonl 里出现过的 current_model_id 去重集合(全文件唯一时用作默认模型,
+ *  覆盖首条 catalog 事件之前的 usage 行;多模型混杂时只做顺序就近)。 */
+function grokLogModels(path: string): string[] {
+  const seen = new Set<string>();
+  let raw = '';
+  try {
+    raw = readFileSync(path, 'utf8');
+  } catch {
+    return [];
+  }
+  for (const line of raw.split('\n')) {
+    if (!line.includes('current_model_id')) continue;
+    try {
+      const ctx = (JSON.parse(line) as { ctx?: { current_model_id?: unknown } }).ctx;
+      if (ctx && typeof ctx.current_model_id === 'string' && ctx.current_model_id) {
+        seen.add(ctx.current_model_id);
+      }
+    } catch {
+      /* 脏行跳过 */
+    }
+  }
+  return [...seen];
+}
+
 export function scanGrokLogs(root: string, since = Date.now() - 30 * DAY_MS, until = Date.now()): UsageRecord[] {
   const file = existsSync(root) && statSync(root).isFile() ? root : join(root, 'logs', 'unified.jsonl');
+  const files = filesForRoot(file, since);
+  // 先收集每个文件的模型集合;唯一的作为该文件默认模型(实测 grok-cli 全程
+  // 单模型 grok-4.7,21 条 catalog 事件零切换)。state 按文件复用,顺序就近记忆
+  const states = new Map(files.map((path) => {
+    const models = grokLogModels(path);
+    return [path, { lastModel: models.length === 1 ? models[0]! : null }];
+  }));
   return scanJsonlFiles(
-    filesForRoot(file, since),
-    (value, path, lineIndex) => parseGrokRecord(value, path, lineIndex, since, until),
+    files,
+    (value, path, lineIndex) => parseGrokRecord(value, path, lineIndex, since, until, states.get(path) ?? { lastModel: null }),
   );
 }
 
@@ -716,7 +773,9 @@ function scanCodexFile(
       const infoRecord = info as Record<string, unknown>;
       const usageValue = infoRecord.total_token_usage ?? infoRecord.last_token_usage;
       if (!usageValue || typeof usageValue !== 'object') return;
-      const current = usageFromRecord(usageValue as Record<string, unknown>);
+      // codex 的 input_tokens 是 OpenAI 语义(含 cached),入库前拆列;
+      // 差分在拆分后的口径上进行,与存储一致
+      const current = splitCachedInput(usageFromRecord(usageValue as Record<string, unknown>));
       const delta = subtractUsage(current, cursor.previous);
       cursor.previous = current;
       if (!hasTokens(delta)) return;

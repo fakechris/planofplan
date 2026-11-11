@@ -123,12 +123,37 @@ describe('local token usage scanners', () => {
       expect(records[0]).toMatchObject({
         provider: 'grok-cli',
         cachedInputTokens: 15,
-        inputTokens: 70,
+        // prompt_tokens(70)是含 cached 的全量,入库前拆列:非缓存输入 55
+        inputTokens: 55,
         outputTokens: 20,
         reasoningOutputTokens: 5,
         totalTokens: 90,
         sessionId: 'grok-session',
       });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('Grok CLI 模型回填:catalog 事件就近 + 全文件唯一模型作默认', () => {
+    const root = tempRoot();
+    try {
+      const file = join(root, 'unified.jsonl');
+      writeFileSync(file, jsonl([
+        // 首条 usage 在任何 catalog 事件之前:默认模型由全文件唯一 current_model_id 回填
+        { ts: `${DAY}T10:00:00.000Z`, ctx: { prompt_tokens: 10, completion_tokens: 2 } },
+        { ts: `${DAY}T10:00:01.000Z`, ctx: { current_model_id: 'grok-4.7', model_count: 4 } },
+        { ts: `${DAY}T10:00:02.000Z`, ctx: { prompt_tokens: 20, completion_tokens: 3 } },
+      ]), 'utf8');
+      const records = scanGrokLogs(file, SINCE, UNTIL);
+      expect(records).toHaveLength(2);
+      expect(records[0]).toMatchObject({ model: 'grok-4.7' });
+      expect(records[1]).toMatchObject({ model: 'grok-4.7' });
+      // 无 catalog 事件的文件保持 unknown(不虚构)
+      const other = join(root, 'other.jsonl');
+      writeFileSync(other, jsonl([{ ts: `${DAY}T10:00:03.000Z`, ctx: { prompt_tokens: 5, completion_tokens: 1 } }]), 'utf8');
+      const lone = scanGrokLogs(other, SINCE, UNTIL);
+      expect(lone[0]).toMatchObject({ model: 'unknown' });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -290,12 +315,14 @@ describe('local token usage scanners', () => {
       const records = scanCodexLogs(root, SINCE, UNTIL);
 
       expect(records).toHaveLength(3);
-      expect(records.reduce((sum, record) => sum + record.inputTokens, 0)).toBe(20);
+      // OpenAI 语义 input_tokens 含 cached,入库前拆列:拆分后累计差分
+      // 6+5+5=16(旧口径全量 20);INPUT+CACHE READ+OUTPUT 与 TOTAL 差分自洽
+      expect(records.reduce((sum, record) => sum + record.inputTokens, 0)).toBe(16);
       expect(records.reduce((sum, record) => sum + record.outputTokens, 0)).toBe(6);
       expect(records[1]).toMatchObject({
         provider: 'codex',
         model: 'gpt-5',
-        inputTokens: 7,
+        inputTokens: 5,
         cachedInputTokens: 2,
         outputTokens: 3,
         reasoningOutputTokens: 1,
@@ -566,6 +593,36 @@ describe('usage report', () => {
     expect(store.getUsageReport(SINCE, UNTIL).totals.totalTokens)
       .toBe(130);
   });
+});
+
+describe('2026-11 价格家族补录(gpt-6.1-sol / grok-4.7 / 混元 hy4)', () => {
+  test('三家官方牌价命中,单位 USD/MTok,来源见 usage.ts 注释', () => {
+    const mk = (model: string, input: number, cached: number, output: number) =>
+      scanRecordsFor(model, input, cached, output);
+    // gpt-6.1-sol: $2 / $0.10 / $10 → (1M 输入 + 1M cached + 1M 输出) = $12.10
+    expect(mk('gpt-6.1-sol', 1e6, 1e6, 1e6)!.estimatedCostUsd).toBeCloseTo(12.1, 6);
+    // grok-4.7(<200K 档): $2.20 / $0.55 / $6.60 → $9.35
+    expect(mk('grok-4.7', 1e6, 1e6, 1e6)!.estimatedCostUsd).toBeCloseTo(9.35, 6);
+    // 混元 hy4(hy4free):¥6/¥0.3/¥18 ≈ $0.83/$0.04/$2.50 → $3.37
+    expect(mk('hy4free', 1e6, 1e6, 1e6)!.estimatedCostUsd).toBeCloseTo(3.37, 6);
+    // 无价格家族仍为 null(不虚构)
+    expect(mk('mystery-model', 1e6, 0, 1e6)!.estimatedCostUsd).toBeNull();
+  });
+
+  function scanRecordsFor(model: string, input: number, cached: number, output: number) {
+    const root = tempRoot();
+    try {
+      const file = join(root, 'session.jsonl');
+      writeFileSync(file, jsonl([{
+        type: 'assistant',
+        timestamp: `${DAY}T10:00:00.000Z`,
+        message: { id: `m-${model}`, model, usage: { input_tokens: input, cached_input_tokens: cached, output_tokens: output } },
+      }]), 'utf8');
+      return scanClaudeLogs(root, SINCE, UNTIL)[0] ?? null;
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
 });
 
 describe('usage byPlan 归属', () => {
