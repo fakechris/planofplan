@@ -176,6 +176,9 @@ const MODEL_PRICE_FAMILIES: Array<{
   // gpt-6.1-sol(developers.openai.com/api/docs/pricing,2026-11):input $2 /
   // cached $0.10 / cache write $2.50 / output $10。terra 价格不同,不泛化到 6.1。
   { match: /gpt-6\.1-sol/, input: 2, cached: 0.1, cacheCreation: 2.5, output: 10 },
+  // gpt-6-astra(同页):input $10 / cached $1.00 / 30m write $12.50 / output $50,
+  // 均 short-context 档(long-context 翻倍,按短档估)。
+  { match: /gpt-6-astra/, input: 10, cached: 1, cacheCreation: 12.5, output: 50 },
   // grok-4.7(docs.x.ai/developers/pricing,2026-11):<200K prompt 档 $2.20/
   // $0.55/$6.60;>200K 档翻倍,coding plan 会话多数在低档,按低档估。
   { match: /grok-4\.7/, input: 2.2, cached: 0.55, cacheCreation: 0, output: 6.6 },

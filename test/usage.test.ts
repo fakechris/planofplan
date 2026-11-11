@@ -659,6 +659,8 @@ describe('2026-11 价格家族补录(gpt-6.1-sol / grok-4.7 / 混元 hy4)', () =
       scanRecordsFor(model, input, cached, output);
     // gpt-6.1-sol: $2 / $0.10 / $10 → (1M 输入 + 1M cached + 1M 输出) = $12.10
     expect(mk('gpt-6.1-sol', 1e6, 1e6, 1e6)!.estimatedCostUsd).toBeCloseTo(12.1, 6);
+    // gpt-6-astra: $10 / $1.00 / $50 → $61(官方同页)
+    expect(mk('gpt-6-astra', 1e6, 1e6, 1e6)!.estimatedCostUsd).toBeCloseTo(61, 6);
     // grok-4.7(<200K 档): $2.20 / $0.55 / $6.60 → $9.35
     expect(mk('grok-4.7', 1e6, 1e6, 1e6)!.estimatedCostUsd).toBeCloseTo(9.35, 6);
     // 混元 hy4(hy4free):¥6/¥0.3/¥18 ≈ $0.83/$0.04/$2.50 → $3.37
