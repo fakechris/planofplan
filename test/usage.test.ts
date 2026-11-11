@@ -494,6 +494,7 @@ describe('usage report', () => {
         ampRoot: join(root, 'amp'),
         workbuddyRoot: join(root, 'workbuddy'),
         doubaoRoot: join(root, 'doubao'),
+        minimaxCodeRoot: join(root, 'minimax-code'),
       };
 
       await collectUsageReport(store, options);
@@ -548,6 +549,7 @@ describe('usage report', () => {
         ampRoot: join(root, 'amp'),
         workbuddyRoot: join(root, 'workbuddy'),
         doubaoRoot: join(root, 'doubao'),
+        minimaxCodeRoot: join(root, 'minimax-code'),
       };
 
       await collectUsageReport(store, options);

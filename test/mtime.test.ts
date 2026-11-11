@@ -39,6 +39,7 @@ describe('file mtime precision', () => {
         ampRoot: join(root, 'amp'),
         workbuddyRoot: join(root, 'workbuddy'),
         doubaoRoot: join(root, 'doubao'),
+        minimaxCodeRoot: join(root, 'minimax-code'),
         since: Date.now() - 86_400_000,
         until: Date.now() + 86_400_000,
       };

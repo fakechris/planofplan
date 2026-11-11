@@ -180,6 +180,7 @@ describe('collectSessionCatalog touch indexing', () => {
       ampRoot: join(root, 'missing-amp'),
       workbuddyRoot: join(root, 'missing-workbuddy'),
       doubaoRoot: join(root, 'missing-doubao'),
+      minimaxCodeRoot: join(root, 'missing-minimax-code'),
     };
   }
 

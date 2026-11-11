@@ -386,6 +386,7 @@ describe('Catalog collection and requirement materialization', () => {
         ampRoot: ampDir,
         workbuddyRoot: join(root, 'dummy-workbuddy'),
         doubaoRoot: join(root, 'dummy-doubao'),
+        minimaxCodeRoot: join(root, 'dummy-minimax-code'),
       });
 
       expect(count).toBe(2);

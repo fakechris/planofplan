@@ -227,6 +227,7 @@ describe('session catalog extractors', () => {
         ampRoot: join(root, 'missing-amp'),
         workbuddyRoot: join(root, 'missing-workbuddy'),
         doubaoRoot: join(root, 'missing-doubao'),
+        minimaxCodeRoot: join(root, 'missing-minimax-code'),
       });
       expect(count).toBeGreaterThanOrEqual(4);
       const claude = store.getSession(`claude:${claudeId}`);
@@ -322,6 +323,7 @@ describe('claude subagent discovery', () => {
         ampRoot: join(root, 'm9'),
         workbuddyRoot: join(root, 'm9'),
         doubaoRoot: join(root, 'm9'),
+        minimaxCodeRoot: join(root, 'm9'),
       });
       const row = store.getSession('claude:agent-a3192a0f');
       expect(row).not.toBeNull();

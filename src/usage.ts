@@ -19,6 +19,7 @@ import { modelPriceFor } from './pricing.ts';
 import { extractAntigravityUsage, antigravityConversationId } from './antigravity-usage.ts';
 import { wholeMtimeMs } from './mtime.ts';
 import { workBuddyModelOf, workBuddyNumericUsage, workbuddyProjectsRoot } from './workbuddy-session.ts';
+import { minimaxCodeModelOf, minimaxCodeNumericUsage, minimaxCodeSessionsRoot } from './minimax-code-session.ts';
 
 const DAY_MS = 86_400_000;
 
@@ -50,6 +51,8 @@ export interface CollectUsageOptions extends UsageScanOptions {
   opencodeRoot?: string;
   ampRoot?: string;
   workbuddyRoot?: string;
+  doubaoRoot?: string;
+  minimaxCodeRoot?: string;
 }
 
 function finiteNumber(value: unknown): number {
@@ -673,6 +676,45 @@ export function scanWorkBuddyLogs(root: string, since = Date.now() - 30 * DAY_MS
   );
 }
 
+/** minimax-code:messages.jsonl 的 assistant 行 message.usage;四字段不相交
+ *  (total = input+output+cacheRead 实测成立),入库不拆列。 */
+function parseMinimaxCodeRecord(
+  value: Record<string, unknown>,
+  file: string,
+  lineIndex: number,
+  since: number,
+  until: number,
+): UsageRecord | null {
+  const message = value.message && typeof value.message === 'object'
+    ? value.message as Record<string, unknown> : null;
+  if (!message || message.role !== 'assistant') return null;
+  const usage = message.usage && typeof message.usage === 'object'
+    ? message.usage as Record<string, unknown> : null;
+  if (!usage) return null;
+  const timestamp = parseTimestamp(message.timestamp, wholeMtimeMs(statSync(file)));
+  if (!inRange(timestamp, since, until)) return null;
+  return record(
+    `local:minimax-code:${file}:${lineIndex}`,
+    'minimax-code',
+    minimaxCodeModelOf(message),
+    timestamp,
+    minimaxCodeNumericUsage(usage),
+    'local',
+    'measured',
+    // 行内只有 message_id(逐条消息 id,非会话 id):不传 sessionId——
+    // 会话目录行由 messages.jsonl 正式提取提供,否则 usage stub 会按
+    // message_id 每条建一行孤儿会话(实测 30 天窗 8092 行)
+  );
+}
+
+/** 递归扫 v2/sessions 下全部 messages.jsonl。 */
+export function scanMinimaxCodeLogs(root: string, since = Date.now() - 30 * DAY_MS, until = Date.now()): UsageRecord[] {
+  return scanJsonlFiles(
+    jsonlFiles(root, since),
+    (value, file, lineIndex) => parseMinimaxCodeRecord(value, file, lineIndex, since, until),
+  );
+}
+
 // cursor 版本：v1 错误地把 last_token_usage（每 turn 完整值）当累计值做差分，
 // 跨 turn 大幅少算。v2 改用 total_token_usage（session 级累计，实测单调递增）
 // 做差分。v3(2026-11-10) 改回 last_token_usage 优先直加 + 元组去重 +
@@ -1282,6 +1324,10 @@ function localScanFiles(options: CollectUsageOptions, since: number): LocalScanF
       provider: 'workbuddy',
       files: jsonlFiles(workbuddyProjectsRoot(options.workbuddyRoot), since),
     },
+    {
+      provider: 'minimax-code',
+      files: jsonlFiles(minimaxCodeSessionsRoot(options.minimaxCodeRoot), since),
+    },
   ];
   return roots.flatMap(({ provider, files, project }) => files.flatMap((path) => {
     try {
@@ -1357,6 +1403,8 @@ function scanLocalFile(
       return scanDshLogs(file.path, since, until);
     case 'workbuddy':
       return scanWorkBuddyLogs(file.path, since, until);
+    case 'minimax-code':
+      return scanMinimaxCodeLogs(file.path, since, until);
     default:
       return [];
   }

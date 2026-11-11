@@ -788,7 +788,7 @@ const TOOLS: ToolDef[] = [
       type: 'object',
       properties: {
         days: { type: 'number', description: '回看天数,1-90,默认 7' },
-        provider: { type: 'string', description: '按 provider 过滤(claude/codex/kimi/grok/dsh/zcode/factory/workbuddy/doubao)' },
+        provider: { type: 'string', description: '按 provider 过滤(claude/codex/kimi/grok/dsh/zcode/factory/workbuddy/doubao/minimax-code)' },
       },
       additionalProperties: false,
     },

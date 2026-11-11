@@ -64,6 +64,7 @@ import {
 import { wholeMtimeMs } from './mtime.ts';
 import { extractWorkBuddySession, isWorkBuddySessionFile, workbuddyProjectsRoot } from './workbuddy-session.ts';
 import { collectDoubaoSnapshotTouches, doubaoChatLdbDir, doubaoSnapshotRoot, extractDoubaoSessions } from './doubao-session.ts';
+import { extractMinimaxCodeSession, isMinimaxCodeSessionFile, minimaxCodeSessionsRoot } from './minimax-code-session.ts';
 
 /** Subset of usage collect options — kept here to avoid a usage.ts cycle. */
 export interface SessionCollectOptions {
@@ -81,6 +82,7 @@ export interface SessionCollectOptions {
   ampRoot?: string;
   workbuddyRoot?: string;
   doubaoRoot?: string;
+  minimaxCodeRoot?: string;
   /** 消息/touch/水位保留天数(目录行永久保留);0 = 关闭清理。默认取 PLANOFPLAN_MESSAGE_RETENTION_DAYS 或 60。 */
   messageRetentionDays?: number;
 }
@@ -108,7 +110,7 @@ const USAGE_PROVIDER_ALIAS: Record<string, string> = {
   'kimi-cli': 'kimi',
 };
 
-export const CATALOG_PROVIDERS = ['claude', 'codex', 'grok', 'dsh', 'kimi', 'zcode', 'factory', 'antigravity', 'opencode', 'amp', 'workbuddy', 'doubao'] as const;
+export const CATALOG_PROVIDERS = ['claude', 'codex', 'grok', 'dsh', 'kimi', 'zcode', 'factory', 'antigravity', 'opencode', 'amp', 'workbuddy', 'doubao', 'minimax-code'] as const;
 export type CatalogProvider = (typeof CATALOG_PROVIDERS)[number];
 
 export function sessionKey(provider: string, nativeId: string): string {
@@ -585,6 +587,8 @@ export function extractSessionFile(provider: string, path: string, mtimeMs: numb
       return extractFactory(path, mtimeMs);
     case 'workbuddy':
       return extractWorkBuddySession(path, mtimeMs);
+    case 'minimax-code':
+      return extractMinimaxCodeSession(path, mtimeMs);
     default:
       return null;
   }
@@ -703,6 +707,14 @@ export function discoverSessionFiles(options: SessionCollectOptions, since: numb
       ),
     },
     {
+      provider: 'minimax-code',
+      files: walkFiles(
+        minimaxCodeSessionsRoot(options.minimaxCodeRoot),
+        since,
+        isMinimaxCodeSessionFile,
+      ),
+    },
+    {
       // 豆包:一个发现单元 = chat leveldb 目录(SSTable+WAL 都在里面);
       // mtime 由目录 stat 提供,无论 WAL 追加还是 compaction 都会变
       provider: 'doubao',
@@ -744,6 +756,7 @@ export function sessionWatchRoots(): string[] {
     workbuddyProjectsRoot(),
     doubaoChatLdbDir(),
     doubaoSnapshotRoot(),
+    minimaxCodeSessionsRoot(),
   ])];
 }
 

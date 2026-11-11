@@ -13,6 +13,7 @@ import { sourcePathFor } from './session-repos.ts';
 import { resumeFor } from './resume.ts';
 import { messagesFromAntigravityRecord } from './antigravity-session.ts';
 import { messagesFromWorkBuddyRecord } from './workbuddy-session.ts';
+import { messagesFromMinimaxCodeRecord } from './minimax-code-session.ts';
 import { turnsFromOpencodeDb } from './opencode-session.ts';
 import { turnsFromAmpThread } from './amp-session.ts';
 
@@ -319,7 +320,7 @@ export const TOOL_INPUT_MAX = 2_000;
 // v12: OpenCode 2 的 session_message 按 seq 展开助手正文与工具调用(INV-921)
 // v13: workbuddy provider 入目录(INV-1789):message 正文(function_call 工具行),
 //      user 信封(<system-reminder …>)不进消息索引
-export const MESSAGE_PARSER_VERSION = 13;
+export const MESSAGE_PARSER_VERSION = 14;
 
 function clipField(text: string, max = MESSAGE_TEXT_MAX): string {
   return text.length > max ? `${text.slice(0, max)}…` : text;
@@ -589,6 +590,8 @@ export function messagesFromRecord(
       return messagesFromAntigravityRecord(sessionId, record, seq);
     case 'workbuddy':
       return messagesFromWorkBuddyRecord(sessionId, record, seq);
+    case 'minimax-code':
+      return messagesFromMinimaxCodeRecord(sessionId, record, seq);
     default:
       return [];
   }
