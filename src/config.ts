@@ -115,6 +115,15 @@ const DEFAULT_PLANS: PlanConfig[] = [
     credRef: null,
     extra: { peakPricing: 'true' },
   },
+  {
+    slug: 'devin',
+    name: 'Devin',
+    adapter: 'devin',
+    enabled: true,
+    pollIntervalSec: 300,
+    credRef: null,
+    extra: {},
+  },
 ];
 
 export function homeDir(): string {
