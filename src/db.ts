@@ -467,16 +467,41 @@ export class Store {
   /** 简易嵌套事务:外层已开事务时直接执行,避免嵌套 BEGIN 报错。 */
   private txDepth = 0;
 
+  /** BEGIN 的自愈版(INV-2010):BUSY 等原因打断上一轮 ROLLBACK 时,连接会
+   * 残留未结事务,此后每次 BEGIN 都报 "cannot start a transaction within a
+   * transaction"(旧日志 11135 次,直到进程重启才恢复)。这里先 ROLLBACK
+   * 清场再重试一次;仍失败才把原始 BEGIN 错误抛出去。 */
+  private beginSelfHealing(): void {
+    try {
+      this.db.exec('BEGIN');
+      return;
+    } catch (beginError) {
+      try {
+        this.db.exec('ROLLBACK');
+        this.db.exec('BEGIN');
+        return;
+      } catch {
+        throw beginError;
+      }
+    }
+  }
+
   withTransaction<T>(work: () => T): T {
     if (this.txDepth > 0) return work();
-    this.db.exec('BEGIN');
+    this.beginSelfHealing();
     this.txDepth += 1;
     try {
       const result = work();
       this.db.exec('COMMIT');
       return result;
     } catch (error) {
-      this.db.exec('ROLLBACK');
+      // ROLLBACK 自身也可能被 BUSY 打断(这正是残留事务的成因);吞掉回滚
+      // 错误保住 txDepth 语义,未结事务由 beginSelfHealing 在下一次事务前清场。
+      try {
+        this.db.exec('ROLLBACK');
+      } catch {
+        /* self-heal next time */
+      }
       throw error;
     } finally {
       this.txDepth -= 1;
@@ -3658,8 +3683,10 @@ export function openDb(path: string): Store {
   db.exec(`PRAGMA journal_mode = WAL;`);
   // 多写者共存:daemon 内(调度器/启动扫描)与扫描子进程会并发写同一 DB。
   // WAL 只串行化写事务,不给 busy_timeout 时第二个写者立刻 SQLITE_BUSY
-  // 直接把未捕获异常抛到顶层。5s 重试窗足够跨过毫秒级的写事务。
-  db.exec(`PRAGMA busy_timeout = 5000;`);
+  // 直接把未捕获异常抛到顶层。5s 实测仍不够跨过 housekeeping 批量删除/
+  // 启动扫描的长写事务(INV-2010:BUSY 打断 ROLLBACK 后残留事务,连接报错
+  // 风暴直到进程重启),提到 15s 让写者排队等过事务串。
+  db.exec(`PRAGMA busy_timeout = 15000;`);
   return new Store(db);
 }
 

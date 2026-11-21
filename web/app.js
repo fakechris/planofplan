@@ -2881,7 +2881,9 @@ function renderPlan(p, now) {
         </div>
       </dialog>
       ${p.cooldownUntil && p.cooldownUntil > Date.now()
-        ? `<div class="error-line cooldown-line">⏸ 限流冷却中，约 ${cooldownText(p.cooldownUntil)} 后自动恢复</div>` : ''}
+        ? `<div class="error-line cooldown-line">${p.authStatus === 'invalid'
+            ? `🔑 凭据待修复，约 ${cooldownText(p.cooldownUntil)} 后重试`
+            : `⏸ 限流冷却中，约 ${cooldownText(p.cooldownUntil)} 后自动恢复`}</div>` : ''}
       ${p.lastError ? `<div class="error-line">${escapeHtml(p.lastError)}</div>` : ''}
     </div>
   `;
