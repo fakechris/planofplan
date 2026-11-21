@@ -288,30 +288,24 @@ final class PanelView: NSView {
 
             indexRowRects.append((rect: NSRect(x: contentLeft, y: rowTop - 24, width: contentWidth, height: 25), planIndex: planIndex))
 
-            // 状态点 + 名称(+禁用弱化)
-            color(forStatus: plan.status).setFill()
-            NSBezierPath(ovalIn: NSRect(x: contentLeft, y: rowTop - 10, width: 5, height: 5)).fill()
-            drawText(plan.name, at: NSPoint(x: contentLeft + 12, y: rowTop - 13),
-                     font: .systemFont(ofSize: 11.5, weight: .medium), color: textPrimary)
-
-            // 右侧:摘要值(最右)+ 倒计时(值左侧,灰);余额型无倒计时
+            // 右侧三段(值/倒计时/窗口小标签)先算内容与实测宽度,从右往左堆叠;
+            // 名称列最后按剩余宽度截断。旧实现用固定像素偏移(-46/-76)摆倒计时
+            // 与标签,中文倒计时("19 小时 25 分后")或长标签("Standard 1M")一长
+            // 就互相叠印(INV-2013)。
             let tight = plan.windows.filter { $0.effectivePercentage != nil }
                 .max { ($0.effectivePercentage ?? 0) < ($1.effectivePercentage ?? 0) }
             let balance = plan.windows.first(where: PanelView.isBalanceWindow)
             let unlimited = plan.windows.contains { $0.note == "不限量" && $0.effectivePercentage == nil }
 
-            let right = cardRect.maxX - 16
+            let valueFont = NSFont.monospacedDigitSystemFont(ofSize: 12.5, weight: .semibold)
+            let smallFont = NSFont.systemFont(ofSize: 9.5)
+            let segmentGap: CGFloat = 8
+
             var value = "--"
             var valueColor = textTertiary
             if let tight {
                 value = "\(Int(tight.effectivePercentage!.rounded()))%"
                 valueColor = color(forRemaining: 100 - tight.effectivePercentage!)
-                if let resetAt = tight.resetAt {
-                    let cd = PanelView.countdownText(until: resetAt)
-                    let cdFont = NSFont.systemFont(ofSize: 9.5)
-                    let cdWidth = (cd as NSString).size(withAttributes: [.font: cdFont]).width
-                    drawText(cd, at: NSPoint(x: right - cdWidth - 46, y: rowTop - 12), font: cdFont, color: textTertiary)
-                }
             } else if let balance {
                 value = PanelView.windowValueText(balance)
                 valueColor = textPrimary
@@ -319,16 +313,43 @@ final class PanelView: NSView {
                 value = "∞"
                 valueColor = okColor
             }
-            drawRightAligned(value, y: y - 13, right: right,
-                             font: .monospacedDigitSystemFont(ofSize: 12.5, weight: .semibold), color: valueColor)
-
-            // 窗口小标签(值左侧;余额型是 "Balance")
+            let valueAttr = NSAttributedString(string: value, attributes: [.font: valueFont, .foregroundColor: valueColor])
+            let countdown = tight?.resetAt.map { PanelView.countdownText(until: $0) } ?? nil
             let label = tight?.label ?? (balance != nil ? "余额" : nil)
-            if let label {
-                let labelFont = NSFont.systemFont(ofSize: 9.5)
-                let w = (label as NSString).size(withAttributes: [.font: labelFont]).width
-                drawText(label, at: NSPoint(x: right - w - 76, y: rowTop - 12), font: labelFont, color: textTertiary)
+            let valueWidth = valueAttr.size().width
+            let countdownWidth = countdown.map { ($0 as NSString).size(withAttributes: [.font: smallFont]).width } ?? 0
+            let labelWidth = label.map { ($0 as NSString).size(withAttributes: [.font: smallFont]).width } ?? 0
+
+            let rightEdge = cardRect.maxX - 16
+            let valueX = rightEdge - valueWidth
+            var cursor = valueX - segmentGap
+            let countdownX = countdown.map { _ -> CGFloat in
+                let x = cursor - countdownWidth
+                cursor = x - segmentGap
+                return x
             }
+            // 标签优先级最低:空间挤到名称列时直接省略,不与名称/倒计时叠印
+            let nameRightLimit = contentLeft + 12 + 72
+            let labelX: CGFloat? = label.flatMap { _ in
+                let x = cursor - labelWidth
+                return x >= nameRightLimit ? x : nil
+            }
+
+            // 状态点 + 名称(按剩余宽度截断;禁用弱化由状态点颜色承担)
+            color(forStatus: plan.status).setFill()
+            NSBezierPath(ovalIn: NSRect(x: contentLeft, y: rowTop - 10, width: 5, height: 5)).fill()
+            let nameLeft = min(valueX, countdownX ?? .greatestFiniteMagnitude, labelX ?? .greatestFiniteMagnitude)
+            drawText(plan.name, at: NSPoint(x: contentLeft + 12, y: rowTop - 13),
+                     font: .systemFont(ofSize: 11.5, weight: .medium), color: textPrimary,
+                     maxWidth: max(48, nameLeft - (contentLeft + 12) - 10))
+
+            if let label, let labelX {
+                drawText(label, at: NSPoint(x: labelX, y: rowTop - 12), font: smallFont, color: textTertiary)
+            }
+            if let countdown, let countdownX {
+                drawText(countdown, at: NSPoint(x: countdownX, y: rowTop - 12), font: smallFont, color: textTertiary)
+            }
+            valueAttr.draw(at: NSPoint(x: valueX, y: y - 13))
 
             // 行分隔线(最后一行也画,收口整齐)
             NSColor(white: 1, alpha: 0.05).setFill()
