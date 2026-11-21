@@ -254,6 +254,7 @@ describe('INV-1329 zcode/opencode 共享只读连接', () => {
         workbuddyRoot: join(dir, 'none-m'),
         doubaoRoot: join(dir, 'none-m'),
         minimaxCodeRoot: join(dir, 'none-m'),
+        devinRoot: join(dir, 'none-m'),
       });
       const session = store.getSession('zcode:s1');
       expect(session).not.toBeNull();
@@ -304,6 +305,7 @@ describe('INV-1329 分块落库', () => {
         workbuddyRoot: join(dir, 'none-m'),
         doubaoRoot: join(dir, 'none-m'),
         minimaxCodeRoot: join(dir, 'none-m'),
+        devinRoot: join(dir, 'none-m'),
       });
       const n = store.db
         .query("SELECT COUNT(*) AS n FROM sessions WHERE provider = 'claude'")
@@ -326,6 +328,7 @@ describe('INV-1329 分块落库', () => {
         workbuddyRoot: join(dir, 'none-m'),
         doubaoRoot: join(dir, 'none-m'),
         minimaxCodeRoot: join(dir, 'none-m'),
+        devinRoot: join(dir, 'none-m'),
       });
       const n2 = store.db
         .query("SELECT COUNT(*) AS n FROM sessions WHERE provider = 'claude'")

@@ -96,6 +96,7 @@ describe('catalog 尊重墓碑(重建不复活)', () => {
       workbuddyRoot: join(root, 'workbuddy'),
       doubaoRoot: join(root, 'doubao'),
       minimaxCodeRoot: join(root, 'minimax-code'),
+      devinRoot: join(root, 'missing-devin'),
       since: Date.now() - 86_400_000,
       until: Date.now() + 86_400_000,
     };

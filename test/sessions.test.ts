@@ -228,6 +228,7 @@ describe('session catalog extractors', () => {
         workbuddyRoot: join(root, 'missing-workbuddy'),
         doubaoRoot: join(root, 'missing-doubao'),
         minimaxCodeRoot: join(root, 'missing-minimax-code'),
+        devinRoot: join(root, 'missing-devin'),
       });
       expect(count).toBeGreaterThanOrEqual(4);
       const claude = store.getSession(`claude:${claudeId}`);

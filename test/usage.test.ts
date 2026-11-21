@@ -495,6 +495,7 @@ describe('usage report', () => {
         workbuddyRoot: join(root, 'workbuddy'),
         doubaoRoot: join(root, 'doubao'),
         minimaxCodeRoot: join(root, 'minimax-code'),
+        devinRoot: join(root, 'missing-devin'),
       };
 
       await collectUsageReport(store, options);
