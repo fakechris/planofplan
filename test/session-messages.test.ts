@@ -197,6 +197,7 @@ describe('collectSessionCatalog message indexing', () => {
       workbuddyRoot: join(root, 'missing-workbuddy'),
       doubaoRoot: join(root, 'missing-doubao'),
       minimaxCodeRoot: join(root, 'missing-minimax-code'),
+      devinRoot: join(root, 'missing-devin'),
     };
   }
 

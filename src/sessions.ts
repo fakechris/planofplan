@@ -65,6 +65,7 @@ import { wholeMtimeMs } from './mtime.ts';
 import { extractWorkBuddySession, isWorkBuddySessionFile, workbuddyProjectsRoot } from './workbuddy-session.ts';
 import { collectDoubaoSnapshotTouches, doubaoChatLdbDir, doubaoSnapshotRoot, extractDoubaoSessions } from './doubao-session.ts';
 import { extractMinimaxCodeSession, isMinimaxCodeSessionFile, minimaxCodeSessionsRoot } from './minimax-code-session.ts';
+import { devinAcpMessagesRoot, extractDevinSessionFile, openDevinSqlite, parseDevinMessages } from './devin-session.ts';
 
 /** Subset of usage collect options — kept here to avoid a usage.ts cycle. */
 export interface SessionCollectOptions {
@@ -83,6 +84,8 @@ export interface SessionCollectOptions {
   workbuddyRoot?: string;
   doubaoRoot?: string;
   minimaxCodeRoot?: string;
+  /** Devin Desktop 应用数据根（默认 ~/Library/Application Support/Devin）。 */
+  devinRoot?: string;
   /** 消息/touch/水位保留天数(目录行永久保留);0 = 关闭清理。默认取 PLANOFPLAN_MESSAGE_RETENTION_DAYS 或 60。 */
   messageRetentionDays?: number;
 }
@@ -110,7 +113,7 @@ const USAGE_PROVIDER_ALIAS: Record<string, string> = {
   'kimi-cli': 'kimi',
 };
 
-export const CATALOG_PROVIDERS = ['claude', 'codex', 'grok', 'dsh', 'kimi', 'zcode', 'factory', 'antigravity', 'opencode', 'amp', 'workbuddy', 'doubao', 'minimax-code'] as const;
+export const CATALOG_PROVIDERS = ['claude', 'codex', 'grok', 'dsh', 'kimi', 'zcode', 'factory', 'antigravity', 'opencode', 'amp', 'workbuddy', 'doubao', 'minimax-code', 'devin'] as const;
 export type CatalogProvider = (typeof CATALOG_PROVIDERS)[number];
 
 export function sessionKey(provider: string, nativeId: string): string {
@@ -598,6 +601,7 @@ export function extractSessionRecords(provider: string, path: string, mtimeMs: n
   if (provider === 'zcode') return extractZcodeDb(path, mtimeMs);
   if (provider === 'doubao') return extractDoubaoSessions(path, mtimeMs);
   if (provider === 'opencode') return extractOpencodeDb(path, mtimeMs);
+  if (provider === 'devin') return extractDevinSessionFile(path, mtimeMs);
   if (provider === 'amp') {
     const row = extractAmpThread(path, mtimeMs);
     return row ? [row] : [];
@@ -715,6 +719,16 @@ export function discoverSessionFiles(options: SessionCollectOptions, since: numb
       ),
     },
     {
+      // Devin:一个发现单元 = acp-messages/<uuid>.db(每会话一库,WAL 侧文件
+      // 不以 .db 结尾,天然被过滤器排除;mtime 复合水位见扫描分支)
+      provider: 'devin',
+      files: walkFiles(
+        devinAcpMessagesRoot(options.devinRoot),
+        since,
+        (name) => name.endsWith('.db'),
+      ),
+    },
+    {
       // 豆包:一个发现单元 = chat leveldb 目录(SSTable+WAL 都在里面);
       // mtime 由目录 stat 提供,无论 WAL 追加还是 compaction 都会变
       provider: 'doubao',
@@ -757,6 +771,7 @@ export function sessionWatchRoots(): string[] {
     doubaoChatLdbDir(),
     doubaoSnapshotRoot(),
     minimaxCodeSessionsRoot(),
+    devinAcpMessagesRoot(),
   ])];
 }
 
@@ -1191,7 +1206,7 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
     }
     let compositeMtimeMs = readMtimeMs;
     let compositeSize = readSize;
-    if (file.provider === 'opencode' || file.provider === 'zcode') {
+    if (file.provider === 'opencode' || file.provider === 'zcode' || file.provider === 'devin') {
       try {
         const walStat = statSync(`${readPath}-wal`);
         if (walStat.size > 32) {
@@ -1254,6 +1269,69 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
         if (existingRows) for (const row of existingRows) pushRow(row);
       } finally {
         conn?.close();
+      }
+      processed += 1;
+      bytesSinceYield += readSize;
+      if (processed % CATALOG_YIELD_BATCH === 0 || bytesSinceYield >= 8 * 1024 * 1024) {
+        bytesSinceYield = 0;
+        await yieldEventLoop();
+      }
+      continue;
+    }
+    if (file.provider === 'devin') {
+      scanned += 1;
+      const devinRows = extractSessionRecords('devin', file.path, file.mtimeMs);
+      // schema_version 不认识/库打不开：extractor fail-soft 返回空并已记录，
+      // 这里不推水位，下一轮自动重试（版本支持或锁释放后补上）
+      if (devinRows.length === 0) {
+        processed += 1;
+        continue;
+      }
+      const devinRow = devinRows[0]!;
+      if (tombstones.ids.has(devinRow.id)) {
+        processed += 1;
+        continue;
+      }
+      const withWork = attachGit(devinRow);
+      // 行级水位：session_index_state.lines 存最大 position（append-only、
+      // 单调递增），只解析新增行；parser 版本变化或库截断回退全量重扫。
+      // 消息 id = sessionId:eventId（云端事件 id 稳定），upsert 幂等。
+      const devinState = store.getSessionIndexState(readPath);
+      const devinSincePos = devinState != null
+        && devinState.parserVersion === MESSAGE_PARSER_VERSION
+        && devinState.size <= compositeSize
+        ? devinState.lines
+        : -1;
+      const devinHandle = openDevinSqlite(file.path);
+      if (devinHandle == null) {
+        logIndexFailure(readPath, new Error('devin acp-messages open failed (readonly and copy fallback both failed)'));
+        if (existingRows) for (const r of existingRows) pushRow(r);
+        processed += 1;
+        continue;
+      }
+      try {
+        const parsed = parseDevinMessages(devinHandle.db, devinRow.id, devinSincePos);
+        const maxPosition = parsed.maxPosition ?? devinSincePos;
+        store.withTransaction(() => {
+          store.upsertSessionMessages(parsed.rows);
+          store.upsertSessionIndexState({
+            path: readPath,
+            mtimeMs: compositeMtimeMs,
+            size: compositeSize,
+            parsedBytes: compositeSize,
+            lines: maxPosition,
+            parserVersion: MESSAGE_PARSER_VERSION,
+          });
+        });
+        pushRow(attachRepos(withWork, extractSessionRepos(withWork)));
+        scanTrace(`devin-file pos>${devinSincePos} messages=${parsed.rows.length}`);
+      } catch (error) {
+        // 整库回滚、水位不前进；目录行沿用上一轮的,下一轮重试(与 opencode 同语义)
+        logIndexFailure(readPath, error);
+        if (existingRows) for (const r of existingRows) pushRow(r);
+      } finally {
+        devinHandle.cleanup?.();
+        devinHandle.db.close();
       }
       processed += 1;
       bytesSinceYield += readSize;
