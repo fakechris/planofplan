@@ -12,10 +12,16 @@ function backoffSec(failures: number): number {
   return Math.min(30 * 60, 60 * 2 ** Math.min(failures - 1, 8));
 }
 
+/** auth 类失败的冷却封顶(INV-2012):凭据问题靠等待不会好转——用户修复后
+ * 应尽快重试(而不是白等 32 分钟指数退避),持续损坏时 5 分钟一次的探测
+ * 成本可忽略。auth 错误不带 429 hint,与「服务端明示恢复时间优先」不冲突。 */
+const AUTH_COOLDOWN_CAP_SEC = 300;
+
 /** 调度冷却取两者较大：常规失败退避 vs 服务端明示的恢复时间(+5~15s 抖动)。
  * sourcebot 实践:限流时听服务端的(x-ratelimit-reset),不要自己猜着撞墙。 */
-function cooldownSec(failures: number, serverHintSec: number | undefined): number {
+function cooldownSec(failures: number, serverHintSec: number | undefined, errKind?: string): number {
   const base = backoffSec(failures);
+  if (errKind === 'auth') return Math.min(base, AUTH_COOLDOWN_CAP_SEC);
   if (!serverHintSec || serverHintSec <= 0) return base;
   return Math.max(base, serverHintSec + 5 + Math.floor(Math.random() * 10));
 }
@@ -359,7 +365,7 @@ export class Scheduler {
       this.store.setState(slug, {
         consecutive_failures: failures,
         last_error: err.message,
-        paused_until: Date.now() + cooldownSec(failures, err.retryAfterSec) * 1000,
+        paused_until: Date.now() + cooldownSec(failures, err.retryAfterSec, err.kind) * 1000,
         // 仅适配器显式判定的 auth 错误（401/未登录）才作废凭据。unknown 多为
       // 本地基础设施抖动——如索引大事务期间落库撞上 SQLITE_BUSY——误置
       // INVALID 会让卡片显示「凭据失效」并清空窗口（INV-1255）。保持原状态，

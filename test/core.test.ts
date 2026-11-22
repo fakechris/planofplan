@@ -365,6 +365,38 @@ describe('Scheduler 限流感知退避', () => {
       registry.minimax = original!;
     }
   });
+
+  test('auth 类失败冷却封顶 5 分钟(INV-2012):高失败次数不再吃 32 分钟指数退避', async () => {
+    const { Scheduler } = await import('../src/core.ts');
+    const { registry } = await import('../src/adapters/index.ts');
+    const { AdapterError } = await import('../src/types.ts');
+    const store = openMemoryDb();
+    const plan = DEFAULT_PLANS.find((item) => item.slug === 'minimax')!;
+    store.syncPlan(plan);
+    // 已连续失败 7 次:第 8 次失败的常规退避是 min(30min, 60*2^7) = 30min
+    store.setState('minimax', { consecutive_failures: 7 });
+    const original = registry.minimax;
+    const before = Date.now();
+    registry.minimax = {
+      slug: 'minimax',
+      detectCredentials: async () => ({ kind: 'bearer', value: 'test', source: 'manual' }),
+      fetchUsage: async () => {
+        throw new AdapterError('auth', 'Grok CLI billing 不可用：请运行 `grok login`');
+      },
+    };
+    try {
+      const scheduler = new Scheduler(store, { port: 9291, plans: [plan] });
+      await scheduler.refreshPlan('minimax');
+      const state = store.getState('minimax');
+      expect(state?.consecutive_failures).toBe(8);
+      expect(state?.auth_status).toBe('invalid');
+      // auth 封顶 300s——凭据修复后最多 5 分钟内自动重试,不再白等 30 分钟
+      expect(state!.paused_until!).toBeGreaterThanOrEqual(before + 300_000);
+      expect(state!.paused_until!).toBeLessThanOrEqual(before + 302_000);
+    } finally {
+      registry.minimax = original!;
+    }
+  });
 });
 
 describe('Overview cooldownUntil 透传', () => {
