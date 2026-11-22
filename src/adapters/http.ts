@@ -15,6 +15,7 @@
  * 只有 429 会以异常形式抛出——因为 429 是「我们知道何时能再来」的
  * 唯一信号，必须把恢复时间带给调度器。
  */
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { AdapterError } from '../types.ts';
 
 const DEFAULT_RETRIES = 2;                 // 1 次原始尝试 + 2 次重试
@@ -67,6 +68,38 @@ function fmtWait(sec: number): string {
   return m < 60 ? `${m} 分钟` : `${Math.floor(m / 60)} 小时 ${m % 60} 分`;
 }
 
+// ── provider 级出站代理（INV-2015）─────────────────────────────────────
+// Bun fetch 原生支持 init.proxy（http/https，凭据可嵌 URL）。代理值经
+// AsyncLocalStorage 随刷新上下文传播：Scheduler.refreshPlan 以 plan 解析
+// 出的代理进入上下文，其 await 链上的 fetchQuota 统一注入——并发刷新
+// 不同 plan 互不串扰。代理 URL 可能内嵌用户名密码：任何日志不得打印该值。
+
+/** Bun 专属请求选项（标准 RequestInit 无 proxy 字段）。 */
+export type ProxyRequestInit = RequestInit & { proxy?: string };
+
+const quotaProxyStorage = new AsyncLocalStorage<string | null>();
+
+/** 代理 URL 校验：http(s):// 开头视为有效；空/非法按直连（返回 null）。 */
+export function normalizeQuotaProxy(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return /^https?:\/\/\S+$/i.test(trimmed) ? trimmed : null;
+}
+
+/** 以指定代理进入配额请求上下文：work 内（含其 await 链）的 fetchQuota /
+ * applyQuotaProxy 都取到该代理。null/undefined 表示显式直连。 */
+export function withQuotaProxy<T>(proxy: string | null | undefined, work: () => T): T {
+  return quotaProxyStorage.run(normalizeQuotaProxy(proxy), work);
+}
+
+/** 给裸 fetch 的 init 注入当前上下文代理（claude OAuth refresh 用）；
+ * 无代理上下文时原样返回。 */
+export function applyQuotaProxy(init: RequestInit): ProxyRequestInit {
+  const proxy = quotaProxyStorage.getStore();
+  return proxy ? ({ ...init, proxy } as ProxyRequestInit) : init;
+}
+
 export async function fetchQuota(
   url: string | URL,
   init?: RequestInit,
@@ -76,13 +109,15 @@ export async function fetchQuota(
   const maxInlineWaitMs = options.maxInlineWaitMs ?? DEFAULT_MAX_INLINE_WAIT_MS;
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const now = options.now ?? Date.now;
+  // 代理在进入重试循环前注入一次：整个重试链都在同一 async 上下文里
+  const proxiedInit = applyQuotaProxy(init ?? {});
 
   let lastRes: Response | null = null;
   let lastWaitMs = 0;
   for (let attempt = 0; ; attempt += 1) {
     let res: Response;
     try {
-      res = await fetch(url, init);
+      res = await fetch(url, proxiedInit as RequestInit);
     } catch (e) {
       // 网络层失败最多就地补一次（断线重连的量级），再多就是环境问题
       if (attempt < 1) {

@@ -1471,6 +1471,27 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
     return c.json({ ok: true, slug, browser: body.browser });
   });
 
+  // plan 级出站代理（INV-2015）：extra.proxy 持久化（DB 为运行时真源，
+  // 启动同步不覆盖 extra）。代理 URL 可能内嵌用户名密码——不回传、不落日志，
+  // 响应只报已配置/已清除。空串=清除（直连）。
+  app.put('/api/plans/:slug/proxy', async (c) => {
+    const slug = c.req.param('slug');
+    const plan = store.getPlan(slug);
+    if (!plan) return c.json({ ok: false, error: 'unknown plan' }, 404);
+    let body: { proxy?: string } = {};
+    try {
+      body = (await c.req.json()) as { proxy?: string };
+    } catch {
+      return c.json({ ok: false, error: 'body 必须是 JSON' }, 400);
+    }
+    const raw = typeof body.proxy === 'string' ? body.proxy.trim() : '';
+    if (raw && !/^https?:\/\/\S+$/i.test(raw)) {
+      return c.json({ ok: false, error: '代理格式：http(s)://[user:pass@]host:port' }, 400);
+    }
+    store.updatePlanExtra(slug, raw ? { proxy: raw } : { proxy: '' });
+    return c.json({ ok: true, slug, proxy: raw ? 'configured' : 'cleared' });
+  });
+
   app.post('/api/plans/:slug/browser-auth', async (c) => {
     const slug = c.req.param('slug');
     const plan = store.getPlan(slug);
