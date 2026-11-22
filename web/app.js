@@ -3236,6 +3236,10 @@ async function render() {
       maybePollSessionIndex(latestSessions);
     }
     if (dragInFlight) return;
+    // 设置弹窗打开时不替换卡片 DOM：弹窗挂在卡片里，整批 replaceChildren
+    // 会把它连根拔掉——表现为「点开设置一闪而关」（恰逢后台轮询渲染时必现，
+    // 30s 自动 poll/SSE 都会触发）。弹窗关闭后的下一轮渲染自然补上数据。
+    if (document.querySelector('#grid dialog[open]')) return;
     const grid = document.getElementById('grid');
     // 多账号凭据冲突等配置警告(daemon 侧计算)
     const warnEl = document.getElementById('configWarnings');
