@@ -18,7 +18,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { AdapterContext, Credential, PlanAdapter, QuotaWindow } from '../types.ts';
 import { AdapterError } from '../types.ts';
-import { fetchQuota } from './http.ts';
+import { applyQuotaProxy, fetchQuota } from './http.ts';
 import { clampPct } from './util.ts';
 
 const execFileAsync = promisify(execFile);
@@ -302,7 +302,9 @@ export const claudeAdapter: PlanAdapter = {
       let res: Response;
       try {
         const endpoint = process.env.CLAUDE_OAUTH_TOKEN_URL?.trim() || OAUTH_TOKEN_URL;
-        res = await fetch(endpoint, {
+        // OAuth token 端点同样可能被区域封锁（INV-2015 实测 403）——经当前
+        // plan 的代理上下文出站（无代理时原样直连）
+        res = await fetch(endpoint, applyQuotaProxy({
           method: 'POST',
           headers: {
             'Content-Type': 'application/x-www-form-urlencoded',
@@ -314,7 +316,7 @@ export const claudeAdapter: PlanAdapter = {
             client_id: process.env.CLAUDE_OAUTH_CLIENT_ID?.trim() || CLAUDE_OAUTH_CLIENT_ID,
           }).toString(),
           signal: AbortSignal.timeout(60_000),
-        });
+        }) as RequestInit);
       } catch {
         return false;
       }

@@ -2874,6 +2874,15 @@ function renderPlan(p, now) {
         ${renderBrowserSettings(card, p)}
         ${renderCredentialSettings(card, p)}
         <div class="settings-section">
+          <div class="settings-title">网络代理</div>
+          <p class="settings-copy">该 provider 的额度请求经此 HTTP(S) 代理出站（可带用户名密码）${p.proxyConfigured ? '，<strong>已配置</strong>' : ''}。留空保存=清除（直连）。仅影响 planofplan 自身轮询；终端里的 claude/codex CLI 请在 shell 设 HTTPS_PROXY。</p>
+          <form class="key-form" data-proxy-form>
+            <input type="password" name="proxy" autocomplete="new-password" placeholder="http://user:pass@host:port" aria-label="HTTP(S) 代理" />
+            <button type="submit" class="button-primary">${p.proxyConfigured ? '更新代理' : '保存代理'}</button>
+            ${p.proxyConfigured ? '<button type="button" class="button-quiet" data-proxy-clear>清除代理</button>' : ''}
+          </form>
+        </div>
+        <div class="settings-section">
           <div class="settings-title">卡片展示</div>
           <p class="settings-copy">若暂不使用此 provider，可在首页将其隐藏。隐藏后可在全局「设置」随时找回。</p>
           <button type="button" class="secondary-btn" data-dialog-hide-plan>在首页隐藏此卡片</button>
@@ -3074,6 +3083,40 @@ function bindPlanActions(card, p) {
       }
     });
   }
+  // 网络代理（INV-2015）：保存/清除后立即触发一次刷新，代理下一轮即生效
+  const proxyForm = card.querySelector('[data-proxy-form]');
+  if (proxyForm) {
+    const saveProxy = async (value, button, busyText) => {
+      setBusy(button, true, busyText);
+      try {
+        await request(`/api/plans/${encodeURIComponent(p.slug)}/proxy`, {
+          method: 'PUT',
+          body: JSON.stringify({ proxy: value }),
+        });
+        proxyForm.reset();
+        showToast(value ? `${p.name} 代理已保存` : `${p.name} 已恢复直连`);
+        request(`/api/plans/${encodeURIComponent(p.slug)}/refresh`, { method: 'POST' }).catch(() => {});
+        await render();
+      } catch (error) {
+        showToast(error.message, true);
+      } finally {
+        setBusy(button, false);
+      }
+    };
+    proxyForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const value = proxyForm.elements.proxy.value.trim();
+      if (!value) {
+        showToast('填写代理地址，或点「清除代理」', true);
+        return;
+      }
+      await saveProxy(value, proxyForm.querySelector('[type=submit]'), '保存中…');
+    });
+    proxyForm.querySelector('[data-proxy-clear]')?.addEventListener('click', async (event) => {
+      await saveProxy('', event.currentTarget, '清除中…');
+    });
+  }
+
   const form = card.querySelector('[data-auth-form]');
   if (form) {
     form.addEventListener('submit', async (event) => {

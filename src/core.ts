@@ -1,11 +1,29 @@
 import type { AppConfig } from './config.ts';
+import { loadConfig } from './config.ts';
 import type { Store } from './db.ts';
 import { snapshotRetentionDays } from './db.ts';
 import { getAdapter } from './adapters/index.ts';
+import { withQuotaProxy } from './adapters/http.ts';
 import type { AdapterContext, PlanConfig, QuotaWindow } from './types.ts';
 import { AdapterError, AUTH_STATUS } from './types.ts';
 import { redactSecrets } from './redact.ts';
 import { annotateWindowsWithTier, getTier, isTierPricingEnabled, planWantsTierPricing, type TierState } from './tier.ts';
+
+/** plan 出站代理三层解析（INV-2015）：plan.extra.proxy → config.json 顶层
+ * proxy → env PLANOFPPLAN_HTTP_PROXY；都不配=直连。代理值可能内嵌用户名
+ * 密码，不得进入任何日志。 */
+function resolvePlanProxy(plan: PlanConfig): string | null {
+  const extra = plan.extra?.proxy;
+  if (typeof extra === 'string' && extra.trim() !== '') return extra;
+  try {
+    const global = loadConfig().proxy;
+    if (typeof global === 'string' && global.trim() !== '') return global;
+  } catch {
+    /* config 读取失败按直连 */
+  }
+  const env = process.env.PLANOFPPLAN_HTTP_PROXY;
+  return typeof env === 'string' && env.trim() !== '' ? env : null;
+}
 
 /** 指数退避：1min 起步，封顶 30min */
 function backoffSec(failures: number): number {
@@ -79,6 +97,9 @@ export interface OverviewPlan {
   lastError: string | null;
   browser: string | null;
   browserSupported: boolean;
+  /** 该 plan 是否配置了出站代理（INV-2015）。只报布尔，代理 URL 可能含
+   * 密码，不回传给前端。 */
+  proxyConfigured: boolean;
   /** 是否提供手动 API key/token 配置入口（adapter 能力，默认支持）。 */
   manualKey: boolean;
   credentialHint: string | null;
@@ -206,6 +227,7 @@ function buildPlanOverview(store: Store, plan: PlanConfig, now: number): Overvie
     lastError: state?.last_error ?? null,
     browser: plan.extra.browser ?? null,
     browserSupported: plan.adapter === 'kimi' || plan.adapter === 'factory',
+    proxyConfigured: typeof plan.extra.proxy === 'string' && plan.extra.proxy.trim() !== '',
     manualKey: adapter != null && adapter.manualKey !== false,
     credentialHint: adapter?.credentialHint ?? null,
     tier,
@@ -333,7 +355,9 @@ export class Scheduler {
     };
 
     this.store.setState(slug, { last_attempt_at: now });
-    const cred = await adapter.detectCredentials(ctx);
+    // 该 plan 的全部出站请求（凭据探测 + 抓取）进入同一代理上下文
+    const planProxy = resolvePlanProxy(plan);
+    const cred = await withQuotaProxy(planProxy, () => adapter.detectCredentials(ctx));
 
     if (!cred) {
       const message =
@@ -347,7 +371,7 @@ export class Scheduler {
     }
 
     try {
-      const windows = await adapter.fetchUsage(ctx, cred);
+      const windows = await withQuotaProxy(planProxy, () => adapter.fetchUsage(ctx, cred));
       this.store.insertWindows(slug, windows, Date.now());
       this.store.setState(slug, {
         last_success_at: Date.now(),

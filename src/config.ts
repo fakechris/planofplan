@@ -12,6 +12,9 @@ export interface AppConfig {
   llm?: LlmConfig;
   /** 额度告警阈值(INV-922);缺省用量 80%、余额关闭。 */
   alerts?: AlertSettings;
+  /** 全局出站代理兜底(INV-2015)：plan 未配 extra.proxy 时生效。
+   * http(s)://[user:pass@]host:port；含密码，不落日志。 */
+  proxy?: string;
 }
 
 /** LLM 选择:provider = 已配置凭据的 provider;model 自由填;baseUrl 可覆写端点。 */
@@ -186,6 +189,7 @@ export function loadConfig(): AppConfig {
     resume: { ...DEFAULT_RESUME, ...(user.resume ?? {}) },
     llm: user.llm && typeof user.llm === 'object' ? user.llm : undefined,
     alerts: normalizeAlertSettings(user.alerts),
+    proxy: typeof user.proxy === 'string' && user.proxy.trim() !== '' ? user.proxy : undefined,
   };
 }
 
