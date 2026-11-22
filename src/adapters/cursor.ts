@@ -22,14 +22,16 @@ import type { AdapterContext, Credential, PlanAdapter, QuotaWindow } from '../ty
 import { fetchQuota } from './http.ts';
 import { AdapterError } from '../types.ts';
 import { clampPct } from './util.ts';
+import { cursorSafeStorageKey, decryptCursorSafeStorage, isCursorSafeStorageValue } from '../cursor-safestorage.ts';
 
 const LEGACY_URL = 'https://cursor.com/api/usage';
 const USD_URL = 'https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage';
 
 function cursorDbPath(): string | null {
   const home = homedir();
-  const candidates =
-    process.platform === 'darwin'
+  const candidates = process.env.CURSOR_DB_PATH_FOR_TEST
+    ? [process.env.CURSOR_DB_PATH_FOR_TEST]
+    : process.platform === 'darwin'
       ? [join(home, 'Library', 'Application Support', 'Cursor', 'User', 'globalStorage', 'state.vscdb')]
       : [join(home, '.config', 'Cursor', 'User', 'globalStorage', 'state.vscdb')];
   return candidates.find((p) => existsSync(p)) ?? null;
@@ -50,10 +52,18 @@ function readAccessTokenFromDb(): string | null {
           .query(`SELECT value FROM ItemTable WHERE key = ? LIMIT 1`)
           .get('cursorAuth/accessToken') as { value: string | Uint8Array | null } | null;
         if (row?.value == null) return null;
-        const raw =
+        let raw =
           typeof row.value === 'string'
             ? row.value
             : new TextDecoder('utf-8').decode(row.value as Uint8Array);
+        // 新版 Cursor：值是 safeStorage 密文（cursor-safe-storage:v1:）→
+        // Keychain "Cursor Safe Storage" 解密出明文 JWT（INV-2016）；解密失败
+        // 按无凭据处理（credentialHint 引导），旧版明文走原路径不受影响
+        if (isCursorSafeStorageValue(raw)) {
+          const plain = decryptCursorSafeStorage(raw, cursorSafeStorageKey());
+          if (plain == null) return null;
+          raw = plain;
+        }
         // seed 值可能是 JSON 包裹
         try {
           const parsed = JSON.parse(raw) as { accessToken?: string; token?: string };
