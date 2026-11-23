@@ -276,15 +276,31 @@ final class PanelView: NSView {
     }
 
     private func goPrev() {
-        page = (page - 1 + pages.count) % pages.count
-        onSelect(page)
-        setNeedsDisplay(bounds)
+        showPage((page - 1 + pages.count) % pages.count)
     }
 
     private func goNext() {
-        page = (page + 1) % pages.count
+        showPage((page + 1) % pages.count)
+    }
+
+    /// 切页：这个视图自己把高度切到新页，再让所在的菜单项重新排版。
+    ///
+    /// 必须是屏幕上这个视图就地改，不能靠重填 statusItem.menu：菜单打开期间
+    /// rebuildMenu() 会把 statusItem.menu 换成另一个 NSMenu 对象，重填的是不在
+    /// 屏幕上的那个；屏幕上的视图若只是重绘，新页内容会挤在旧 frame 里——窗口
+    /// 块自上而下、页脚自下而上，高度不够时两头的文字就叠在一起。
+    private func showPage(_ newPage: Int) {
+        page = newPage
         onSelect(page)
-        setNeedsDisplay(bounds)
+        let newHeight = PanelView.height(plans: plans, usage: usage, startPage: page)
+        if abs(newHeight - frame.height) > 0.5 {
+            frame.size.height = newHeight
+            // 菜单不会自己察觉自定义视图的 frame 变了
+            if let item = enclosingMenuItem {
+                item.menu?.itemChanged(item)
+            }
+        }
+        needsDisplay = true
     }
 
     private var cardRect: NSRect { bounds.insetBy(dx: PanelView.cardInset, dy: PanelView.cardInset) }
@@ -708,9 +724,7 @@ final class PanelView: NSView {
                 if case .provider(let i) = page { return i == row.planIndex }
                 return false
             }) {
-                page = pageIndex
-                onSelect(page)
-                setNeedsDisplay(bounds)
+                showPage(pageIndex)
             }
             return
         }
@@ -1198,15 +1212,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 usage: usageSummary,
                 startPage: selectedPlanIndex
             ) { [weak self] page in
-                guard let self else { return }
-                self.selectedPlanIndex = page
-                // 翻页后面板高度要切到新页内容：延迟到下一轮 runloop 原地
-                // 重填（与打开中的安全刷新同一条路径），不在命中测试回调里
-                // 递归改菜单。
-                Task { @MainActor [weak self] in
-                    guard let self, self.isMenuOpen, let menu = self.statusItem.menu else { return }
-                    self.refillMenu(menu)
-                }
+                self?.selectedPlanIndex = page
             }
             item.isEnabled = false
             menu.addItem(item)
