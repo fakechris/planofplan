@@ -106,6 +106,46 @@ struct UsageSummary: Decodable {
     }
 }
 
+/// provider 页用量页脚的内容：柱状图开关 + 明细行（Top 项目 ≤3 → 模型 →
+/// 最近会话 ≤2）。卡片高度和绘制共用这一份——两边各算各的，卡片就和实际
+/// 画出来的内容对不上（旧实现固定按 177pt 预留，行数少时底部整块空白）。
+struct PlanUsageFooterContent {
+    typealias PlanUsageRow = UsageSummary.PlanUsageRow
+
+    static let rowPitch: CGFloat = 14
+    static let rowBoxHeight: CGFloat = 13.5
+
+    let planUsage: PlanUsageRow
+    let hasChart: Bool
+    let projects: [PlanUsageRow.ProjectEntry]
+    let models: [String]
+    let sessions: [PlanUsageRow.SessionEntry]
+
+    init(_ planUsage: PlanUsageRow) {
+        self.planUsage = planUsage
+        hasChart = (planUsage.daily ?? []).count > 1
+        projects = Array((planUsage.topProjects ?? []).prefix(3))
+        models = (planUsage.topModels ?? []).prefix(3).map(\.model)
+        sessions = Array((planUsage.recentSessions ?? []).filter { $0.url != nil }.prefix(2))
+    }
+
+    var rowCount: Int {
+        projects.count + (models.isEmpty ? 0 : 1) + sessions.count
+    }
+
+    // 以下是各锚点距分隔线顶边向下的 pt；文本的锚点是行盒底边。
+    var labelPoint: CGFloat { 17 }
+    var totalsPoint: CGFloat { 37 }
+    /// 柱状图底边；不足 2 根不画，直接接到今日 / 30 天行
+    var chartBottom: CGFloat { totalsPoint + (hasChart ? 26 : 0) }
+    /// 首个明细行的行盒底边；柱状图与明细行之间留 20
+    var firstRowPoint: CGFloat { chartBottom + (rowCount > 0 ? 20 + Self.rowBoxHeight : 0) }
+    /// 整块高度：到末行行盒底边，再留 4pt 到卡片底边
+    var height: CGFloat {
+        firstRowPoint + CGFloat(max(rowCount - 1, 0)) * Self.rowPitch + 4
+    }
+}
+
 /// 下拉面板：第一页 index 总览（全部 plan 紧凑行，点行跳转），之后每
 /// provider 一张大卡片；‹ › 自绘箭头 + 命中区域切换（NSButton 的 tint
 /// 在菜单里不可靠，黑底黑字不可见）。plan 多到一页放不下时自动拆多页
@@ -141,21 +181,84 @@ final class PanelView: NSView {
     static let panelWidth: CGFloat = 380
     static let cardInset: CGFloat = 6
 
-    /// 面板固定高度：取 provider 页与总览页的较大者。
-    static func height(plans: [Plan]) -> CGFloat {
-        let maxWindows = CGFloat(max(1, plans.map { $0.windows.count }.max() ?? 1))
-        let providerHeight = 278 + maxWindows * 64
-        // 总览页:头部 + 每 plan 一行统一紧凑摘要(全量,上限 760 防失控)
-        let indexHeight = 66 + CGFloat(plans.count) * 25 + 46
-        let cappedIndex = min(indexHeight, 760)
-        return 12 + max(providerHeight, cappedIndex)
+    /// 页脚分隔线上方留白：provider 页最后一个窗口块（或提示文案）到页脚分隔线。
+    static let footerGap: CGFloat = 16
+
+    /// 面板高度按当前页内容自适应：总览页与 provider 页各自按实际要画的
+    /// 内容计算，不再取全页最大值（短页会被撑到最高 provider 页的高度，
+    /// 下方留一大块空白）。翻页时由 refillMenu 原地重填切换到新页高度。
+    static func height(plans: [Plan], usage: UsageSummary?, startPage: Int) -> CGFloat {
+        let page = min(max(startPage, 0), plans.count)
+        let card = page == 0
+            ? indexCardHeight(planCount: plans.count)
+            : providerCardHeight(plans[page - 1], usage: usage)
+        // 高度取整点：卡片边框按 0.5 内缩描边，半点高度在非 Retina 屏上发虚
+        return 12 + card.rounded(.up)
+    }
+
+    /// 总览页卡片高度。视图坐标原点在左下角，draw(at:) 的点是行盒底边，
+    /// 下面的数都按「距卡片顶边向下」计：头部 66 + 每 plan 一行 25（行
+    /// 内分隔线在 rowTop 下 23）+ 页脚 55（分隔线在 cardRect.minY + 54）。
+    /// 末行不画自己的分隔线，页脚分隔线就是列表的收口线。上限 760 防失控。
+    static func indexCardHeight(planCount: Int) -> CGFloat {
+        let rowsBottom = 66 + CGFloat(planCount - 1) * 25 + 23
+        return min(rowsBottom + 55, 760)
+    }
+
+    /// provider 页卡片高度：与 drawProviderPage 的光标推进逐项对齐——
+    /// 状态区 97（头部 66 + 状态行 17 + 更新时间行 14），fable / 限流冷却
+    /// 警示行各 16，窗口块 71（带 note 85），再接页脚：用量块按实际明细行数
+    /// 算（PlanUsageFooterContent），无用量记录 39。每个窗口块自带 38pt
+    /// 尾部留白，末块换成 footerGap；页脚高度都从分隔线顶边算到卡片底边。
+    static func providerCardHeight(_ plan: Plan, usage: UsageSummary?) -> CGFloat {
+        let nowMs = Date().timeIntervalSince1970 * 1000
+        var contentBottom: CGFloat = 97
+        if fableIdleLabel(for: plan, nowMs: nowMs) != nil { contentBottom += 16 }
+        if let cooldown = plan.cooldownUntil, cooldown > nowMs { contentBottom += 16 }
+        if plan.windows.isEmpty {
+            // 提示文案块的顶边在光标下方 6
+            contentBottom += 6 + emptyWindowsMessageHeight(plan)
+        } else {
+            for window in plan.windows {
+                contentBottom += (window.note?.isEmpty == false) ? 85 : 71
+            }
+            contentBottom -= 38
+        }
+        let footer: CGFloat
+        if let planUsage = usage?.usage(forPlan: plan.slug) {
+            footer = PlanUsageFooterContent(planUsage).height
+        } else {
+            footer = 39
+        }
+        return contentBottom + footerGap + footer
+    }
+
+    /// provider 页没有任何窗口时显示的提示文案：未配置给配置指引，否则给
+    /// 上次错误。绘制与 providerCardHeight 共用。
+    static func emptyWindowsMessage(_ plan: Plan) -> String {
+        plan.status == "not_configured" ? (plan.credentialHint ?? "暂无数据") : (plan.lastError ?? "暂无数据")
+    }
+
+    /// 这段文案在页内宽度下占的高度：最多两行，每行按 pointSize + 4 算，
+    /// 与 drawBlock 的矩形一致（一行不到 15，两行不小于 26）。
+    static func emptyWindowsMessageHeight(_ plan: Plan) -> CGFloat {
+        let message = NSAttributedString(
+            string: emptyWindowsMessage(plan),
+            attributes: [.font: NSFont.systemFont(ofSize: 11)]
+        )
+        let laidOut = message.boundingRect(
+            with: NSSize(width: panelWidth - cardInset * 2 - 32, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading]
+        )
+        return CGFloat(laidOut.height > 20 ? 2 : 1) * 15
     }
 
     init(plans: [Plan], usage: UsageSummary?, startPage: Int = 0, onSelect: @escaping (Int) -> Void = { _ in }) {
         self.plans = plans
         self.usage = usage
         self.onSelect = onSelect
-        super.init(frame: NSRect(x: 0, y: 0, width: PanelView.panelWidth, height: PanelView.height(plans: plans)))
+        super.init(frame: NSRect(x: 0, y: 0, width: PanelView.panelWidth,
+                                 height: PanelView.height(plans: plans, usage: usage, startPage: startPage)))
         buildPages()
         page = min(max(startPage, 0), max(pages.count - 1, 0))
     }
@@ -173,15 +276,31 @@ final class PanelView: NSView {
     }
 
     private func goPrev() {
-        page = (page - 1 + pages.count) % pages.count
-        onSelect(page)
-        setNeedsDisplay(bounds)
+        showPage((page - 1 + pages.count) % pages.count)
     }
 
     private func goNext() {
-        page = (page + 1) % pages.count
+        showPage((page + 1) % pages.count)
+    }
+
+    /// 切页：这个视图自己把高度切到新页，再让所在的菜单项重新排版。
+    ///
+    /// 必须是屏幕上这个视图就地改，不能靠重填 statusItem.menu：菜单打开期间
+    /// rebuildMenu() 会把 statusItem.menu 换成另一个 NSMenu 对象，重填的是不在
+    /// 屏幕上的那个；屏幕上的视图若只是重绘，新页内容会挤在旧 frame 里——窗口
+    /// 块自上而下、页脚自下而上，高度不够时两头的文字就叠在一起。
+    private func showPage(_ newPage: Int) {
+        page = newPage
         onSelect(page)
-        setNeedsDisplay(bounds)
+        let newHeight = PanelView.height(plans: plans, usage: usage, startPage: page)
+        if abs(newHeight - frame.height) > 0.5 {
+            frame.size.height = newHeight
+            // 菜单不会自己察觉自定义视图的 frame 变了
+            if let item = enclosingMenuItem {
+                item.menu?.itemChanged(item)
+            }
+        }
+        needsDisplay = true
     }
 
     private var cardRect: NSRect { bounds.insetBy(dx: PanelView.cardInset, dy: PanelView.cardInset) }
@@ -281,8 +400,10 @@ final class PanelView: NSView {
             return pa > pb
         }
 
-        for planIndex in sorted {
-            guard y > cardRect.minY + 56 else { break }
+        for (position, planIndex) in sorted.enumerated() {
+            // 行下方的分隔线必须落在页脚分隔线（cardRect.minY + 54）之上，
+            // 否则这一行会压进页脚；plan 多到撞高度上限时在此截断
+            guard y - 23 >= cardRect.minY + 54 else { break }
             let plan = plans[planIndex]
             let rowTop = y
 
@@ -351,9 +472,12 @@ final class PanelView: NSView {
             }
             valueAttr.draw(at: NSPoint(x: valueX, y: y - 13))
 
-            // 行分隔线(最后一行也画,收口整齐)
-            NSColor(white: 1, alpha: 0.05).setFill()
-            NSRect(x: contentLeft, y: rowTop - 24, width: contentWidth, height: 1).fill()
+            // 行分隔线。末行不画：它和页脚分隔线落在同一位置（见
+            // indexCardHeight），画两次会叠出一条更亮的线
+            if position < sorted.count - 1 {
+                NSColor(white: 1, alpha: 0.05).setFill()
+                NSRect(x: contentLeft, y: rowTop - 24, width: contentWidth, height: 1).fill()
+            }
             y -= 25
         }
     }
@@ -392,13 +516,12 @@ final class PanelView: NSView {
         }
 
         if plan.windows.isEmpty {
-            let message = plan.status == "not_configured"
-                ? (plan.credentialHint ?? "暂无数据")
-                : (plan.lastError ?? "暂无数据")
-            drawText(message, at: NSPoint(x: contentLeft, y: y - 6),
-                     font: .systemFont(ofSize: 11),
-                     color: (plan.status == "auth_error" || plan.status == "error") ? badColor : textTertiary,
-                     maxWidth: contentWidth, maxLines: 2)
+            // 文案块的顶边放在光标下方 6，自上往下排。旧实现把这里的 y 当
+            // 矩形底边交给 drawText，而 draw(in:) 从矩形顶边起排，整块文案
+            // 上移 30pt，压在「更新于」行上。
+            drawBlock(PanelView.emptyWindowsMessage(plan), top: y - 6, x: contentLeft, maxWidth: contentWidth,
+                      maxLines: 2, font: .systemFont(ofSize: 11),
+                      color: (plan.status == "auth_error" || plan.status == "error") ? badColor : textTertiary)
         } else {
             for window in plan.windows {
                 let pct = window.effectivePercentage
@@ -471,21 +594,21 @@ final class PanelView: NSView {
 
     /** 页脚：总览页显示全局用量，provider 页只显示当页 plan 的用量与 top models。 */
     private func drawUsageFooter(contentLeft: CGFloat, contentWidth: CGFloat, planSlug: String?) {
-        let y = cardRect.minY + 14
+        let planFooter = planSlug.flatMap { usage?.usage(forPlan: $0) }.map { PlanUsageFooterContent($0) }
+        // 三种页脚的分隔线都在各自内容块的顶部，锚点一律从卡片底边（cardRect.minY）
+        // 往上数。无用量记录的 provider 页脚只有两行，比总览页少一行，不再沿用
+        // 总览页的锚点白留一行的高度。
+        let footerHeight = planFooter?.height ?? (planSlug != nil ? 39 : 55)
         NSColor(white: 1, alpha: 0.08).setFill()
-        // provider 页的分隔线画在富块顶部；index 页保持原位
-        if let planSlug, usage?.usage(forPlan: planSlug) != nil {
-            NSRect(x: contentLeft, y: cardRect.minY + 172 + 4, width: contentWidth, height: 1).fill()
-        } else {
-            NSRect(x: contentLeft, y: y + 40, width: contentWidth, height: 1).fill()
-        }
+        NSRect(x: contentLeft, y: cardRect.minY + footerHeight - 1, width: contentWidth, height: 1).fill()
 
         let numberFont = NSFont.monospacedDigitSystemFont(ofSize: 11.5, weight: .semibold)
-        if let planSlug, let planUsage = usage?.usage(forPlan: planSlug) {
-            // 富用量块自上而下排布，全部锚定在页脚区域顶部（148px 高），
-            // 旧实现自底向上画导致柱状图/项目行落在卡片外不可见。
-            let top = cardRect.minY + 172
-            drawText("USAGE · 30 DAYS", at: NSPoint(x: contentLeft, y: top - 12),
+        if let planFooter {
+            // 用量块自上而下排布，锚点都在 PlanUsageFooterContent 里
+            // （分隔线顶边 − 偏移）。
+            let planUsage = planFooter.planUsage
+            let separatorTop = cardRect.minY + planFooter.height
+            drawText("USAGE · 30 DAYS", at: NSPoint(x: contentLeft, y: separatorTop - planFooter.labelPoint),
                      font: .systemFont(ofSize: 9, weight: .bold), color: textTertiary)
 
             // 今日 / 30 天双栏
@@ -498,19 +621,20 @@ final class PanelView: NSView {
                 let snapped = (cost * 100).rounded() / 100
                 todayText += String(format: " · $%.2f", snapped)
             }
-            drawText(todayText, at: NSPoint(x: contentLeft, y: top - 32), font: numberFont, color: textPrimary)
+            drawText(todayText, at: NSPoint(x: contentLeft, y: separatorTop - planFooter.totalsPoint),
+                     font: numberFont, color: textPrimary)
             var monthText = "30天 " + PanelView.shortNumber(planUsage.totalTokens ?? 0)
             if let cost = planUsage.estimatedCostUsd {
                 let snapped = (cost * 100).rounded() / 100
                 monthText += String(format: " · $%.2f", snapped)
             }
-            drawRightAligned(monthText, y: top - 32, right: cardRect.maxX - 16,
+            drawRightAligned(monthText, y: separatorTop - planFooter.totalsPoint, right: cardRect.maxX - 16,
                              font: numberFont, color: textPrimary)
 
             // 最近 14 天迷你柱状图（底部对齐，今日高亮）
             let bars = planUsage.daily?.suffix(14) ?? []
-            if bars.count > 1 {
-                let chartBottom = top - 72
+            if planFooter.hasChart {
+                let chartBottom = separatorTop - planFooter.chartBottom
                 let chartHeight: CGFloat = 26
                 let gap: CGFloat = 2
                 let barWidth = (contentWidth - CGFloat(bars.count - 1) * gap) / CGFloat(bars.count)
@@ -525,58 +649,56 @@ final class PanelView: NSView {
                 }
             }
 
-            // Top 项目（路径取最后两段）
-            var projectY = top - 92
-            for project in planUsage.topProjects?.prefix(3) ?? [] {
+            // 明细行自上而下：Top 项目（路径取最后两段）→ 模型 → 最近会话。
+            // 旧实现把项目名称右对齐到数值旁、给数值固定留 74pt，长金额
+            // （"6.19B · $1222.4"）会压到名称上；模型行也被画成右对齐。
+            var rowY = separatorTop - planFooter.firstRowPoint
+            for project in planFooter.projects {
                 let name = PanelView.projectDisplayName(project.project)
-                drawTruncatedRight(name, y: projectY, right: cardRect.maxX - 74, maxWidth: 190,
-                                   font: .systemFont(ofSize: 10), color: textSecondary)
                 var tokens = PanelView.shortNumber(project.totalTokens)
                 if let cost = project.estimatedCostUsd {
                     tokens += String(format: " · $%.1f", cost)
                 }
-                drawRightAligned(tokens, y: projectY, right: cardRect.maxX - 16,
-                                 font: .monospacedDigitSystemFont(ofSize: 10, weight: .medium), color: textTertiary)
-                projectY -= 14
+                drawUsageRow(name, value: tokens, y: rowY, contentLeft: contentLeft, contentWidth: contentWidth,
+                             nameFont: .systemFont(ofSize: 10), nameColor: textSecondary,
+                             valueFont: .monospacedDigitSystemFont(ofSize: 10, weight: .medium), valueColor: textTertiary)
+                rowY -= PlanUsageFooterContent.rowPitch
             }
 
-            let models = planUsage.topModels?.prefix(3).map { $0.model } ?? []
-            if !models.isEmpty {
-                drawTruncatedRight("模型 " + models.joined(separator: " · "), y: projectY, right: cardRect.maxX - 16,
-                                   maxWidth: contentWidth, font: .systemFont(ofSize: 9.5), color: textTertiary)
+            if !planFooter.models.isEmpty {
+                drawTruncated("模型 " + planFooter.models.joined(separator: " · "), x: contentLeft, y: rowY,
+                              maxWidth: contentWidth, font: .systemFont(ofSize: 9.5), color: textTertiary)
+                rowY -= PlanUsageFooterContent.rowPitch
             }
 
             // dsh-track 深链（deep-link-handoff.md）：可点击的最近会话行
-            let sessions = (planUsage.recentSessions ?? []).filter { $0.url != nil }.prefix(2)
-            var sessionY = cardRect.minY + 30
-            sessionRowRects = []
-            for session in sessions {
+            for session in planFooter.sessions {
                 let name = PanelView.projectDisplayName(session.project ?? session.sessionId)
-                drawTruncatedRight("↗ " + name, y: sessionY, right: cardRect.maxX - 66, maxWidth: 200,
-                                   font: .systemFont(ofSize: 10), color: accentColor)
-                drawRightAligned(PanelView.agoText(session.timestamp), y: sessionY, right: cardRect.maxX - 16,
-                                 font: .monospacedDigitSystemFont(ofSize: 9.5, weight: .medium), color: textTertiary)
-                sessionRowRects.append((rect: NSRect(x: contentLeft, y: sessionY - 4, width: contentWidth, height: 16),
+                drawUsageRow("↗ " + name, value: PanelView.agoText(session.timestamp), y: rowY,
+                             contentLeft: contentLeft, contentWidth: contentWidth,
+                             nameFont: .systemFont(ofSize: 10), nameColor: accentColor,
+                             valueFont: .monospacedDigitSystemFont(ofSize: 9.5, weight: .medium), valueColor: textTertiary)
+                sessionRowRects.append((rect: NSRect(x: contentLeft, y: rowY - 4, width: contentWidth, height: 16),
                                         url: URL(string: session.url!)!))
-                sessionY -= 16
+                rowY -= PlanUsageFooterContent.rowPitch
             }
         } else if planSlug != nil {
-            drawText("THIS PLAN · 30 DAYS", at: NSPoint(x: contentLeft, y: y + 24),
+            drawText("THIS PLAN · 30 DAYS", at: NSPoint(x: contentLeft, y: cardRect.minY + 22),
                      font: .systemFont(ofSize: 9, weight: .bold), color: textTertiary)
-            drawText("无本地用量记录", at: NSPoint(x: contentLeft, y: y + 6),
+            drawText("无本地用量记录", at: NSPoint(x: contentLeft, y: cardRect.minY + 4),
                      font: .systemFont(ofSize: 11), color: textTertiary)
         } else {
-            drawText("TOKEN USAGE · 30 DAYS", at: NSPoint(x: contentLeft, y: y + 24),
+            drawText("TOKEN USAGE · 30 DAYS", at: NSPoint(x: contentLeft, y: cardRect.minY + 38),
                      font: .systemFont(ofSize: 9, weight: .bold), color: textTertiary)
             var main = "总量 " + PanelView.shortNumber(usage?.totals?.totalTokens ?? 0)
             if let cost = usage?.totals?.estimatedCostUsd {
                 let snapped = (cost * 100).rounded() / 100
                 main += String(format: " · 估算 $%.2f", snapped)
             }
-            drawText(main, at: NSPoint(x: contentLeft, y: y + 6), font: numberFont, color: textPrimary)
+            drawText(main, at: NSPoint(x: contentLeft, y: cardRect.minY + 20), font: numberFont, color: textPrimary)
             let top = usage?.providerTotals.prefix(3).map { "\($0.provider) \(PanelView.shortNumber($0.tokens))" } ?? []
             if !top.isEmpty {
-                drawText(top.joined(separator: " · "), at: NSPoint(x: contentLeft, y: y - 10),
+                drawText(top.joined(separator: " · "), at: NSPoint(x: contentLeft, y: cardRect.minY + 4),
                          font: .systemFont(ofSize: 10), color: textSecondary)
             }
         }
@@ -602,9 +724,7 @@ final class PanelView: NSView {
                 if case .provider(let i) = page { return i == row.planIndex }
                 return false
             }) {
-                page = pageIndex
-                onSelect(page)
-                setNeedsDisplay(bounds)
+                showPage(pageIndex)
             }
             return
         }
@@ -626,15 +746,45 @@ final class PanelView: NSView {
         attr.draw(at: NSPoint(x: right - size.width, y: y))
     }
 
-    private func drawTruncatedRight(_ string: String, y: CGFloat, right: CGFloat, maxWidth: CGFloat,
-                                    font: NSFont, color: NSColor) {
-        let para = NSMutableParagraphStyle()
-        para.alignment = .right
-        para.lineBreakMode = .byTruncatingTail
-        let attr = NSAttributedString(string: string, attributes: [
-            .font: font, .foregroundColor: color, .paragraphStyle: para,
-        ])
-        attr.draw(in: NSRect(x: right - maxWidth, y: y, width: maxWidth, height: font.pointSize + 4))
+    /// 多行文本块：从 top（view 坐标里块的顶边）往下排，最多 maxLines 行。
+    /// drawText 的 maxWidth 版本把点当矩形底边、文字却从矩形顶边起排，只适合
+    /// 单行。
+    private func drawBlock(_ string: String, top: CGFloat, x: CGFloat, maxWidth: CGFloat, maxLines: Int,
+                           font: NSFont, color: NSColor) {
+        let attr = NSAttributedString(string: string, attributes: [.font: font, .foregroundColor: color])
+        let height = CGFloat(maxLines) * (font.pointSize + 4)
+        attr.draw(in: NSRect(x: x, y: top - height, width: maxWidth, height: height))
+    }
+
+    /// 用量明细行：名称左对齐，数值右对齐；先量数值宽度，名称按左侧剩余
+    /// 宽度截断。
+    private func drawUsageRow(_ name: String, value: String, y: CGFloat, contentLeft: CGFloat, contentWidth: CGFloat,
+                              nameFont: NSFont, nameColor: NSColor, valueFont: NSFont, valueColor: NSColor) {
+        let valueAttr = NSAttributedString(string: value, attributes: [.font: valueFont, .foregroundColor: valueColor])
+        let valueWidth = valueAttr.size().width
+        valueAttr.draw(at: NSPoint(x: contentLeft + contentWidth - valueWidth, y: y))
+        drawTruncated(name, x: contentLeft, y: y, maxWidth: contentWidth - valueWidth - 12,
+                      font: nameFont, color: nameColor)
+    }
+
+    /// 单行文本，超出 maxWidth 时尾部换成省略号。和 drawText 一样用 draw(at:)，
+    /// 同一行里与数值共用行盒底边，基线对齐。
+    private func drawTruncated(_ string: String, x: CGFloat, y: CGFloat, maxWidth: CGFloat, font: NSFont, color: NSColor) {
+        func attributed(_ text: String) -> NSAttributedString {
+            NSAttributedString(string: text, attributes: [.font: font, .foregroundColor: color])
+        }
+        var text = attributed(string)
+        guard text.size().width > maxWidth else {
+            text.draw(at: NSPoint(x: x, y: y))
+            return
+        }
+        var kept = Substring(string)
+        while !kept.isEmpty {
+            kept = kept.dropLast()
+            text = attributed(kept + "…")
+            if text.size().width <= maxWidth { break }
+        }
+        text.draw(at: NSPoint(x: x, y: y))
     }
 
     private func color(forStatus status: String) -> NSColor {
