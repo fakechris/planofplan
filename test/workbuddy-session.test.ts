@@ -6,7 +6,6 @@ import { Database } from 'bun:sqlite';
 import {
   extractWorkBuddySession,
   isWorkBuddySessionFile,
-  messagesFromWorkBuddyRecord,
   parseWorkBuddyHead,
   readWorkBuddyDbSessions,
   workBuddyNumericUsage,

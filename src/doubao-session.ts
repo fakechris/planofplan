@@ -19,7 +19,7 @@
  * 自研 footer→index→snappy→block 读取;.log(WAL)为明文直接扫。
  * 所有解析单点容错:任一文件/锚点失败跳过并记日志,不拖垮 daemon。
  */
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import type { SessionFileTouch, SessionRecord } from './types.ts';
@@ -63,10 +63,6 @@ export function snappyDecompress(data: Buffer): Buffer {
   const out = new Uint8Array(length);
   let written = 0;
   let pos = start;
-  const push = (byte: number): void => {
-    if (written >= length) throw new Error('snappy output overflow');
-    out[written++] = byte;
-  };
   while (pos < data.length) {
     const tag = data[pos++]!;
     const t = tag & 3;

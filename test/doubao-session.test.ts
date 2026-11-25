@@ -132,7 +132,6 @@ describe('doubao snappy / SSTable block 单元', () => {
 
   test('block entries:restart 数组定界 + 前缀压缩 key', () => {
     const key1 = Buffer.from('aaa');
-    const key2 = Buffer.from('aab'); // shares "aa"
     const val1 = Buffer.from('V1');
     const val2 = Buffer.from('V22');
     const body = Buffer.concat([
