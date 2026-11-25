@@ -128,7 +128,9 @@ daemon 在 `POST http://localhost:<port>/mcp` 提供只读 MCP（streamable HTTP
 - `message_search` 消息级搜索，返回稳定的 `SourceRef`（引用证据用）
 - `read_message` 按完整 `SourceRef` 读取消息快照（保留换行与代码块，`next_cursor` 续读；
   源日志已变化时返回 `STALE_SOURCE`）
-- `session_handoff` 导出会话或单个需求的交接包（保留需求范围与证据等级，可选附最近对话尾巴）
+- `session_handoff` 导出会话或单个需求的交接包（三段信封 INV-2168：Core 自包含摘要 /
+  References 显式引用清单（`@session:{…}` 带 source_revision、commit、文件路径）/ Excluded
+  排除项及原因（越界路径/URL 未物化），包尾附复述验收自检门；可选附最近对话附录）
 - `planofplan_search_skills` 跨本机 150+ coding agent skills 库快速检索与路由
 - `planofplan_project_context` 跨项目切换时的上下文透视（需求、落地 commits、活跃会话与 zg 语义索引就绪状态）
 - `planofplan_task_brief` 任务开始前的项目简报:给定项目与本次任务,组合相关历史需求
@@ -138,8 +140,11 @@ daemon 在 `POST http://localhost:<port>/mcp` 提供只读 MCP（streamable HTTP
   待审核候选需显式 `include_candidates` 且不作依据
 
 交接包（handoff）与 agent 产出文本中的会话指针统一为 `@session:{<sessionId>}`
-引用格式：后继 agent 拿到引用可直接调 `read_session` 深读，
+引用格式：后继 agent 拿到引用可直接调 `read_session` 深读（两跳：先取 `SourceRef`
+再 `read_message`，版本不符报 `STALE_SOURCE`），
 `repairHandoffReferences()` 对 LLM 常见的缺括号/全角括号畸形做容错修复。
+包是三段信封（借鉴 EGM GoldfishContext）：References 只携带引用不携带展开后的内容，
+引用解析出工作目录/仓库范围外的路径与未物化的 URL 一律进 Excluded 并写明原因。
 
 
 给 agent 的工具使用指南(何时用哪个工具、自指防护惯例):[`docs/skills/planofplan/SKILL.md`](docs/skills/planofplan/SKILL.md)。

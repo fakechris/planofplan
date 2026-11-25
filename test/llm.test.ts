@@ -76,15 +76,15 @@ describe('llmChat', () => {
 describe('handoff 摘要合成', () => {
   const pkg: HandoffPackage = {
     title: 't',
-    markdown: '# Handoff:t\n\n> meta\n\n## 目标\n\n做某事\n\n## 计划状态(最新快照)\n- x',
+    markdown: '# Handoff:t\n\n> meta\n\n## Core(自包含,零上下文可读)\n\n### 目标\n\n做某事\n\n#### 计划状态(最新快照)\n- x',
     defaultDir: null,
     sourceType: 'session',
     sourceId: 's1',
   };
 
-  test('withSummary:插在证据块之前,标 synthesized', () => {
+  test('withSummary:插在信封 Core 段之前,标 synthesized', () => {
     const out = withSummary(pkg, '综合现状如下。');
-    expect(out.markdown.indexOf('现状综合(AI 摘要')).toBeLessThan(out.markdown.indexOf('## 目标'));
+    expect(out.markdown.indexOf('现状综合(AI 摘要')).toBeLessThan(out.markdown.indexOf('## Core(自包含,零上下文可读)'));
     expect(out.markdown).toContain('综合现状如下。');
     expect(pkg.markdown).not.toContain('synthesized'); // 原包不变
   });
