@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Local dashboard for tracking usage/quota across AI coding-plan subscriptions",
+  "description": "Local insight hub for coding agents: multi-plan quota & token spend, cross-agent session index, session → requirement → commit lineage, read-only MCP",
   "scripts": {
     "serve": "bun src/cli.ts serve",
     "menubar:build": "./scripts/build-menubar.sh",
