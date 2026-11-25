@@ -1038,6 +1038,9 @@ export function usagePlanFor(provider: string, model: string): string | null {
   if (m.includes('minimax')) return 'minimax';
   if (m.startsWith('deepseek') || provider === 'dsh') return 'deepseek';
   if (provider === 'grok-cli') return 'grok';
+  // antigravity 来源的 model 是 ModelUsageStats 枚举号（如 "1423"），不是模型名，
+  // 模型名匹配永远兜不住；按 provider 归属。
+  if (provider === 'antigravity') return 'antigravity';
   if (m.startsWith('gpt') || provider === 'codex') return 'codex';
   // claude 壳是多租户入口：可经 router 跑任意第三方模型（实测有 MiniMax-M3、
   // glm-5.2 混在 provider=claude 下）。只有明确的 Anthropic 家族才归入

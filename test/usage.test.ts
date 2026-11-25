@@ -726,6 +726,24 @@ describe('usage byPlan 归属', () => {
     expect(report.byPlan[0]!.plan).toBe('deepseek');  // 按总量降序
     expect(plans.factory).toBeUndefined();            // 无归属数据不计入
   });
+
+  test('antigravity IDE 用量（model 为枚举号）归入 antigravity plan；dsh 上的 MiniMax 按模型名归 minimax', () => {
+    const base = { day: '2026-08-19', source: 'local' as const, confidence: 'measured' as const,
+      inputTokens: 0, cachedInputTokens: 0, cacheCreationInputTokens: 0, outputTokens: 0,
+      reasoningOutputTokens: 0, billableTokens: null, estimatedCostUsd: null, sourceFile: null };
+    const now = Date.now();
+    const records = [
+      { ...base, id: 'ag1', timestamp: now, provider: 'antigravity', model: '1423', totalTokens: 80 },
+      { ...base, id: 'ag2', timestamp: now, provider: 'antigravity', model: '2101', totalTokens: 40 },
+      { ...base, id: 'ds1', timestamp: now, provider: 'dsh', model: 'MiniMax-M3.1-Flash', totalTokens: 15 },
+    ];
+    const report = buildUsageReport(records, { since: now - 1000, until: now + 1000 });
+    const plans = Object.fromEntries(report.byPlan.map((row) => [row.plan, row]));
+    expect(plans.antigravity.totalTokens).toBe(120);
+    expect(plans.antigravity.topModels.map((row) => row.model)).toEqual(['1423', '2101']);
+    expect(plans.minimax.totalTokens).toBe(15);   // 模型名优先于 dsh 的 deepseek 兜底
+    expect(plans.deepseek).toBeUndefined();
+  });
 });
 
 describe('byPlan recentSessions 与 dsh 深链', () => {
