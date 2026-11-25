@@ -2,7 +2,7 @@
 
 **Goal**: `/Applications/planofplan.app` becomes portable. New machine flow = drag → double-click → 9291 alive. No `bun`, no `~/workspace/planofplan`, no Dashboard click.
 
-**Status**: Not Started
+**Status**: Implemented (B1–B5 landed in 3cfed53, 2026-08-24; V1 portable-machine verification not recorded)
 
 ## Stages
 

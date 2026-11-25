@@ -6,7 +6,18 @@
 
 两条产品线：**额度与消耗**（多 plan 配额 dashboard + macOS menubar，形态参考 CodexBar，架构参考 onWatch）是入口和钩子；**工作谱系**（session → 需求 → commit 的归因链）是主线。session 索引层设计参照 Obelisk 研究（[`docs/obelisk-session-research.md`](docs/obelisk-session-research.md)）。
 
-当前状态：**M2 额度轨** + **WG-M3 session 目录**（扫描本地 Claude / Codex / Grok / DSH 等日志，只读文件头，不复制原文。见 [`docs/work-graph-design.md`](docs/work-graph-design.md)）。
+**当前版本：[v0.1.0](https://github.com/fakechris/planofplan/releases/tag/v0.1.0)**（2026-11-24，首个公开 release，源码发布）
+
+| 里程碑 | 内容 | 状态 |
+|---|---|---|
+| M1 额度监控与多 Plan 配额底座 | 11 个订阅 adapter、多时间窗轮询、本地日志 token 聚合 + LiteLLM 价格快照、浏览器 Cookie 读取 | ✅ 已交付 |
+| M2 工作谱系与会话多源索引 | 14 家 agent 本地会话解析、行级水位增量扫描、文件监听 + SSE、星标/墓碑、消息级 FTS | ✅ 已交付 |
+| M3 需求抽取与 Commit 归因 | 仓库识别、文件触碰 × commit 启发式归因、commit trailer 声明通道、谱系周报 | ✅ 已交付 |
+| M4 只读 MCP 与 Agent 状态面 | 15 个只读 MCP 工具、`/api/agent-status` 实时状态、任务简报与交接包 | ✅ 已交付 |
+| M5 macOS 菜单栏与常驻守护 | Swift menubar app、launchd 自愈守护（默认关闭） | ✅ 已交付 |
+| M6 便携单二进制打包 | daemon 用 `bun build --compile` 内嵌进 app（连同 `web/` 静态资源），launchd 直接指向 bundle 内二进制，运行时不依赖 Bun 与仓库路径 | ✅ 已实现（app 仍需本机自签名构建，release 不附二进制） |
+
+session 索引只读 agent 原生日志（L0 不可变），索引库可随时删除重建。设计见 [`docs/work-graph-design.md`](docs/work-graph-design.md)。
 
 界面按 **Lumen Design System** 实现：Vault 深色默认、Atelier 浅色切换（`data-theme`），IBM Plex Sans/Mono 字体栈，4px 网格，额度阈值 75%/90% 染色。
 
@@ -32,10 +43,15 @@ bun run demo
 planofplan serve [--demo] [--port N]    启动守护进程 + Web dashboard
 planofplan usage [--json] [--provider sl] 全 plan 配额输出
 planofplan tokens [--json] [--days N] [--provider sl] token usage & spend 报表
-planofplan sessions [--json] [--days N] [--provider sl] 本地 session 目录（Claude/Codex/Grok/DSH…）
+planofplan sessions [--json] [--days N] [--provider sl] [--search q] [--refresh] 本地 session 目录
+planofplan skills [--json] [--search q] [--refresh] 本机 coding agent skills 目录
+planofplan pricing refresh|status        拉取 / 查看 LiteLLM 模型价格快照
+planofplan hook install [--repo 路径]    装 commit trailer 钩子（见下文 declared 归因）
+planofplan alerts [--usage N|off] [--balance N|off] 额度告警阈值（通知由 menubar 发出）
 planofplan status                        各 plan 调度/凭据/最近抓取状态
 planofplan refresh [slug]                手动刷新一个/全部 plan
-planofplan browser-auth                  只读取 Safari kimi-auth 并刷新 Kimi
+planofplan browser-auth                  读取 Safari kimi-auth 并刷新 Kimi（其他浏览器经 menubar 选择）
+planofplan factory-auth                  从 droid CLI 登录态导入 Factory 会话
 planofplan auth set <slug> --key <v>     存手动 key（credentials.json, 0600）
 planofplan auth set <slug> --auto        改回自动检测（env / CLI 凭据）
 planofplan auth clear <slug>             清掉手动 key
@@ -96,7 +112,7 @@ claude/droid hooks 文件、codex/kimi/zcode/grok 会话新鲜度、amp/agy 进�
 daemon 在 `POST http://localhost:<port>/mcp` 提供只读 MCP（streamable HTTP，
 无会话状态；Host 头校验同样生效）。被监控的 agent 可以反过来查配额与谱系——
 这是三家里没人做的错位面：agentsview/obelisk 的 agent 面是通用历史检索，
-这里集成配额、谱系、技能库与跨项目上下文。十个工具，全部带 `readOnlyHint`
+这里集成配额、谱系、技能库与跨项目上下文。十五个工具，全部带 `readOnlyHint`
 注解（受限客户端可自动放行）；列表类工具截断时尾部给出可执行改参建议：
 
 - `plan_quota_status` 各订阅的配额窗口与重置倒计时
@@ -109,8 +125,12 @@ daemon 在 `POST http://localhost:<port>/mcp` 提供只读 MCP（streamable HTTP
 - `requirement_status` 最近抽取的需求及其 commit 落地状态
 - `recent_edits` 最近被 agent 改动的文件流与关联会话
 - `lineage_report` 需求 × commit × token 消耗的谱系周报
-- `search_skills` 跨本机 150+ coding agent skills 库快速检索与路由
-- `inspect_project_context` 跨项目切换时的上下文透视（需求、落地 commits、活跃会话与 zg 语义索引就绪状态）
+- `message_search` 消息级搜索，返回稳定的 `SourceRef`（引用证据用）
+- `read_message` 按完整 `SourceRef` 读取消息快照（保留换行与代码块，`next_cursor` 续读；
+  源日志已变化时返回 `STALE_SOURCE`）
+- `session_handoff` 导出会话或单个需求的交接包（保留需求范围与证据等级，可选附最近对话尾巴）
+- `planofplan_search_skills` 跨本机 150+ coding agent skills 库快速检索与路由
+- `planofplan_project_context` 跨项目切换时的上下文透视（需求、落地 commits、活跃会话与 zg 语义索引就绪状态）
 - `planofplan_task_brief` 任务开始前的项目简报:给定项目与本次任务,组合相关历史需求
   (带 span commit 证据等级)、已审核经验卡、近期 commit、文件触碰流与 zg 状态;
   `exclude_session` 排除调用者自己
@@ -184,17 +204,11 @@ open /Applications/planofplan.app
 commit 的完整 SHA、短 SHA、构建时间和版本写入 app，并原子替换
 `/Applications/planofplan.app`。不要从 `dist` 启动旧副本。
 
-menubar app 会启动本地 Bun daemon，并提供查看用量、刷新全部 plan、打开 Dashboard，以及**选择一个浏览器**读取 Kimi/Factory 网页会话。
+menubar app 会启动 bundle 内编译好的 daemon（`Contents/MacOS/planofplan-daemon`，运行时无需 Bun），并提供查看用量、刷新全部 plan、打开 Dashboard，以及**选择一个浏览器**读取 Kimi/Factory 网页会话。
 
-浏览器读取不会自动遍历所有浏览器。每个浏览器的 Keychain 结果和 Kimi token 只在当前进程内存缓存，后台轮询不会再次弹出密码：
-
-```bash
-bun src/cli.ts browser-auth --browser firefox
-bun src/cli.ts browser-auth --browser chrome
-bun src/cli.ts browser-auth --browser comet
-bun src/cli.ts browser-auth --browser dia
-bun src/cli.ts browser-auth --browser safari
-```
+浏览器读取不会自动遍历所有浏览器：在 menubar 里选择 Safari / Chrome / Comet / Dia / Firefox
+之一。每个浏览器的 Keychain 结果和 Kimi token 只在当前进程内存缓存，后台轮询不会再次弹出密码。
+命令行入口 `bun src/cli.ts browser-auth` 只读取 Safari 的 kimi-auth 并刷新 Kimi。
 
 `menubar:build` 使用证书身份 `Lumen Local Codesign` 对 app 签名，并拒绝
 ad-hoc 签名。这样 Full Disk Access 的 TCC 授权绑定稳定的 Bundle ID /
@@ -273,7 +287,8 @@ launchctl print gui/$(id -u)/local.planofplan.daemon      # 查看守护状态
 
 - 日志在 `~/.planofplan/serve.log`（kimi Safari 授权警告每分钟追加约两行，注意定期
   `: > ~/.planofplan/serve.log` 清空）。
-- plist 记录的是仓库绝对路径，仓库移动/改名后需重新 `bun run daemon:install`。
+- plist 指向 `/Applications/planofplan.app/Contents/MacOS/planofplan-daemon`，与仓库位置无关；
+  重建 app 后 launchd 自动用新二进制。
 - 开启守护后不要再手动 `bun run serve`：默认端口不同（9288 vs 9291），会出现两个
   daemon 同时轮询并写同一个 SQLite 库。
 
@@ -290,6 +305,19 @@ PLANOFPLAN_BIND=100.x.y.z PLANOFPLAN_TOKEN=<至少 16 字符> bun src/cli.ts ser
 # 客户端每个请求带 Authorization: Bearer <token>；远程 Host 还需加入 PLANOFPLAN_ALLOWED_HOSTS
 ```
 
+## 出站代理（provider 级）
+
+本机出口访问某些额度端点受限时（如 Anthropic 区域封锁），可以只让指定 provider 的
+额度请求走 HTTP(S) 代理（支持 `http://user:pass@host:port` 认证），不改全局网络。
+解析优先级：
+
+1. Dashboard 该 plan 设置弹窗的「网络代理」（写入 plan 的 `extra.proxy`，`PUT /api/plans/:slug/proxy`）
+2. `~/.planofplan/config.json` 顶层 `"proxy": "http://..."`
+3. 环境变量 `PLANOFPPLAN_HTTP_PROXY`
+
+代理只影响 planofplan 自身的额度轮询；终端里的 agent CLI 仍需在 shell 设 `HTTPS_PROXY`。
+代理值可能含密码，任何日志与 API 都不回显（overview 只暴露 `proxyConfigured` 布尔）。
+
 ## 配置
 
 运行时状态全部在 `~/.planofplan/`（可用 `PLANOFPPLAN_HOME` 改）：
@@ -303,7 +331,7 @@ PLANOFPLAN_BIND=100.x.y.z PLANOFPLAN_TOKEN=<至少 16 字符> bun src/cli.ts ser
 ## 架构
 
 ```
-src/cli.ts        入口：serve / usage / status / refresh / auth / pricing
+src/cli.ts        入口：serve / usage / tokens / sessions / status / refresh / auth / pricing / hook / alerts
 src/core.ts       Scheduler（轮询/退避/stale，入口吞错）+ overview 组装
 src/db.ts         SQLite：plans / snapshots / usage_records / sessions / session_user_meta
 src/auth.ts       manual key 存取（0600）+ env 读取
@@ -311,8 +339,11 @@ src/adapters/     每 plan 一个 adapter：detectCredentials -> fetchUsage -> Q
 src/usage.ts      本地 JSONL scanner、token 去重、日期/model/provider 聚合
 src/pricing.ts    模型价格快照（LiteLLM 拉取 + 家族表兜底）
 src/sessions.ts   session 目录（catalog + 消息级索引 + 行级水位 + 墓碑过滤）
+src/*-session.ts  各 agent 会话 parser（amp / antigravity / devin / doubao / minimax-code / opencode …）
+src/commit-attribution.ts  会话 × commit 归因（declared / witness / 启发式分级）
+src/agent-status.ts        实时 agent 状态快照（/api/agent-status）
 src/watcher.ts    文件监听：根目录 recursive watch + 静默窗/maxWait 防抖
-src/mcp.ts        只读 MCP server（/mcp，五个配额/谱系工具）
+src/mcp.ts        只读 MCP server（/mcp，15 个配额/用量/会话/谱系/知识工具）
 src/official-usage.ts  Anthropic / Factory Analytics + 可选 Codex app-server usage
 web/              静态前端（无构建，vanilla JS + CSS；SSE 实时刷新）
 ```
@@ -321,7 +352,9 @@ adapter 接口见 `src/types.ts`。MiniMax 的端点/解析规格出处：CodexB
 
 各 agent 本地 session 格式的证据与坑（动 parser 前必读、动 parser 时必更）：[`docs/session-format-sources.md`](docs/session-format-sources.md)。
 
-## 覆盖矩阵与验证状态（2026-08-21）
+## 覆盖矩阵与验证状态（2026-11-24）
+
+### 额度 adapter
 
 | plan | adapter | 真机验证 | 备注 |
 |---|---|---|---|
@@ -333,22 +366,33 @@ adapter 接口见 `src/types.ts`。MiniMax 的端点/解析规格出处：CodexB
 | Grok | grok | ✅ | 读 `~/.grok/auth.json`；Credits 95%（实测，8/18 重登后；SuperGrok） |
 | Cursor legacy | cursor | ✅ | 读 `state.vscdb`；legacy 0/500（实测，本月已重置） |
 | Factory Droid | factory | ⏳ | 对齐 CodexBar：API key 走 `/api/billing/limits`，网页会话走 Factory cookie；Standard 5H/Week/Month + legacy Standard/Premium |
+| DeepSeek | deepseek | ✅ | `DEEPSEEK_API_KEY` → `/user/balance` 余额（真实币种，赠送/充值拆分）+ 峰谷时段提示 |
+| Antigravity CLI | agy | ✅ | 调 `agy -p "/usage"` 非交互取配额（零 token、不留会话），复用 agy 自身 Google 登录态 |
+| Devin | devin | ✅ | 读 Devin.app `state.vscdb` 会话 token（只读），轮询账户级周/日额度与 overage 余额 |
 
-## 已知限制（M2）
+### 本地会话与 token 来源
+
+session 目录覆盖 14 个 provider：Claude Code、Codex、Grok CLI、DSH、Kimi CLI、ZCode、
+Factory Droid、Antigravity、OpenCode、Amp、WorkBuddy、豆包（DoubaoWork）、MiniMax Code、Devin。
+其中 token 消耗能否入账取决于本地日志是否带可靠 usage，详见上文 Usage & Spend 说明；
+没有可靠 token 数据的来源显示 Unknown，不虚构。
+
+## 已知限制
 
 - GLM 待 API key：在 Dashboard 的 GLM 设置弹窗填写，或运行 `planofplan auth set glm --key <key>`；也可设置 `Z_AI_API_KEY` / `ZAI_API_KEY` / `BIGMODEL_API_KEY`
 - Factory 可设置 `FACTORY_API_KEY`、`~/.factory/.env` 或运行 `planofplan auth set factory --key <key>`；也可在 `app.factory.ai` 登录后通过 menubar 读取 Safari/Chromium/Firefox 的 Factory session cookie。接口与窗口语义对齐 CodexBar `docs/factory.md`，onWatch 当前没有 Factory adapter
 - Factory WorkOS refresh token 一次性轮换：daemon 维护自己的轮换链并写入 `~/.planofplan/factory-session.json`（跨重启存活），浏览器/CLI 各持独立链互不影响；只有 menubar 重读或 `planofplan factory-auth` 导入 droid CLI 登录态（`~/.factory/auth.v2.*`，AES-256-GCM，key 在 Keychain `Factory CLI`）才会切换/消耗对应来源的 token——导入 droid CLI 的链会让 CLI 下次要求重新登录，因此只作手动恢复入口，不做自动凭据源
-- Bun fetch 不读取 HTTP(S)_PROXY；Grok 等需要代理的端点建议用系统级 TUN/全局代理（M3 可加 CONNECT 隧道）
+- Bun fetch 不读取 shell 的 HTTP(S)_PROXY；需要代理的 provider 请用上文「出站代理」按 provider 配置
 - Kimi 月限额仅网页会话可取：menubar 会按 provider 自动读取所选浏览器；遵循 CodexBar 的 `desktopAuthToken()`/`importSession().authToken` 会话导入，不以 JWT `exp` 单独判断网页是否登出。Keychain 结果与 token 只在内存缓存，不遍历、不重复授权
 - Kimi CLI access_token 只有 15 分钟有效期：按 onWatch 规则在过期时自动调用 `auth.kimi.com/api/oauth/token`，并把轮换后的 access/refresh token 安全写回原 `kimi-code.json`；设 `KIMI_USE_REFRESH=0` 可关闭
 - Kimi 周额度接口按 100 计（97/100 = 剩余 3%）；5h 窗口接口无 used 字段，用 remaining 反推
-- 无 session 鉴权（仅监听 localhost；如部署到其他机器需自行加反向代理/密码）
+- 默认只监听回环地址、无鉴权；远程访问必须同时设 `PLANOFPLAN_BIND` + `PLANOFPLAN_TOKEN`（见上文）
+- release 只发源码：app 签名依赖本机自签证书 `Lumen Local Codesign`，需要在本机 `bun run menubar:build`
 - UI 的启停/授权开关写 db，重启后以 config.json 为准（文档见设计 §8）
 
 ## 测试
 
 ```bash
-bun test           # minimax 解析 + store 快照逻辑
+bun test           # 全量单元测试（adapter 解析、扫描器、归因、MCP、server 等）
 bun run typecheck  # tsc --noEmit
 ```
