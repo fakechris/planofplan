@@ -27,6 +27,7 @@ struct Plan: Decodable {
 }
 
 struct Window: Decodable {
+    let window: String?
     let label: String
     let used: Double?
     let total: Double?
@@ -387,18 +388,13 @@ final class PanelView: NSView {
         attr.draw(in: NSRect(x: rect.minX, y: rect.minY - 2, width: rect.width, height: rect.height))
     }
 
-    /// 总览页：按规范只展示最紧张的 3 个 plan 的完整窗口信息，其余折叠为摘要行。
     /// 总览页:全部 plan 统一紧凑行(状态点 + 名称 + 窗口标签 + 摘要值 +
-    /// 倒计时),按最紧窗口排序。不再区分「featured 3 富行 + 其余」,两套
-    /// 风格的割裂感比信息密度更伤;富信息在 provider 详情页。
+    /// 倒计时),优先展示周限额代表窗口(无周限额退回月限额 → 5H),按代表窗口
+    /// 已用百分比从高到低排序,DeepSeek 固定排最后。
     private func drawIndexPage(rows: [Int], top: CGFloat, contentLeft: CGFloat, contentWidth: CGFloat) {
         var y = top - 14
 
-        let sorted = rows.sorted { a, b in
-            let pa = plans[a].windows.compactMap { $0.effectivePercentage }.max() ?? 0
-            let pb = plans[b].windows.compactMap { $0.effectivePercentage }.max() ?? 0
-            return pa > pb
-        }
+        let sorted = PanelView.sortedIndexRows(rows, plans: plans)
 
         for (position, planIndex) in sorted.enumerated() {
             // 行下方的分隔线必须落在页脚分隔线（cardRect.minY + 54）之上，
@@ -413,10 +409,10 @@ final class PanelView: NSView {
             // 名称列最后按剩余宽度截断。旧实现用固定像素偏移(-46/-76)摆倒计时
             // 与标签,中文倒计时("19 小时 25 分后")或长标签("Standard 1M")一长
             // 就互相叠印(INV-2013)。
-            let tight = plan.windows.filter { $0.effectivePercentage != nil }
-                .max { ($0.effectivePercentage ?? 0) < ($1.effectivePercentage ?? 0) }
-            let balance = plan.windows.first(where: PanelView.isBalanceWindow)
-            let unlimited = plan.windows.contains { $0.note == "不限量" && $0.effectivePercentage == nil }
+            let primary = PanelView.representativeWindow(for: plan)
+            let balance = (primary == nil) ? plan.windows.first(where: PanelView.isBalanceWindow) : nil
+            let unlimited = (primary == nil && balance == nil)
+                && plan.windows.contains { $0.note == "不限量" && $0.effectivePercentage == nil }
 
             let valueFont = NSFont.monospacedDigitSystemFont(ofSize: 12.5, weight: .semibold)
             let smallFont = NSFont.systemFont(ofSize: 9.5)
@@ -424,9 +420,9 @@ final class PanelView: NSView {
 
             var value = "--"
             var valueColor = textTertiary
-            if let tight {
-                value = "\(Int(tight.effectivePercentage!.rounded()))%"
-                valueColor = color(forRemaining: 100 - tight.effectivePercentage!)
+            if let primary, let pct = primary.effectivePercentage {
+                value = "\(Int(pct.rounded()))%"
+                valueColor = color(forRemaining: 100 - pct)
             } else if let balance {
                 value = PanelView.windowValueText(balance)
                 valueColor = textPrimary
@@ -435,8 +431,8 @@ final class PanelView: NSView {
                 valueColor = okColor
             }
             let valueAttr = NSAttributedString(string: value, attributes: [.font: valueFont, .foregroundColor: valueColor])
-            let countdown = tight?.resetAt.map { PanelView.countdownText(until: $0) } ?? nil
-            let label = tight?.label ?? (balance != nil ? "余额" : nil)
+            let countdown = primary?.resetAt.map { PanelView.countdownText(until: $0) } ?? nil
+            let label = primary?.label ?? (balance != nil ? "余额" : nil)
             let valueWidth = valueAttr.size().width
             let countdownWidth = countdown.map { ($0 as NSString).size(withAttributes: [.font: smallFont]).width } ?? 0
             let labelWidth = label.map { ($0 as NSString).size(withAttributes: [.font: smallFont]).width } ?? 0
@@ -869,11 +865,114 @@ final class PanelView: NSView {
         return sym + body
     }
 
-    /// 总览紧凑行右侧的摘要值:最紧窗口的百分比 / 余额 / ∞ / --。
+    /// 是否为 DeepSeek plan(总览列表固定排在最后一行)。
+    nonisolated static func isDeepSeekPlan(_ plan: Plan) -> Bool {
+        plan.adapter == "deepseek" || plan.slug == "deepseek"
+    }
+
+    /// 总览行代表配额窗口选择:用于更长时间窗口的一览,优先周限额(Week),
+    /// 无有限周限额时退回月限额(Month / Requests / Credits)→ 5H,并排除次级限额:
+    /// - glm: 排除 mcp,有限 weekly 优先,legacy 周无限时取 rolling_5h (5H)
+    /// - factory (droid): 取 standard_weekly (Standard Week),兜底 standard_monthly / standard / standard_5h
+    /// - agy (antigravity): 取 gemini_weekly (Gemini Week),兜底 gemini_rolling_5h
+    /// - minimax: 排除 video_* 赠送车道,有限 weekly 优先,legacy 周无限时取 rolling_5h (5H)
+    /// - claude: 取主 weekly (Week,排除 weekly_fable 等子模型车道),兜底 monthly → rolling_5h
+    /// - cursor / 通用兜底: 主 weekly → monthly / requests / credits_period → rolling_5h → 首个有限百分比窗口
+    nonisolated static func representativeWindow(for plan: Plan) -> Window? {
+        let pctWindows = plan.windows.filter { $0.effectivePercentage != nil }
+        guard !pctWindows.isEmpty else { return nil }
+
+        func byId(_ ids: String...) -> Window? {
+            for id in ids {
+                if let match = pctWindows.first(where: { $0.window == id }) {
+                    return match
+                }
+            }
+            return nil
+        }
+
+        switch plan.adapter ?? plan.slug {
+        case "glm":
+            let main = pctWindows.filter { $0.window != "mcp" && $0.label.uppercased() != "MCP" }
+            if let hit = main.first(where: { $0.window == "weekly" })
+                ?? main.first(where: { $0.window == "monthly" })
+                ?? main.first(where: { $0.window == "rolling_5h" })
+                ?? main.first
+            {
+                return hit
+            }
+            return pctWindows.first
+
+        case "factory":
+            return byId("standard_weekly", "standard_monthly", "standard", "standard_5h")
+                ?? pctWindows.first(where: { $0.label.caseInsensitiveCompare("Standard Week") == .orderedSame })
+                ?? pctWindows.first
+
+        case "agy", "antigravity":
+            return byId("gemini_weekly", "gemini_rolling_5h")
+                ?? pctWindows.first(where: { $0.label.caseInsensitiveCompare("Gemini Week") == .orderedSame })
+                ?? byId("claude_gpt_weekly", "claude_gpt_rolling_5h")
+                ?? pctWindows.first
+
+        case "minimax":
+            let main = pctWindows.filter { w in
+                guard let id = w.window else { return !w.label.hasPrefix("视频") }
+                return !id.hasPrefix("video_")
+            }
+            return main.first(where: { $0.window == "weekly" })
+                ?? main.first(where: { $0.window == "monthly" })
+                ?? main.first(where: { $0.window == "rolling_5h" })
+                ?? main.first
+                ?? pctWindows.first
+
+        case "claude":
+            return byId("weekly", "monthly", "rolling_5h")
+                ?? pctWindows.first(where: { $0.label.caseInsensitiveCompare("Week") == .orderedSame })
+                ?? pctWindows.first
+
+        case "cursor":
+            return byId("weekly", "requests", "monthly", "rolling_5h")
+                ?? pctWindows.first
+
+        default:
+            return byId("weekly", "local_weekly", "extra_weekly", "monthly", "requests", "credits_period", "rolling_5h", "local_5h", "extra_5h")
+                ?? pctWindows.first(where: { ($0.window ?? "").hasSuffix("_weekly") })
+                ?? pctWindows.first(where: { ($0.window ?? "").hasSuffix("_monthly") })
+                ?? pctWindows.first(where: { ($0.window ?? "").hasSuffix("_5h") })
+                ?? pctWindows.first
+        }
+    }
+
+    /// 总览页行排序:DeepSeek 固定最后;其余优先排有百分比代表窗口的 plan(按百分比降序),
+    /// 再排余额/不限量/未配置等无百分比的 plan,同分保持原相对顺序。
+    nonisolated static func sortedIndexRows(_ rows: [Int], plans: [Plan]) -> [Int] {
+        rows.sorted { a, b in
+            let planA = plans[a]
+            let planB = plans[b]
+            let deepA = isDeepSeekPlan(planA)
+            let deepB = isDeepSeekPlan(planB)
+            if deepA != deepB { return !deepA }
+
+            let pctA = representativeWindow(for: planA)?.effectivePercentage
+            let pctB = representativeWindow(for: planB)?.effectivePercentage
+            switch (pctA, pctB) {
+            case let (pa?, pb?):
+                if pa != pb { return pa > pb }
+                return a < b
+            case (.some, nil):
+                return true
+            case (nil, .some):
+                return false
+            case (nil, nil):
+                return a < b
+            }
+        }
+    }
+
+    /// 总览紧凑行右侧的摘要值:代表窗口的百分比 / 余额 / ∞ / --。
     static func indexSummaryValue(for plan: Plan) -> String {
-        if let tight = plan.windows.filter({ $0.effectivePercentage != nil })
-            .max(by: { ($0.effectivePercentage ?? 0) < ($1.effectivePercentage ?? 0) }) {
-            return "\(Int(tight.effectivePercentage!.rounded()))%"
+        if let primary = representativeWindow(for: plan), let pct = primary.effectivePercentage {
+            return "\(Int(pct.rounded()))%"
         }
         if let balance = plan.windows.first(where: isBalanceWindow) {
             return windowValueText(balance)
