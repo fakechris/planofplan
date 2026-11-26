@@ -1,8 +1,11 @@
 export interface ScanRequest {
-  kind: 'sessions' | 'usage';
+  kind: 'sessions' | 'usage' | 'experience';
   days: number;
   source: string;
   includeOfficial?: boolean;
+  /** experience(INV-2169):安全门阈值与越门确认;days 不适用,沿用默认即可。 */
+  maxNodes?: number;
+  confirm?: boolean;
 }
 
 /** One scanner for the daemon, with at most one trailing request per kind. */
@@ -13,7 +16,12 @@ export class ScanQueue {
   enqueue(request: ScanRequest): void {
     const old = this.pending.get(request.kind);
     this.pending.set(request.kind, old ? {
-      ...request, days: Math.max(old.days, request.days), includeOfficial: old.includeOfficial || request.includeOfficial,
+      ...request,
+      days: Math.max(old.days, request.days),
+      includeOfficial: old.includeOfficial || request.includeOfficial,
+      maxNodes: old.maxNodes ?? request.maxNodes,
+      // 确认只能收紧不能放宽:排队期间一旦有人带 --yes,合并请求保持可越门
+      confirm: old.confirm || request.confirm,
     } : request);
     void this.drain();
   }

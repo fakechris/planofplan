@@ -27,6 +27,8 @@ import type {
   UsageRecord,
   UsageReport,
   UsageScanFile,
+  ExperienceNodeRecord,
+  ExperienceNodeSaveResult,
 } from './types.ts';
 import { buildUsageReport } from './usage.ts';
 import { nameOfUrl } from './repos.ts';
@@ -417,6 +419,30 @@ CREATE TABLE IF NOT EXISTS knowledge_cards (
   updated_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_knowledge_cards_repo ON knowledge_cards(repo, status, updated_at);
+-- 经验图谱节点(INV-2169,M8):path/summary/interface/invariants/side_effects
+-- 五元组。L1 可重建数据(与 session_user_meta 状态层隔离);同自然键
+-- (node_kind,path)至多一行 active(部分唯一索引),内容变更走 superseded
+-- 标记不删除;id 是内容指纹,内容回退会复活旧行。invariants 每条必须带
+-- ≥1 条可解析证据引用(校验在 experience-graph.ts,入库前唯一入口)。
+CREATE TABLE IF NOT EXISTS experience_nodes (
+  id TEXT PRIMARY KEY,
+  node_kind TEXT NOT NULL,
+  repo TEXT NOT NULL,
+  path TEXT NOT NULL,
+  parent_id TEXT,
+  summary TEXT NOT NULL,
+  summary_refined TEXT,
+  interface TEXT NOT NULL DEFAULT '[]',
+  invariants TEXT NOT NULL DEFAULT '[]',
+  side_effects TEXT NOT NULL DEFAULT '[]',
+  sources TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'active',
+  superseded_by TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_experience_nodes_active ON experience_nodes(node_kind, path) WHERE status = 'active';
+CREATE INDEX IF NOT EXISTS idx_experience_nodes_repo ON experience_nodes(repo, status, updated_at);
 `;
 
 interface SnapshotRow {
@@ -3089,6 +3115,117 @@ export class Store {
       else if (row.status === 'rejected') counts.rejected += 1;
     }
     return counts;
+  }
+
+  // ── 经验图谱节点(INV-2169)──────────────────────────────────────
+  // 幂等落库协议:id 是内容指纹(调用方算好传入)。同 id 已 active → unchanged;
+  // 同 id 曾存在但 superseded → 复活并接管 active 位;新 id → 当前的 active
+  // 同键行标记 superseded(不删除)后插入。断言的证据校验在 experience-graph.ts
+  // 的 saveExperienceNode(入库前唯一入口),Store 层信任已校验的入参。
+
+  private static readonly EXPERIENCE_NODE_COLUMNS = 'id, node_kind, repo, path, parent_id, summary, summary_refined, interface, invariants, side_effects, sources, status, superseded_by, created_at, updated_at';
+
+  private experienceNodeRowToRecord(row: {
+    id: string; node_kind: string; repo: string; path: string; parent_id: string | null;
+    summary: string; summary_refined: string | null; interface: string; invariants: string;
+    side_effects: string; sources: string; status: string; superseded_by: string | null;
+    created_at: number; updated_at: number;
+  }): ExperienceNodeRecord {
+    return {
+      id: row.id,
+      nodeKind: row.node_kind === 'index' ? 'index' : 'leaf',
+      repo: row.repo,
+      path: row.path,
+      parentId: row.parent_id,
+      summary: row.summary,
+      summaryRefined: row.summary_refined,
+      interface: JSON.parse(row.interface) as string[],
+      invariants: JSON.parse(row.invariants) as ExperienceNodeRecord['invariants'],
+      sideEffects: JSON.parse(row.side_effects) as string[],
+      sources: JSON.parse(row.sources) as Record<string, unknown>,
+      status: row.status === 'superseded' ? 'superseded' : 'active',
+      supersededBy: row.superseded_by,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  saveExperienceNode(node: Omit<ExperienceNodeRecord, 'createdAt' | 'updatedAt' | 'status' | 'supersededBy'>): ExperienceNodeSaveResult {
+    const now = Date.now();
+    const existing = this.db.query('SELECT status FROM experience_nodes WHERE id = ?').get(node.id) as { status: string } | undefined;
+    if (existing?.status === 'active') return { action: 'unchanged', id: node.id };
+    try {
+      this.db.exec('BEGIN');
+      // 先让位:同自然键的当前 active 行标 superseded(superseded 不删除)。
+      // 必须先让位再激活/插入——部分唯一索引 (node_kind,path) WHERE active
+      // 逐语句生效,顺序反了会撞唯一约束。
+      this.db.query(
+        `UPDATE experience_nodes SET status = 'superseded', superseded_by = ?, updated_at = ?
+         WHERE node_kind = ? AND path = ? AND status = 'active' AND id != ?`,
+      ).run(node.id, now, node.nodeKind, node.path, node.id);
+      if (existing?.status === 'superseded') {
+        // 复活:同 id 的 superseded 行翻回 active(id=内容指纹,内容必相同;
+        // summary_refined 等派生列保留)
+        this.db.query('UPDATE experience_nodes SET status = \'active\', superseded_by = NULL, parent_id = ?, updated_at = ? WHERE id = ?')
+          .run(node.parentId, now, node.id);
+      } else {
+        this.db.query(
+          `INSERT INTO experience_nodes (id, node_kind, repo, path, parent_id, summary, summary_refined, interface, invariants, side_effects, sources, status, superseded_by, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', NULL, ?, ?)`,
+        ).run(
+          node.id, node.nodeKind, node.repo, node.path, node.parentId, node.summary, node.summaryRefined,
+          JSON.stringify(node.interface ?? []), JSON.stringify(node.invariants ?? []),
+          JSON.stringify(node.sideEffects ?? []), JSON.stringify(node.sources ?? {}), now, now,
+        );
+      }
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+    const wasDisplaced = this.db.query(
+      'SELECT id FROM experience_nodes WHERE superseded_by = ? AND id != ?',
+    ).get(node.id, node.id) as { id: string } | undefined;
+    if (existing?.status === 'superseded') return { action: 'resurrected', id: node.id };
+    return { action: wasDisplaced ? 'superseded' : 'created', id: node.id };
+  }
+
+  listExperienceNodes(filter: {
+    repo?: string;
+    nodeKind?: 'leaf' | 'index';
+    includeSuperseded?: boolean;
+    limit?: number;
+  } = {}): ExperienceNodeRecord[] {
+    const where: string[] = [];
+    const params: Array<string | number> = [];
+    if (!filter.includeSuperseded) where.push(`status = 'active'`);
+    if (filter.repo) {
+      where.push('repo = ?');
+      params.push(filter.repo);
+    }
+    if (filter.nodeKind) {
+      where.push('node_kind = ?');
+      params.push(filter.nodeKind);
+    }
+    const sql = `SELECT ${Store.EXPERIENCE_NODE_COLUMNS} FROM experience_nodes`
+      + (where.length > 0 ? ` WHERE ${where.join(' AND ')}` : '')
+      + ' ORDER BY updated_at DESC LIMIT ?';
+    params.push(Math.min(200, Math.max(1, filter.limit ?? 50)));
+    const rows = this.db.query(sql).all(...params) as Parameters<Store['experienceNodeRowToRecord']>[0][];
+    return rows.map((row) => this.experienceNodeRowToRecord(row));
+  }
+
+  experienceNodeById(id: string): ExperienceNodeRecord | null {
+    const row = this.db.query(`SELECT ${Store.EXPERIENCE_NODE_COLUMNS} FROM experience_nodes WHERE id = ?`)
+      .get(id) as Parameters<Store['experienceNodeRowToRecord']>[0] | undefined;
+    return row ? this.experienceNodeRowToRecord(row) : null;
+  }
+
+  /** LLM 精炼落库(''=已尝试无精炼,null 由 SQL 置 NULL 表示未尝试→重试)。 */
+  setExperienceSummaryRefined(id: string, text: string): boolean {
+    const result = this.db.query('UPDATE experience_nodes SET summary_refined = ?, updated_at = ? WHERE id = ?')
+      .run(text, Date.now(), id);
+    return result.changes > 0;
   }
 
   todoSnapshotsForSession(sessionId: string): TodoSnapshotRecord[] {

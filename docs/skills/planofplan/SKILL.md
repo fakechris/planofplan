@@ -38,6 +38,11 @@ triggers:
 - **周期回顾**:"这周做了什么、落了多少、各烧多少" → `lineage_report`
 - **查技能能力**:"怎么整理 Obsidian 知识库" "用什么 skill 生成 PPT/画架构图" "找找有没有关于 X 的 skill" → `search_skills`
 - **项目切换透视**:"切换到 X 项目" "了解一下这个项目背景" "这个项目代码索引建了没有" → `inspect_project_context`
+- **仓库经验图谱**:"这个仓库踩过什么坑" "有哪些约束和决定" → `experience_graph`
+  (五元组节点:summary 是需求原话零捏造;断言每条带证据引用与等级,
+  无证据不入库;引用指向隐藏会话的断言已滤除)。经验卡原文用
+  `knowledge_query`;图谱尚未合成时提示用户跑
+  `planofplan experience --refresh`。
 
 ## 惯例与坑
 

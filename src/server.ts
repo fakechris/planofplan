@@ -135,10 +135,34 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
   const spawnScan = options.spawnScan ?? ((args: string[]) => spawnSelf(args));
   const scanQueue = new ScanQueue(async (request) => {
     if (request.kind === 'usage') await runUsageRefresh(request.days, request.includeOfficial ?? false, request.source);
+    else if (request.kind === 'experience') await runExperienceSynthesis(request.source, request.maxNodes, request.confirm ?? false);
     else await runSessionIndex(request.days, request.source);
   }, (error) => console.error('[scan] failed:', error instanceof Error ? error.message : String(error)));
   const startUsageRefresh = (days: number, includeOfficial: boolean, source = 'page'): void => {
     scanQueue.enqueue({ kind: 'usage', days, includeOfficial, source });
+  };
+  // 经验图谱合成(INV-2169):单飞子进程,与 sessions/usage 共用一条队列,
+  // 不阻塞 SSE/HTTP;合成本身写 L1(experience_nodes),不触碰 L0。
+  const experienceSynthLast: { at: number | null; source: string | null } = { at: null, source: null };
+  let experienceSynthError: string | null = null;
+  const startExperienceSynthesis = (source: string, maxNodes?: number, confirm = false): void => {
+    scanQueue.enqueue({ kind: 'experience', days: 0, source, maxNodes, confirm });
+  };
+  const runExperienceSynthesis = async (source: string, maxNodes: number | undefined, confirm: boolean): Promise<void> => {
+    experienceSynthError = null;
+    try {
+      const args = ['experience', '--refresh', ...(maxNodes != null ? ['--max-nodes', String(maxNodes)] : []), ...(confirm ? ['--yes'] : [])];
+      const child = spawnScan(args);
+      const exitCode = await child.exited;
+      if (exitCode !== 0) experienceSynthError = `经验图谱合成失败（exit ${exitCode}）`;
+      else {
+        experienceSynthLast.at = Date.now();
+        experienceSynthLast.source = source;
+        broadcastSSE('experience-synthesized', { at: experienceSynthLast.at, source });
+      }
+    } catch (error) {
+      experienceSynthError = error instanceof Error ? error.message : '经验图谱合成失败';
+    }
   };
   const runUsageRefresh = async (days: number, includeOfficial: boolean, source = 'page'): Promise<void> => {
     usageRefreshError = null;
@@ -1200,6 +1224,28 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
         limit: Number(c.req.query('limit') ?? 50) || 50,
       }),
       counts: store.knowledgeCardCounts(),
+    });
+  });
+
+  // ── 经验图谱(INV-2169):合成经 scanQueue 单飞子进程;节点只读直查 ──
+
+  app.get('/api/experience/nodes', (c) => {
+    const includeSuperseded = c.req.query('include_superseded') === '1' || c.req.query('include_superseded') === 'true';
+    const repo = c.req.query('repo')?.trim() || undefined;
+    return c.json({
+      ok: true,
+      nodes: store.listExperienceNodes({ repo, includeSuperseded, limit: 100 }),
+      lastSynthesis: experienceSynthLast,
+      error: experienceSynthError,
+    });
+  });
+
+  app.post('/api/experience/synthesize', (c) => {
+    // 有 body 就解析,无 body 也允许(默认参数触发)
+    return c.req.json().catch(() => ({})).then((raw: { maxNodes?: number; confirm?: boolean } | null) => {
+      const maxNodes = Number.isInteger(raw?.maxNodes) && (raw!.maxNodes as number) > 0 ? raw!.maxNodes as number : undefined;
+      startExperienceSynthesis('page', maxNodes, raw?.confirm === true);
+      return c.json({ ok: true, queued: true, maxNodes: maxNodes ?? 15, confirm: raw?.confirm === true });
     });
   });
 

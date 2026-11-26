@@ -692,3 +692,57 @@ export interface KnowledgeCardRecord {
   createdAt: number;
   updatedAt: number;
 }
+
+// ── 经验图谱节点(INV-2169,M8;借鉴 EGM bootstrap 五元组契约)────────
+
+/** 证据等级:reviewed=知识卡人工审核;declared/witnessed/candidate=commit 归因三档。 */
+export type ExperienceEvidenceLevel = 'declared' | 'witnessed' | 'candidate' | 'reviewed';
+
+export interface ExperienceEvidence {
+  /** 可解析证据引用:@session:{…} / pop:… / req:… / inv:INV-N / ovp://… / commit sha(7-40 hex) / URL。 */
+  ref: string;
+  level: ExperienceEvidenceLevel;
+}
+
+export interface ExperienceInvariant {
+  /** 断言文本;每条必须带 ≥1 条证据引用,无证据断言拒绝入库。 */
+  text: string;
+  evidence: ExperienceEvidence[];
+}
+
+export type ExperienceNodeKind = 'leaf' | 'index';
+
+export interface ExperienceNodeRecord {
+  /** 内容指纹 id(expv:<hash>);同 id 幂等,内容回退复活旧行。 */
+  id: string;
+  nodeKind: ExperienceNodeKind;
+  /** 仓库键(url 或名称,与 session_repos/knowledge_cards 对齐)。 */
+  repo: string;
+  /** leaf:需求 id 锚;index:仓库键本身。 */
+  path: string;
+  /** 父节点逻辑键(index 行为 exp-index:<repo>),稳定于内容变更,非行 id。 */
+  parentId: string | null;
+  /** 自包含摘要(需求原话/聚合事实;零捏造)。 */
+  summary: string;
+  /** LLM 可选精炼(镜像 requirements.refined_text);空串=已尝试无精炼,null=未尝试。 */
+  summaryRefined: string | null;
+  /** 对外接触面:文件路径(仓库相对)/工具名。 */
+  interface: string[];
+  invariants: ExperienceInvariant[];
+  /** 观察到的行为副作用(commit 摘要等,带等级标注)。 */
+  sideEffects: string[];
+  /** 内容来源指纹(稳定标识,不含时间戳),参与幂等比较。 */
+  sources: Record<string, unknown>;
+  status: 'active' | 'superseded';
+  supersededBy: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** saveExperienceNode 的落库结果动作。 */
+export type ExperienceNodeSaveAction = 'created' | 'superseded' | 'unchanged' | 'resurrected';
+
+export interface ExperienceNodeSaveResult {
+  action: ExperienceNodeSaveAction;
+  id: string;
+}
