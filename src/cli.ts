@@ -22,6 +22,7 @@ import { sessionProject } from './repos.ts';
 import { searchSkills, syncSkillsCatalog } from './skills.ts';
 import { rotateServeLogIfNeeded } from './serve-log.ts';
 import { DEFAULT_ALERT_SETTINGS } from './quota-alerts.ts';
+import { synthesizeExperienceGraph, refineExperienceSummaries } from './experience-graph.ts';
 
 const argv = process.argv.slice(2);
 
@@ -46,6 +47,7 @@ function help(): void {
   planofplan usage [--json] [--provider sl] 全 plan 用量输出
   planofplan tokens [--json] [--days N] [--provider sl] token usage & spend 报表
   planofplan sessions [--json] [--days N] [--provider sl] [--search q] [--refresh] 本地 session 目录
+  planofplan experience [--refresh] [--max-nodes N] [--yes]  经验图谱节点(合成/列表;超阈值需 --yes)
   planofplan skills [--json] [--search q] [--refresh] 本机 150+ coding agent skills 目录
   planofplan pricing refresh                拉取 LiteLLM 模型价格快照(离线时用内置家族表估算)
   planofplan hook install [--repo 路径]     装 commit trailer 钩子(agent 提交自动声明 session)
@@ -143,6 +145,35 @@ async function sessionsCmd(): Promise<void> {
     console.log(`  ${session.provider}  ${title}  · ${project}  · ${formatTokens(session.totalTokens)}`);
   }
   if (list.sessions.length > 40) console.log(`  … ${list.sessions.length - 40} more`);
+}
+
+// ── 经验图谱(INV-2169):合成走独立子进程(daemon 经 scanQueue 单飞派发)──
+
+async function experienceCmd(): Promise<void> {
+  const args = new Set(argv.slice(1));
+  const refresh = args.has('--refresh');
+  const confirm = args.has('--yes');
+  let maxNodes = 15;
+  const maxIndex = argv.indexOf('--max-nodes');
+  if (maxIndex > 0) maxNodes = Math.max(1, Number(argv[maxIndex + 1] ?? 15) || 15);
+  const f = flags();
+  const store = openDb(f.db ?? join(ensureHome(), 'planofplan.db'));
+  syncStore(store, loadConfig());
+  try {
+    if (!refresh) {
+      console.log(JSON.stringify({ ok: true, nodes: store.listExperienceNodes({ limit: 100 }) }, null, 2));
+      return;
+    }
+    const result = synthesizeExperienceGraph(store, { maxNodes, confirm });
+    // LLM 精炼与合成同进程同轮(opt-in;失败只影响 summary_refined,不影响节点)
+    const cfg = loadConfig();
+    const refined = cfg.llm?.provider
+      ? await refineExperienceSummaries(store, cfg.llm as never, { limit: 8 })
+      : { attempted: 0, refined: 0, skipped: '未配置 LLM' };
+    console.log(JSON.stringify({ ok: true, synthesis: result, refined }, null, 2));
+  } finally {
+    store.close();
+  }
 }
 
 function formatTokens(value: number): string {
@@ -578,6 +609,9 @@ switch (cmd) {
     break;
   case 'sessions':
     await sessionsCmd();
+    break;
+  case 'experience':
+    await experienceCmd();
     break;
   case 'pricing':
     await pricingCmd();

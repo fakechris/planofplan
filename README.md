@@ -136,6 +136,10 @@ daemon 在 `POST http://localhost:<port>/mcp` 提供只读 MCP（streamable HTTP
   `exclude_session` 排除调用者自己
 - `knowledge_query` 查询已人工审核且未过期的经验卡(约束/决定/失败尝试,INV-485);
   待审核候选需显式 `include_candidates` 且不作依据
+- `experience_graph` 查询研发经验图谱节点（INV-2169，M8）：仓库 index 与需求簇 leaf
+  的五元组契约（path/summary/interface/invariants/side_effects），断言每条带可解析
+  证据引用与等级（无证据不入库）；合成走 `planofplan experience --refresh`
+  （单飞子进程，超 15 节点安全门需 `--yes`）
 
 交接包（handoff）与 agent 产出文本中的会话指针统一为 `@session:{<sessionId>}`
 引用格式：后继 agent 拿到引用可直接调 `read_session` 深读，
