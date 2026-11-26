@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openMemoryDb } from '../src/db.ts';
 import { buildHandoffPackage, deliverHandoff, extractSessionRefs, repairHandoffReferences, sessionRef } from '../src/handoff.ts';
+import { handleMcpBody } from '../src/mcp.ts';
 import { createServer } from '../src/server.ts';
 import { DEFAULT_PLANS } from '../src/config.ts';
 import { materializePlanFiles, materializeProgressNotes, materializeTodoSnapshots } from '../src/plans.ts';
@@ -177,6 +178,154 @@ describe('会话引用协议(@session:{id})', () => {
     const canonical = `规范 ${sessionRef('claude:abc')} 与句尾 ${sessionRef('claude:def')}.`;
     expect(repairHandoffReferences(canonical)).toBe(canonical);
     expect(extractSessionRefs(canonical)).toEqual(['claude:abc', 'claude:def']);
+  });
+});
+
+describe('交接信封三段结构(INV-2168)', () => {
+  const CORE_HEADER = '## Core(自包含,零上下文可读)';
+  const REFERENCES_HEADER = '## References(显式引用清单,由收包方逐跳展开)';
+  const EXCLUDED_HEADER = '## Excluded(排除项及原因)';
+
+  /** 信封用 fixture:需求文本带 URL 与跨系统引用;触碰含越界路径;边界 = cwd + /repo/e。 */
+  async function envelopeStore(root: string) {
+    const store = openMemoryDb();
+    const t0 = Date.now() - 60_000;
+    store.upsertSessions([session({ id: 'claude:e1', provider: 'claude', nativeId: 'e1', cwd: root, updatedAt: t0 + 5000 })]);
+    store.replaceSessionRepos('claude:e1', [
+      { sessionId: 'claude:e1', role: 'work', url: 'git@x:e.git', root: '/repo/e', name: 'e', evidenceKind: 'observed' },
+    ]);
+    store.upsertSessionMessages([
+      msg({ id: 'e1', sessionId: 'claude:e1', seq: 1, role: 'user', text: '按 https://example.com/spec 分组设置页,关联 inv:INV-2166 与 ovp://source/abc123,依据 pop:claude:e1#e1@sha256:dead', timestamp: t0 }),
+      msg({ id: 'e2', sessionId: 'claude:e1', seq: 5, role: 'assistant', text: '分组完成,提交为 beefcafe。', timestamp: t0 + 1000 }),
+    ]);
+    store.upsertSessionTouches([
+      { id: 'et1', sessionId: 'claude:e1', provider: 'claude', filePath: join(root, 'task_plan.md'), toolName: 'Edit', op: 'edit', ts: t0 + 500, ordinal: 3000 },
+      { id: 'et2', sessionId: 'claude:e1', provider: 'claude', filePath: '/elsewhere/outside.md', toolName: 'Edit', op: 'edit', ts: t0 + 600, ordinal: 3001 },
+    ]);
+    store.upsertSessionCommits([{
+      sessionId: 'claude:e1', repo: 'git@x:e.git', sha: 'beefcafebeef', kind: 'declared',
+      ts: t0 + 3000, summary: 'feat: grouped settings', fileOverlap: true, pushed: true,
+    }]);
+    materializeRequirements(store);
+    return store;
+  }
+
+  test('三段结构存在;会话行带 source_revision;引用可反解;core 不含内联引用', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'planofplan-envelope-'));
+    try {
+      const store = await envelopeStore(root);
+      const pkg = buildHandoffPackage(store, 'session', 'claude:e1', LINK)!;
+      const core = pkg.markdown.slice(pkg.markdown.indexOf(CORE_HEADER), pkg.markdown.indexOf(REFERENCES_HEADER));
+      expect(pkg.markdown).toContain(CORE_HEADER);
+      expect(pkg.markdown).toContain(REFERENCES_HEADER);
+      expect(pkg.markdown).toContain(EXCLUDED_HEADER);
+      // 段序:Core → References → Excluded → (尾对话仅显式预算) → 复述验收
+      expect(pkg.markdown.indexOf(CORE_HEADER)).toBeLessThan(pkg.markdown.indexOf(REFERENCES_HEADER));
+      expect(pkg.markdown.indexOf(REFERENCES_HEADER)).toBeLessThan(pkg.markdown.indexOf(EXCLUDED_HEADER));
+      // 会话引用行带会话级 source_revision,且可被 extractSessionRefs 反解
+      expect(pkg.markdown).toContain(`source_revision=sha256:`);
+      expect(pkg.markdown).toContain(sessionRef('claude:e1'));
+      expect(extractSessionRefs(pkg.markdown)).toContain('claude:e1');
+      // commit 行带证据等级
+      expect(pkg.markdown).toContain('[declared]');
+      // core 段不含内联引用内容:无会话引用、无深链、无 commit sha
+      // (需求原话里的 URL 属于意图文本的一部分,保留原样;物化与否由 Excluded 声明)
+      expect(core).not.toContain('@session:{');
+      expect(core).not.toContain(LINK);
+      expect(core).not.toContain('beefcafe');
+      // 跨系统引用进 References 作为可寻址条目(需求原话里的引用按合同原样保留在 Core,
+      // 不改写不脱链;References 负责让收包方逐条展开)
+      const references = pkg.markdown.slice(pkg.markdown.indexOf(REFERENCES_HEADER), pkg.markdown.indexOf(EXCLUDED_HEADER));
+      expect(references).toContain('inv:INV-2166');
+      expect(references).toContain('ovp://source/abc123');
+      expect(references).toContain('pop:claude:e1');
+      store.close();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('越界路径与未物化 URL 进 Excluded 并带原因;深链作为引用在 References', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'planofplan-envelope-oob-'));
+    try {
+      const store = await envelopeStore(root);
+      const pkg = buildHandoffPackage(store, 'session', 'claude:e1', LINK)!;
+      const references = pkg.markdown.slice(pkg.markdown.indexOf(REFERENCES_HEADER), pkg.markdown.indexOf(EXCLUDED_HEADER));
+      const excluded = pkg.markdown.slice(pkg.markdown.indexOf(EXCLUDED_HEADER));
+      // 边界内文件进 References
+      expect(references).toContain(join(root, 'task_plan.md'));
+      expect(references).not.toContain('/elsewhere/outside.md');
+      // 越界路径进 Excluded 且写明原因与边界根
+      expect(excluded).toContain('/elsewhere/outside.md');
+      expect(excluded).toContain('越界');
+      expect(excluded).toContain(root);
+      // 未物化 URL 进 Excluded;深链(导出方生成的)留在 References 并标注自行展开
+      expect(excluded).toContain('https://example.com/spec');
+      expect(excluded).toContain('URL 引用未物化');
+      expect(references).toContain(LINK);
+      expect(references).toContain('由收包方自行展开');
+      store.close();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('复述验收模板固定在包尾;默认无尾对话,尾对话(显式预算)在信封之外', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'planofplan-envelope-gate-'));
+    try {
+      const store = await envelopeStore(root);
+      const plain = buildHandoffPackage(store, 'session', 'claude:e1', LINK)!.markdown;
+      expect(plain).toContain('## 复述验收');
+      expect(plain).toContain('What this proposes');
+      expect(plain).toContain('How the current system works');
+      expect(plain.indexOf(EXCLUDED_HEADER)).toBeLessThan(plain.indexOf('## 复述验收'));
+      // 默认(不给 tailChars)包内没有可由引用恢复的尾对话
+      expect(plain).not.toContain('## 最近对话');
+      expect(plain).not.toContain('分组完成,提交为'); // assistant 原文不内联
+      const tailed = buildHandoffPackage(store, 'session', 'claude:e1', LINK, { tailChars: 4000 })!.markdown;
+      expect(tailed).toContain('## 最近对话');
+      // 尾对话在信封三段之后、复述验收之前(信封之外的附录)
+      expect(tailed.indexOf(EXCLUDED_HEADER)).toBeLessThan(tailed.indexOf('## 最近对话'));
+      expect(tailed.indexOf('## 最近对话')).toBeLessThan(tailed.indexOf('## 复述验收'));
+      store.close();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('两出口一致:MCP session_handoff 与 HTTP /api/handoff 都带三段与复述门', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'planofplan-envelope-exits-'));
+    try {
+      const store = await envelopeStore(root);
+      const mcp = handleMcpBody(store, { port: 9291, plans: [] }, {
+        jsonrpc: '2.0', id: 1, method: 'tools/call',
+        params: { name: 'session_handoff', arguments: { session_id: 'claude:e1' } },
+      }) as { result?: { content: Array<{ text: string }> } };
+      const mcpText = mcp.result!.content[0]!.text;
+      for (const marker of [CORE_HEADER, REFERENCES_HEADER, EXCLUDED_HEADER, '## 复述验收', 'source_revision=sha256:']) {
+        expect(mcpText).toContain(marker);
+      }
+      const server = createServer(store, scheduler as never, { port: 9291, plans: DEFAULT_PLANS });
+      const http = await (await server.request('http://localhost/api/handoff/session/claude:e1')).json() as { markdown: string };
+      for (const marker of [CORE_HEADER, REFERENCES_HEADER, EXCLUDED_HEADER, '## 复述验收', 'source_revision=sha256:']) {
+        expect(http.markdown).toContain(marker);
+      }
+      store.close();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('隐藏会话仍整包拒绝(信封不放松 INV-277 边界)', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'planofplan-envelope-hidden-'));
+    try {
+      const store = await envelopeStore(root);
+      store.setSessionHidden('claude:e1', true);
+      expect(buildHandoffPackage(store, 'session', 'claude:e1', LINK)).toBeNull();
+      store.close();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

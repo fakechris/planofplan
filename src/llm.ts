@@ -133,9 +133,9 @@ export async function llmChat(args: {
 }
 
 const SYNTH_SYSTEM = [
-  '你是交接助手。输入是一个从本地观测系统导出的交接证据包(markdown),',
-  '内容包含:目标(需求原文)、计划状态(阶段/勾选)、agent 自报进展(Todo/总结,可能不准)、',
-  '产出 commit、涉及文件、相关会话。',
+  '你是交接助手。输入是一个从本地观测系统导出的交接包(markdown,三段信封:Core/References/Excluded),',
+  'Core 内容包含:目标(需求原文)、计划状态(阶段/勾选)、agent 自报进展(Todo/总结,可能不准)、',
+  '证据等级摘要;References 是显式引用清单(commit/会话/文件),Excluded 是排除项。',
   '请写一段 ≤300 字的「现状综合」,给接手的工程师/agent 看:',
   '1) 这个工作在做什么、进行到哪一步;2) 已经确定了什么;',
   '3) 明显的缺口/风险(注意自报与 commit 可能不一致);4) 建议的下一步(最多 3 条)。',
@@ -161,9 +161,9 @@ export async function synthesizeHandoffSummary(
   return result.content;
 }
 
-/** 把摘要头插到证据块之前(## 目标 前),标 synthesized。 */
+/** 把摘要头插到信封 Core 段之前(## Core 前),标 synthesized。 */
 export function withSummary(pkg: HandoffPackage, summary: string): HandoffPackage {
-  const marker = '\n## 目标\n';
+  const marker = '\n## Core(自包含,零上下文可读)\n';
   const at = pkg.markdown.indexOf(marker);
   if (at < 0) return pkg;
   const section = `\n## 现状综合(AI 摘要 · synthesized,非证据)\n\n${summary.trim()}\n`;

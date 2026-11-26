@@ -26,6 +26,12 @@ triggers:
   页尾的 `Use offset=N to continue` 是机械续读协议——按指示翻页即可;
   截断告知不是错误。`role=user` 只看用户原话,`role=assistant` 只看模型回复。
   交接文本里的 `@session:{<id>}` 引用可直接作为 session_id 使用。
+- **接手交接包**:`session_handoff` 导出的是三段信封——Core(自包含摘要,
+  零上下文可读)/ References(显式引用清单,带 source_revision)/ Excluded
+  (排除项及原因)。包尾有复述验收门:改动前先复述 "What this proposes" 与
+  "How the current system works" 并交回核对,复述有偏差就是包缺陷。
+  References 里的引用逐跳展开,不要一次性全读;内容版本不符会报 STALE_SOURCE,
+  此时重新检索而不是沿用旧内容。
 - **repo 脉络**:"这个 repo 最近做了什么" "X 需求落了没有" → `repo_lineage`
 - **需求清单**:"最近提了哪些需求" "哪些还没落" → `requirement_status`
 - **文件动向**:"最近 agent 都在改什么文件" → `recent_edits`
