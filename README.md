@@ -124,7 +124,9 @@ daemon 在 `POST http://localhost:<port>/mcp` 提供只读 MCP（streamable HTTP
 - `repo_lineage` 一个仓库最近的会话→需求→commit 谱系
 - `requirement_status` 最近抽取的需求及其 commit 落地状态
 - `recent_edits` 最近被 agent 改动的文件流与关联会话
-- `lineage_report` 需求 × commit × token 消耗的谱系周报
+- `lineage_report` 需求 × commit × token 消耗的谱系周报，附偏差裁决段（INV-2167：
+  只报差异，四分类 PROPOSE FIX/CONTEST/ESCALATE/DECLINE；CONTEST 附可两跳核验的
+  引用，无可解析引用自动降级 ESCALATE；全一致输出 No drift detected）
 - `message_search` 消息级搜索，返回稳定的 `SourceRef`（引用证据用）
 - `read_message` 按完整 `SourceRef` 读取消息快照（保留换行与代码块，`next_cursor` 续读；
   源日志已变化时返回 `STALE_SOURCE`）
