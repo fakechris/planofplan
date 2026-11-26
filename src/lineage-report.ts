@@ -13,6 +13,15 @@ import { readRequirementEvidence } from './requirement-evidence.ts';
 // - landed 只认 declared/witnessed;candidate-only 是「可能落地」不是「落地」;
 //   时间边界不可靠时为 unknown-time。验证/验收状态本报告永远 Unknown。
 // - 成本未知不按 0 累加:全未知 → null;部分未知 → 已知合计 + 未知条数。
+//
+// INV-2167 裁决层(呈现层语义,不改上述任何计算):
+// - findings 段对每条信息缺口强制四分类裁决(借鉴 EGM resolve):
+//   PROPOSE FIX(成立待修,附证据)/ CONTEST(可反驳,证据必须是收报告方
+//   本来就能读到的——附可两跳解析的引用,给不出即降级 ESCALATE)/
+//   ESCALATE(证据在可读范围外,留人类)/ DECLINE(低置信 Nit,记录不展开)。
+// - 漂移纪律(借鉴 EGM drift-report):只报差异,一致项(有 declared/witnessed
+//   落地且无缺口)不出现;全一致时输出显式 No drift detected 语义。
+// - 隐藏会话不进 items 也不产 findings(INV-443 隐藏边界贯通本出口)。
 
 export interface LineageReportItem {
   requirementId: string;
@@ -57,12 +66,125 @@ export interface LineageReport {
     costUnknownSessions: number;
   };
   items: LineageReportItem[];
+  /** INV-2167 裁决层:只含差异项;空 = 全一致(No drift detected)。 */
+  findings: LineageFinding[];
+}
+
+// ── 四分类裁决(INV-2167,借鉴 EGM resolve;呈现层,不改归因计算)─────
+
+export type FindingRuling = 'PROPOSE FIX' | 'CONTEST' | 'ESCALATE' | 'DECLINE';
+
+export type FindingKind = 'no-evidence' | 'candidate-only' | 'unknown-time' | 'unallocated' | 'cost-unknown';
+
+export interface LineageFinding {
+  kind: FindingKind;
+  ruling: FindingRuling;
+  requirementId: string;
+  /** 需求陈述(截断)。 */
+  text: string;
+  /**
+   * CONTEST 的证据引用——必须是收报告方本来就能读到的(可两跳解析:
+   * read_session 取 SourceRef → read_message);给不出可解析引用的
+   * CONTEST 在生成期即降级 ESCALATE。PROPOSE FIX 附报告内可见的
+   * commit sha;ESCALATE/DECLINE 为空(证据在外/低置信)。
+   */
+  evidenceRefs: string[];
+  note: string;
+}
+
+/** 全一致时的显式声明(EGM "No drift detected" 等价语义)。 */
+export function driftCleanMessage(requirements: number): string {
+  return `未检测到漂移(No drift detected):窗口内 ${requirements} 个需求均有 declared/witnessed 级落地见证,且无未分配 commit、时间边界缺口与成本未知记录。验证/验收状态仍为 Unknown(本报告只看关联证据)。`;
+}
+
+/** 会话是否有已索引消息(决定 CONTEST 引用是否可两跳解析)。 */
+function sessionHasIndexedMessages(store: Store, sessionId: string): boolean {
+  const row = store.db.query(
+    'SELECT count(*) AS n FROM session_messages WHERE session_id = ?',
+  ).get(sessionId) as { n: number };
+  return row.n > 0;
+}
+
+function buildFindings(store: Store, items: LineageReportItem[]): LineageFinding[] {
+  const findings: LineageFinding[] = [];
+  for (const item of items) {
+    const clip = (text: string): string => text.length > 60 ? `${text.slice(0, 59)}…` : text;
+    if (item.landedBasis === 'none') {
+      // 窗口内无 commit 见证:证据缺口,不是未完成断言。读者可核验后反驳
+      // (CONTEST);会话没有已索引消息时引用不可解析,降级 ESCALATE。
+      if (sessionHasIndexedMessages(store, item.sessionId)) {
+        findings.push({
+          kind: 'no-evidence',
+          ruling: 'CONTEST',
+          requirementId: item.requirementId,
+          text: clip(item.text),
+          // requirementId 本身即 req: 前缀格式,可直接作引用
+          evidenceRefs: [`@session:{${item.sessionId}}`, item.requirementId],
+          note: '窗口内未见该需求的 commit 见证(≠未完成:可能落在别的时间窗/仓库/未推送)。对引用两跳核验(read_session → read_message)后可反驳',
+        });
+      } else {
+        findings.push({
+          kind: 'no-evidence',
+          ruling: 'ESCALATE',
+          requirementId: item.requirementId,
+          text: clip(item.text),
+          evidenceRefs: [],
+          note: '窗口内未见 commit 见证,且会话无可索引消息供核验(证据在外)——留人工确认',
+        });
+      }
+    }
+    if (item.landedBasis === 'candidate-only') {
+      findings.push({
+        kind: 'candidate-only',
+        ruling: 'PROPOSE FIX',
+        requirementId: item.requirementId,
+        text: clip(item.text),
+        evidenceRefs: item.commits.filter((commit) => commit.kind === 'candidate').map((commit) => commit.sha),
+        note: `仅有时间窗推断级关联(${item.candidateCommits} 条 candidate,见证据 sha);建议 hook install 声明或人工核验补强`,
+      });
+    }
+    if (item.landedBasis === 'unknown-time') {
+      findings.push({
+        kind: 'unknown-time',
+        ruling: 'ESCALATE',
+        requirementId: item.requirementId,
+        text: clip(item.text),
+        evidenceRefs: [],
+        note: '时间边界不完整或不单调,commit 归属 Unknown;归属所需证据在索引外,留人工',
+      });
+    }
+    if (item.unallocatedCommits > 0) {
+      findings.push({
+        kind: 'unallocated',
+        ruling: 'PROPOSE FIX',
+        requirementId: item.requirementId,
+        text: clip(item.text),
+        evidenceRefs: [`@session:{${item.sessionId}}`],
+        note: `${item.unallocatedCommits} 条会话 commit 因时间缺失或仓库不匹配未分配到任何需求;可对该会话补 witness/声明`,
+      });
+    }
+    if (item.costUnknownRecords > 0) {
+      // DECLINE:低置信 Nit,只记录计数不展开细节(EGM resolve 的 DECLINE 语义)
+      findings.push({
+        kind: 'cost-unknown',
+        ruling: 'DECLINE',
+        requirementId: item.requirementId,
+        text: clip(item.text),
+        evidenceRefs: [],
+        note: `${item.costUnknownRecords} 条用量记录成本未知(已知合计只是下界),低置信不展开`,
+      });
+    }
+  }
+  return findings;
 }
 
 export function buildLineageReport(store: Store, since: number, until: number): LineageReport {
   const now = Date.now();
   const sessions = store.listSessionRows();
   const sessionById = new Map(sessions.map((session) => [session.id, session]));
+  // 隐藏边界(INV-443 原则贯通本出口):隐藏/墓碑会话的需求不进周报、不产 findings
+  const unavailable = new Set([...store.getSessionUserMetaMap()]
+    .filter(([, meta]) => meta.hidden || meta.deletedAt != null).map(([sid]) => sid));
   const requirements = store.listRequirements();
   // usage_records.session_id 存的是各家原生 uuid(无 provider 前缀),与
   // sessions.id('claude:<uuid>' 等)不同键——用 provider|native 复合键对齐。
@@ -83,6 +205,7 @@ export function buildLineageReport(store: Store, since: number, until: number): 
   for (const requirement of requirements) {
     const session = sessionById.get(requirement.sessionId);
     if (!session || (session.updatedAt < since || session.updatedAt >= until)) continue;
+    if (unavailable.has(requirement.sessionId)) continue;
     const evidence = readRequirementEvidence(store, requirement, requirements, { relaxUnknownRepos: true });
     const commits = evidence.commits
       .filter((commit) => commit.ts != null && commit.ts >= since && commit.ts < until)
@@ -167,5 +290,6 @@ export function buildLineageReport(store: Store, since: number, until: number): 
       costUnknownSessions,
     },
     items,
+    findings: buildFindings(store, items),
   };
 }

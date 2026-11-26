@@ -1031,6 +1031,17 @@ function renderLineageReport(report) {
       <span class="lineage-text">${escapeHtml((item.text || '').slice(0, 80))}</span>
       <span class="muted">${escapeHtml(item.provider)}${item.project ? ` · ${escapeHtml(item.project)}` : ''} · ${fmtAgo(item.updatedAt, Date.now())}${item.totalTokens ? ` · ${fmtTokens(item.totalTokens)}` : ''}</span>
     </div>`).join('');
+  // 偏差裁决段(INV-2167):只报差异;全一致输出显式 No drift detected
+  const findings = report.findings || [];
+  const rulingLabel = { 'PROPOSE FIX': '修', CONTEST: '驳', ESCALATE: '升', DECLINE: '略' };
+  const driftHtml = findings.length === 0
+    ? `<div class="lineage-drift muted" title="${escapeHtml('未检测到漂移(No drift detected):窗口内需求均有 declared/witnessed 级落地见证,且无未分配 commit、时间边界缺口与成本未知记录;验证/验收状态仍为 Unknown')}">未检测到漂移(No drift detected)</div>`
+    : `<div class="lineage-drift"><strong>偏差(只报差异 · 四分类裁决)</strong>${findings.slice(0, 5).map((finding) => `
+      <div class="lineage-item" title="${escapeHtml(finding.note)}">
+        <span class="lineage-landed pending">[${escapeHtml(rulingLabel[finding.ruling] || finding.ruling)}]</span>
+        <span class="lineage-text">${escapeHtml((finding.text || '').slice(0, 60))}</span>
+        <span class="muted">${escapeHtml(finding.ruling)}${finding.evidenceRefs?.length ? ` · 证据 ${escapeHtml(finding.evidenceRefs[0])}` : ''}</span>
+      </div>`).join('')}${findings.length > 5 ? `<div class="muted">… 另有 ${findings.length - 5} 条</div>` : ''}</div>`;
   box.hidden = false;
   box.innerHTML = `
     <div class="lineage-summary">
@@ -1038,6 +1049,7 @@ function renderLineageReport(report) {
       <span>${t.requirements} 个需求 · ${landedPct}% 落地(${t.commits} commit,${t.declaredCommits} 声明,${t.witnessedCommits ?? 0} 目击,${t.candidateCommits ?? 0} 时间窗推断) · ${fmtTokens(t.totalTokens)} tokens · ${cost}${t.costUnknownSessions ? ` 估算(另有 ${t.costUnknownSessions} 会话成本未知)` : ' 估算'}</span>
     </div>
     ${top}
+    ${driftHtml}
   `;
 }
 

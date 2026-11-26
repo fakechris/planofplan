@@ -2,8 +2,9 @@ import { describe, expect, test } from 'bun:test';
 import { createServer } from '../src/server.ts';
 import { openMemoryDb } from '../src/db.ts';
 import { DEFAULT_PLANS } from '../src/config.ts';
-import { buildLineageReport } from '../src/lineage-report.ts';
-import type { RequirementRecord, SessionRecord, UsageRecord } from '../src/types.ts';
+import { buildLineageReport, driftCleanMessage } from '../src/lineage-report.ts';
+import { handleMcpBody } from '../src/mcp.ts';
+import type { RequirementRecord, SessionRecord, SessionMessageRow, UsageRecord } from '../src/types.ts';
 
 const scheduler = { refreshPlan: async () => ({ ok: true, slug: 'kimi', windows: [] }) };
 const NOW = Date.now();
@@ -181,5 +182,187 @@ describe('周报用量去重', () => {
     const aItems = report.items.filter((item) => item.sessionId === 'claude:a');
     expect(aItems).toHaveLength(2);
     expect(aItems[0].totalTokens).toBe(1500); // item 级保持会话消耗
+  });
+});
+
+// ── 偏差裁决层(INV-2167:四分类 + 只报差异)──────────────────────────
+
+/** 五会话 fixture,一次产齐四类裁决:
+ *  a:declared 落地 + 成本已知(一致项,不产 finding)
+ *  b:无 commit + 有已索引消息(→ no-evidence CONTEST)+ 一条 ts 缺失 commit(→ unallocated PROPOSE FIX)
+ *  c:无 commit + 无已索引消息(→ no-evidence 降级 ESCALATE)
+ *  d:仅 candidate commit(→ candidate-only PROPOSE FIX)
+ *  e:需求 ts=null(→ unknown-time ESCALATE)
+ *  外加一条 null 成本 usage 挂在 b(→ cost-unknown DECLINE)
+ */
+function findingsSeed() {
+  const store = openMemoryDb();
+  for (const plan of DEFAULT_PLANS) store.syncPlan(plan);
+  store.upsertSessions([
+    { id: 'claude:a', provider: 'claude', nativeId: 'a', cwd: '/repo', title: '一致项',
+      sourceFile: '/tmp/a.jsonl', startedAt: NOW - 7200_000, updatedAt: NOW - 1000,
+      inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: null, seenAt: NOW },
+    { id: 'claude:b', provider: 'claude', nativeId: 'b', cwd: '/repo', title: '无落地有消息',
+      sourceFile: '/tmp/b.jsonl', startedAt: NOW - 3600_000, updatedAt: NOW - 2000,
+      inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: null, seenAt: NOW },
+    { id: 'claude:c', provider: 'claude', nativeId: 'c', cwd: '/repo', title: '无落地无消息',
+      sourceFile: '/tmp/c.jsonl', startedAt: NOW - 3500_000, updatedAt: NOW - 2500,
+      inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: null, seenAt: NOW },
+    { id: 'claude:d', provider: 'claude', nativeId: 'd', cwd: '/repo', title: '仅推断关联',
+      sourceFile: '/tmp/d.jsonl', startedAt: NOW - 3400_000, updatedAt: NOW - 2600,
+      inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: null, seenAt: NOW },
+    { id: 'claude:e', provider: 'claude', nativeId: 'e', cwd: '/repo', title: '时间不可靠',
+      sourceFile: '/tmp/e.jsonl', startedAt: NOW - 3300_000, updatedAt: NOW - 2700,
+      inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: null, seenAt: NOW },
+  ] as SessionRecord[]);
+  store.replaceAllRequirements([
+    { id: 'req:claude:a:1', sessionId: 'claude:a', seq: 1, text: '已落地的一致项', originLevel: 'user_explicit', ts: NOW - 7200_000, repos: [] },
+    { id: 'req:claude:b:1', sessionId: 'claude:b', seq: 1, text: '无 commit 见证但有消息可核验', originLevel: 'user_explicit', ts: NOW - 3600_000, repos: [] },
+    { id: 'req:claude:c:1', sessionId: 'claude:c', seq: 1, text: '无 commit 见证也无消息', originLevel: 'user_explicit', ts: NOW - 3500_000, repos: [] },
+    { id: 'req:claude:d:1', sessionId: 'claude:d', seq: 1, text: '只有时间窗推断的关联', originLevel: 'user_explicit', ts: NOW - 3400_000, repos: [] },
+    { id: 'req:claude:e:1', sessionId: 'claude:e', seq: 1, text: '时间边界缺失的需求', originLevel: 'user_explicit', ts: null, repos: [] },
+  ] as RequirementRecord[]);
+  store.upsertSessionMessages([
+    { id: 'm-b1', sessionId: 'claude:b', seq: 1, role: 'user', kind: 'text', toolName: null,
+      text: '无 commit 见证但有消息可核验', timestamp: NOW - 3600_000, model: null, inputTokens: null, outputTokens: null } as SessionMessageRow,
+  ]);
+  store.upsertSessionCommits([
+    { sessionId: 'claude:a', repo: REPO, sha: 'a'.repeat(40), kind: 'declared', ts: NOW - 500_000, summary: 'feat: landed', fileOverlap: true },
+    { sessionId: 'claude:b', repo: REPO, sha: 'b'.repeat(40), kind: 'witnessed', ts: null, summary: 'no ts', fileOverlap: false },
+    { sessionId: 'claude:d', repo: REPO, sha: 'd'.repeat(40), kind: 'candidate', ts: NOW - 3000, summary: 'maybe', fileOverlap: false },
+  ]);
+  store.upsertUsageRecords([
+    { id: 'u-a', day: new Date(NOW).toISOString().slice(0, 10), timestamp: NOW - 3000, provider: 'claude', model: 'claude-fable-5',
+      inputTokens: 1000, cachedInputTokens: 0, cacheCreationInputTokens: 0, outputTokens: 500,
+      reasoningOutputTokens: 0, totalTokens: 1500, billableTokens: null, estimatedCostUsd: 0.02,
+      source: 'local', confidence: 'measured', sessionId: 'a' } as UsageRecord,
+    { id: 'u-b', day: new Date(NOW).toISOString().slice(0, 10), timestamp: NOW - 2400, provider: 'claude', model: 'claude-fable-5',
+      inputTokens: 200, cachedInputTokens: 0, cacheCreationInputTokens: 0, outputTokens: 100,
+      reasoningOutputTokens: 0, totalTokens: 300, billableTokens: null, estimatedCostUsd: null,
+      source: 'local', confidence: 'measured', sessionId: 'b' } as UsageRecord,
+  ]);
+  return store;
+}
+
+describe('偏差裁决层(INV-2167)', () => {
+  test('四分类枚举完整;一致项不出现在偏差段', () => {
+    const store = findingsSeed();
+    try {
+      const report = buildLineageReport(store, NOW - 7 * 86_400_000, NOW + 1000);
+      const rulings = new Set(report.findings.map((finding) => finding.ruling));
+      expect(rulings).toEqual(new Set(['PROPOSE FIX', 'CONTEST', 'ESCALATE', 'DECLINE']));
+      // 一致项(a:declared 落地、无缺口、成本已知)零 finding
+      expect(report.findings.some((finding) => finding.requirementId === 'req:claude:a:1')).toBe(false);
+      // b 的 no-evidence 是 CONTEST,且证据引用可解析(会话引用 + 需求 id)
+      const contest = report.findings.find((finding) => finding.kind === 'no-evidence' && finding.ruling === 'CONTEST')!;
+      expect(contest.requirementId).toBe('req:claude:b:1');
+      expect(contest.evidenceRefs).toContain('@session:{claude:b}');
+      expect(contest.evidenceRefs).toContain('req:claude:b:1');
+      // d 的 candidate-only 是 PROPOSE FIX,证据是 candidate sha
+      const propose = report.findings.find((finding) => finding.kind === 'candidate-only')!;
+      expect(propose.ruling).toBe('PROPOSE FIX');
+      expect(propose.evidenceRefs).toContain('d'.repeat(40));
+      // e 的 unknown-time 是 ESCALATE,证据为空(在外)
+      const escalate = report.findings.find((finding) => finding.kind === 'unknown-time')!;
+      expect(escalate.ruling).toBe('ESCALATE');
+      expect(escalate.evidenceRefs).toEqual([]);
+      // b 的成本未知是 DECLINE,只记录计数不展开
+      const decline = report.findings.find((finding) => finding.kind === 'cost-unknown')!;
+      expect(decline.ruling).toBe('DECLINE');
+      expect(decline.evidenceRefs).toEqual([]);
+      expect(decline.note).toContain('1 条用量记录成本未知');
+      // 呈现层边界:裁决不改 items 的证据等级计算
+      const a = report.items.find((item) => item.requirementId === 'req:claude:a:1')!;
+      expect(a.landed).toBe(true);
+      expect(a.landedBasis).toBe('declared-or-witnessed');
+    } finally {
+      store.close();
+    }
+  });
+
+  test('CONTEST 无可解析引用自动降级 ESCALATE', () => {
+    const store = findingsSeed();
+    try {
+      const report = buildLineageReport(store, NOW - 7 * 86_400_000, NOW + 1000);
+      // c 会话没有任何已索引消息:read_session 无 SourceRef 可取,引用不可解析 → 降级
+      const c = report.findings.find((finding) => finding.requirementId === 'req:claude:c:1')!;
+      expect(c.kind).toBe('no-evidence');
+      expect(c.ruling).toBe('ESCALATE');
+      expect(c.evidenceRefs).toEqual([]);
+      expect(c.note).toContain('证据在外');
+      // 对照组 b(有消息)保持 CONTEST
+      const b = report.findings.find((finding) => finding.kind === 'no-evidence' && finding.ruling === 'CONTEST')!;
+      expect(b.requirementId).toBe('req:claude:b:1');
+    } finally {
+      store.close();
+    }
+  });
+
+  test('全一致时 findings 为空且声明 No drift detected;MCP 文本同步', () => {
+    const store = findingsSeed();
+    try {
+      // 只留一致项 a
+      store.replaceAllRequirements([
+        { id: 'req:claude:a:1', sessionId: 'claude:a', seq: 1, text: '已落地的一致项', originLevel: 'user_explicit', ts: NOW - 7200_000, repos: [] },
+      ] as RequirementRecord[]);
+      const report = buildLineageReport(store, NOW - 7 * 86_400_000, NOW + 1000);
+      expect(report.findings).toEqual([]);
+      expect(driftCleanMessage(1)).toContain('No drift detected');
+      // MCP 出口:显式声明 + 四分类标题
+      const body = handleMcpBody(store, { port: 9291, plans: [] }, {
+        jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'lineage_report', arguments: {} },
+      }) as { result?: { content: Array<{ text: string }> } };
+      const text = body.result!.content[0]!.text;
+      expect(text).toContain('偏差裁决');
+      expect(text).toContain('未检测到漂移(No drift detected)');
+    } finally {
+      store.close();
+    }
+  });
+
+  test('MCP 偏差段按四分类渲染,CONTEST 行带可核验引用', () => {
+    const store = findingsSeed();
+    try {
+      const body = handleMcpBody(store, { port: 9291, plans: [] }, {
+        jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'lineage_report', arguments: {} },
+      }) as { result?: { content: Array<{ text: string }> } };
+      const text = body.result!.content[0]!.text;
+      expect(text).toContain('[PROPOSE FIX]');
+      expect(text).toContain('[CONTEST]');
+      expect(text).toContain('[ESCALATE]');
+      expect(text).toContain('[DECLINE]');
+      expect(text).toContain('证据:@session:{claude:b}');
+      expect(text).toContain('只报差异');
+    } finally {
+      store.close();
+    }
+  });
+
+  test('隐藏会话不进 items 也不产 findings(INV-443 边界贯通)', () => {
+    const store = findingsSeed();
+    try {
+      store.setSessionHidden('claude:b', true);
+      const report = buildLineageReport(store, NOW - 7 * 86_400_000, NOW + 1000);
+      expect(report.items.some((item) => item.sessionId === 'claude:b')).toBe(false);
+      expect(report.findings.some((finding) => finding.requirementId === 'req:claude:b:1')).toBe(false);
+      // 其余会话不受影响
+      expect(report.items.some((item) => item.sessionId === 'claude:a')).toBe(true);
+    } finally {
+      store.close();
+    }
+  });
+
+  test('API 端点透出 findings;web 与 /api 同源同构', async () => {
+    const store = findingsSeed();
+    try {
+      const server = createServer(store, scheduler as never, { port: 9291, plans: DEFAULT_PLANS });
+      const res = await server.request('http://localhost/api/lineage-report?days=7');
+      expect(res.status).toBe(200);
+      const body = await res.json() as { findings: Array<{ ruling: string; kind: string }> };
+      expect(body.findings.length).toBeGreaterThan(0);
+      expect(new Set(body.findings.map((finding) => finding.ruling))).toEqual(new Set(['PROPOSE FIX', 'CONTEST', 'ESCALATE', 'DECLINE']));
+    } finally {
+      store.close();
+    }
   });
 });

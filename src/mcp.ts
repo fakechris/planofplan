@@ -8,7 +8,7 @@ import { getBuildInfo } from './build-info.ts';
 import { readRequirementEvidence } from './requirement-evidence.ts';
 import { buildHandoffPackage, sessionTail } from './handoff.ts';
 import { searchMessageEvidence, searchSessionsByContent, messageEvidenceItem, readMessageEvidence, listMessageEvidencePage, eligibleMessageSessionIds, MESSAGE_FILTER_SCHEMA, SOURCE_REF_SCHEMA, MessageEvidenceError } from './message-evidence.ts';
-import { buildLineageReport } from './lineage-report.ts';
+import { buildLineageReport, driftCleanMessage } from './lineage-report.ts';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { SessionCommit, SessionRecord, UsageRecord } from './types.ts';
@@ -879,7 +879,7 @@ const TOOLS: ToolDef[] = [
   {
     name: 'lineage_report',
     title: 'Lineage report',
-    description: '谱系周报:窗口内需求 × commit × token 消耗的静态汇总(declared=trailer 声明/witnessed=transcript 目击/candidate=时间窗推断)。用户问"这周做了什么、落了多少、各烧多少"时用它。',
+    description: '谱系周报:窗口内需求 × commit × token 消耗的静态汇总(declared=trailer 声明/witnessed=transcript 目击/candidate=时间窗推断),附偏差裁决段(只报差异,四分类 PROPOSE FIX/CONTEST/ESCALATE/DECLINE;CONTEST 附可两跳核验的引用)。用户问"这周做了什么、落了多少、各烧多少"时用它。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -910,6 +910,20 @@ const TOOLS: ToolDef[] = [
           : item.landedBasis === 'candidate-only' ? `[?${item.candidateCommits}]` : '[…]';
         const cost = item.estimatedCostUsd != null ? ` · $${item.estimatedCostUsd.toFixed(2)}` : '';
         lines.push(`- ${mark} ${clipLine(item.text, 60)}(${item.provider}${item.project ? ` · ${item.project}` : ''}${cost})`);
+      }
+      // 偏差裁决段(INV-2167):只报差异;全一致输出显式 No drift detected。
+      lines.push('', '偏差裁决(只报差异,四分类 PROPOSE FIX/CONTEST/ESCALATE/DECLINE;一致项不列):');
+      if (report.findings.length === 0) {
+        lines.push(driftCleanMessage(report.totals.requirements));
+      } else {
+        for (const finding of report.findings.slice(0, limit)) {
+          const evidence = finding.evidenceRefs.length > 0
+            ? ` · 证据:${finding.evidenceRefs.join(' ; ')}` : '';
+          lines.push(`- [${finding.ruling}] ${clipLine(finding.text, 50)} · ${finding.note}${evidence}`);
+        }
+        if (report.findings.length > limit) {
+          lines.push(`(另有 ${report.findings.length - limit} 条未展示 — pass a higher limit)`);
+        }
       }
       const note = truncationNote(Math.min(limit, report.items.length), report.items.length, 'pass a higher limit (max 60) or shorten days');
       if (note) lines.push(note.trim());
