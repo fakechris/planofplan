@@ -28,6 +28,7 @@ import { getStartupSettings, setLaunchOnStartup } from './startup.ts';
 import { startSessionWatcher, createRateGate } from './watcher.ts';
 import { registerMcpRoutes } from './mcp.ts';
 import { buildLineageReport } from './lineage-report.ts';
+import { analyzeRepoHistory, readCachedRepoHistory } from './repo-history.ts';
 import { getAgentStatus } from './agent-status.ts';
 import { spawnSelf } from './spawn.ts';
 import { ScanQueue } from './scan-queue.ts';
@@ -905,6 +906,100 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
         .map((file) => ({ id: file.id, title: file.title, kind: file.kind, path: file.path, lastSeenAt: file.lastSeenAt }))
         .sort((a, b) => b.lastSeenAt - a.lastSeenAt),
     });
+  });
+
+  // 项目 Commit 级多 Agent 与模型归因历史(INV-2195):
+  // GET 默认纯读 L1 缓存,不阻塞 UI;传 scan=1/refresh=1 或 POST /scan 时单飞执行增量扫描。
+  const historyScansInFlight = new Map<string, Promise<ReturnType<typeof analyzeRepoHistory>>>();
+
+  const parseHistoryDays = (raw: string | undefined): number | null => {
+    if (!raw || raw === '30') return 30;
+    if (raw === 'all' || raw === '0') return null;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) return 30;
+    return Math.min(3650, Math.floor(n));
+  };
+
+  const runHistoryScan = (
+    project: { id: string; url: string; root: string | null; name: string },
+    days: number | null,
+    refresh: boolean,
+  ): Promise<ReturnType<typeof analyzeRepoHistory>> => {
+    const key = `${project.id}:${days ?? 'all'}:${refresh ? 1 : 0}`;
+    const existing = historyScansInFlight.get(key);
+    if (existing) return existing;
+    const task = (async () => {
+      if (!project.root || !existsSync(resolve(project.root, '.git'))) {
+        return readCachedRepoHistory(store, { repoUrl: project.url, repoRoot: project.root, repoName: project.name }, days);
+      }
+      // 生产文件库走单飞子进程(遵循 AGENTS.md §2.3:不阻塞 SSE/HTTP,且扫描峰值内存随子进程退出立刻归还 OS);
+      // 内存测试库回退进程内执行。
+      const dbFile = store.dbFilename;
+      const useSubprocess = Boolean(dbFile && dbFile !== ':memory:');
+      if (useSubprocess) {
+        const args = [
+          'repo-history',
+          project.root,
+          ...(days == null ? ['--all'] : ['--days', String(days)]),
+          ...(refresh ? ['--refresh'] : []),
+          '--db',
+          dbFile,
+        ];
+        const child = spawnScan(args);
+        const exitCode = await child.exited;
+        if (exitCode !== 0) {
+          throw new Error(`repo-history 子进程扫描失败(exit ${exitCode})`);
+        }
+        return readCachedRepoHistory(store, { repoUrl: project.url, repoRoot: project.root, repoName: project.name }, days);
+      }
+      return analyzeRepoHistory(store, {
+        repoUrl: project.url,
+        repoRoot: project.root,
+        repoName: project.name,
+        days,
+        refresh,
+      });
+    })().finally(() => {
+      historyScansInFlight.delete(key);
+    });
+    historyScansInFlight.set(key, task);
+    return task;
+  };
+
+  app.get('/api/projects/:id/history', async (c) => {
+    const project = store.getProject(c.req.param('id'));
+    if (!project) return c.json({ ok: false, error: 'unknown project' }, 404);
+    const days = parseHistoryDays(c.req.query('days'));
+    const refresh = c.req.query('refresh') === '1' || c.req.query('refresh') === 'true';
+    const scan = refresh || c.req.query('scan') === '1' || c.req.query('scan') === 'true';
+    if (!scan) {
+      return c.json(readCachedRepoHistory(store, { repoUrl: project.url, repoRoot: project.root, repoName: project.name }, days));
+    }
+    try {
+      const report = await runHistoryScan(project, days, refresh);
+      return c.json(report);
+    } catch (error) {
+      return c.json({ ok: false, error: error instanceof Error ? error.message : 'history scan failed' }, 500);
+    }
+  });
+
+  app.post('/api/projects/:id/history/scan', async (c) => {
+    const project = store.getProject(c.req.param('id'));
+    if (!project) return c.json({ ok: false, error: 'unknown project' }, 404);
+    let body: { days?: string | number | null; refresh?: boolean } = {};
+    try {
+      body = (await c.req.json()) as typeof body;
+    } catch { /* 空 body 允许 */ }
+    const days = body.days === null || body.days === 'all' || body.days === 0
+      ? null
+      : parseHistoryDays(body.days != null ? String(body.days) : c.req.query('days'));
+    const refresh = Boolean(body.refresh);
+    try {
+      const report = await runHistoryScan(project, days, refresh);
+      return c.json(report);
+    } catch (error) {
+      return c.json({ ok: false, error: error instanceof Error ? error.message : 'history scan failed' }, 500);
+    }
   });
 
   // commit → 关联 session 反查(支持短 sha 前缀)

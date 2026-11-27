@@ -746,3 +746,103 @@ export interface ExperienceNodeSaveResult {
   action: ExperienceNodeSaveAction;
   id: string;
 }
+
+// ── 仓库 Commit 级多 Agent 与模型归因考古(INV-2195,M3) ───────────────
+
+export type CommitProvenanceTier =
+  | 'hunk-matched'
+  | 'declared'
+  | 'witnessed-author'
+  | 'hunk-partial'
+  | 'write-touch'
+  | 'bash-write'
+  | 'merged-only'
+  | 'unattributed';
+
+export type CommitRelayKind =
+  | ''
+  | 'cross-agent-code'
+  | 'cross-model-code'
+  | 'multi-session-code'
+  | 'write-then-merge';
+
+export interface CommitProvenanceAuthor {
+  provider: string;
+  model: string;
+  lines: number;
+  source: string;
+}
+
+export interface CommitProvenanceSessionHit {
+  provider: string;
+  sessionId: string;
+  model: string;
+  lines: number;
+  strongLines: number;
+  files: string[];
+  title: string;
+}
+
+export interface CommitProvenanceRecord {
+  repoUrl: string;
+  sha: string;
+  prNumber: number | null;
+  committedAt: number;
+  authorName: string;
+  subject: string;
+  tier: CommitProvenanceTier;
+  primaryProvider: string | null;
+  primaryModel: string | null;
+  totalDistLines: number;
+  matchedDistLines: number;
+  relayKind: CommitRelayKind;
+  filesCount: number;
+  files: string[];
+  authors: CommitProvenanceAuthor[];
+  declared: string[];
+  witnessedAuthor: string[];
+  mergedBy: string[];
+  reviewers: string[];
+  sessions: CommitProvenanceSessionHit[];
+  analyzerVersion: number;
+  analyzedAt: number;
+}
+
+export interface RepoHistorySummary {
+  repoUrl: string;
+  repoName: string;
+  repoRoot: string | null;
+  days: number | null;
+  dateRange: string;
+  totalCommits: number;
+  prCount: number;
+  cachedCommits: number;
+  newlyAnalyzedCommits: number;
+  sessionsScanned: number;
+  elapsedMs: number;
+  authorAttributed: number;
+  authorPct: number;
+  mergedOnly: number;
+  unattributed: number;
+  tierCounts: Record<string, number>;
+  totalLines: number;
+  matchedLines: number;
+  matchedLinesPct: number;
+  activeProviders: string[];
+  providerCommits: Record<string, number>;
+  modelLines: Array<{ provider: string; model: string; lines: number }>;
+  dirOwnership: Array<{ dir: string; commits: number; providers: Record<string, number> }>;
+  daily: Array<{ day: string; providers: Record<string, number>; linesByProvider: Record<string, number> }>;
+  relayCounts: {
+    crossAgentCode: number;
+    crossModelCode: number;
+    multiSessionCode: number;
+    writeThenMerge: number;
+  };
+}
+
+export interface RepoHistoryReport {
+  cached: boolean;
+  summary: RepoHistorySummary;
+  records: CommitProvenanceRecord[];
+}

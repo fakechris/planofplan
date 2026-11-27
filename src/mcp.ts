@@ -10,6 +10,7 @@ import { buildHandoffPackage, sessionTail } from './handoff.ts';
 import { unavailableSessionIds, visibleInvariants } from './experience-graph.ts';
 import { searchMessageEvidence, searchSessionsByContent, messageEvidenceItem, readMessageEvidence, listMessageEvidencePage, eligibleMessageSessionIds, MESSAGE_FILTER_SCHEMA, SOURCE_REF_SCHEMA, MessageEvidenceError } from './message-evidence.ts';
 import { buildLineageReport, driftCleanMessage } from './lineage-report.ts';
+import { readCachedRepoHistory, resolveRepoTarget } from './repo-history.ts';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { SessionCommit, SessionRecord, UsageRecord } from './types.ts';
@@ -153,6 +154,60 @@ function toolUsageSummary(store: Store, args: { days?: unknown; provider?: unkno
     lines.push(`top models: ${parts.join(' / ')}`);
   }
   if (records.length === 0) lines.push('(no records; run `planofplan tokens` or the dashboard 扫描本地日志 first)');
+  return lines.join('\n');
+}
+
+function toolRepoHistory(store: Store, args: Record<string, unknown>): string {
+  const repo = typeof args.repo === 'string' ? args.repo.trim() : '';
+  if (!repo) throw new ToolArgError('repo is required (repo name, path, or URL fragment)');
+  const rawDays = args.days === undefined ? 30 : Number(args.days);
+  const days = Number.isFinite(rawDays) && rawDays <= 0 ? null : Math.min(3650, Math.max(1, Math.floor(rawDays || 30)));
+  const limit = Math.min(50, Math.max(1, Math.floor(Number(args.limit ?? 20)) || 20));
+  const relayOnly = args.relay_only === true;
+
+  const target = resolveRepoTarget(store, repo);
+  if (!target) {
+    return `No repository matching "${repo}" found in local index. Run \`planofplan repo-history <local-repo-path>\` first.`;
+  }
+  const hidden = hiddenSessionIds(store);
+  const report = readCachedRepoHistory(store, target, days);
+  if (!report.cached || report.records.length === 0) {
+    return `No cached commit provenance for "${target.repoName}" (${days == null ? 'all time' : `last ${days}d`}). Run \`planofplan repo-history ${target.repoName}\` or click 扫描历史 in the dashboard Projects tab.`;
+  }
+
+  const s = report.summary;
+  const provLine = Object.entries(s.providerCommits).sort((a, b) => b[1] - a[1]).map(([p, n]) => `${p}:${n}`).join(' / ');
+  const modelLine = s.modelLines.slice(0, 6).map((m) => `${m.provider}/${m.model}:${m.lines}L`).join(' · ');
+  const rc = s.relayCounts;
+  const relayTotal = rc.crossAgentCode + rc.crossModelCode + rc.multiSessionCode + rc.writeThenMerge;
+  const lines: string[] = [
+    `${s.repoName} commit provenance (${days == null ? 'all cached' : `last ${days}d`} · ${s.dateRange}):`,
+    `commits: ${s.totalCommits} (PR ${s.prCount}) · attributed: ${s.authorAttributed}/${s.totalCommits} (${s.authorPct}%) · line-matched: ${s.matchedLines}/${s.totalLines} (${s.matchedLinesPct}%)`,
+    ...(provLine ? [`by provider: ${provLine}`] : []),
+    ...(modelLine ? [`by model (hunk lines): ${modelLine}`] : []),
+    `relays: ${relayTotal} (cross-agent ${rc.crossAgentCode} / cross-model ${rc.crossModelCode} / multi-session ${rc.multiSessionCode} / write→merge ${rc.writeThenMerge})`,
+    '',
+  ];
+
+  const rows = relayOnly ? report.records.filter((r) => Boolean(r.relayKind)) : report.records;
+  for (const r of rows.slice(0, limit)) {
+    const dt = new Date(r.committedAt).toISOString().slice(0, 16).replace('T', ' ');
+    const pr = r.prNumber != null ? ` #${r.prNumber}` : '';
+    const who = r.primaryProvider
+      ? `${r.primaryProvider}${r.primaryModel && r.primaryModel !== 'unknown' ? `/${r.primaryModel}` : ''}`
+      : 'unattributed';
+    const relay = r.relayKind ? ` [RELAY:${r.relayKind}]` : '';
+    const lineStat = r.totalDistLines > 0 ? ` ${r.matchedDistLines}/${r.totalDistLines}L` : '';
+    lines.push(`- ${r.sha.slice(0, 8)}${pr} ${dt} [${r.tier}${relay}] ${who}${lineStat} — ${clipLine(r.subject, 120)}`);
+    const visibleSessions = r.sessions.filter((ss) => !hidden.has(ss.sessionId));
+    if (relayOnly && visibleSessions.length > 0) {
+      for (const ss of visibleSessions.slice(0, 3)) {
+        lines.push(`    * ${ss.provider}/${ss.model}: ${ss.lines}L (${ss.files.slice(0, 3).join(', ')}) [${ss.sessionId}]`);
+      }
+    }
+  }
+  const note = truncationNote(Math.min(limit, rows.length), rows.length, 'pass a higher limit (max 50) or set relay_only=true');
+  if (note) lines.push(note.trim());
   return lines.join('\n');
 }
 
@@ -1059,6 +1114,23 @@ const TOOLS: ToolDef[] = [
       additionalProperties: false,
     },
     run: (store, _cfg, args) => toolExperienceGraph(store, args),
+  },
+  {
+    name: 'repo_history',
+    title: 'Repository commit provenance history',
+    description: '按 Commit/PR 维度回溯一个仓库的开发历史:哪些 Coding Agent 与具体模型编写了哪些 commit/PR,以及单 commit 内的多 Agent/多模型/多子会话接力(只读已缓存的 commit_provenance,不触发磁盘重扫;若尚无缓存会提示运行 `planofplan repo-history <repo>` 或在项目页点扫描)。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo: { type: 'string', description: '仓库名、本地路径或 URL 片段' },
+        days: { type: 'number', description: '回看天数,默认 30;传 0 查全部已缓存历史' },
+        limit: { type: 'number', description: '返回 commit 明细上限,默认 20,最大 50' },
+        relay_only: { type: 'boolean', description: '仅列出多 Agent/多模型/多子会话接力的 commit(默认 false)' },
+      },
+      required: ['repo'],
+      additionalProperties: false,
+    },
+    run: (store, _cfg, args) => toolRepoHistory(store, args),
   },
 ];
 

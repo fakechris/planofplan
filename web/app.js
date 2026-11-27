@@ -1646,7 +1646,10 @@ async function loadProjectDetail(id) {
   if (!readerEl) return;
   try {
     const days = document.getElementById('usageDays')?.value || '30';
-    const detail = await request(`/api/projects/${encodeURIComponent(id)}?days=${encodeURIComponent(days)}`);
+    const [detail, history] = await Promise.all([
+      request(`/api/projects/${encodeURIComponent(id)}?days=${encodeURIComponent(days)}`),
+      request(`/api/projects/${encodeURIComponent(id)}/history?days=${encodeURIComponent(days)}`).catch(() => null),
+    ]);
     if (openProjectId !== id) return; // 已切走
     readerEl.innerHTML = projectDetailHtml(detail);
     readerEl.querySelectorAll('[data-nav]').forEach((el2) => {
@@ -1656,9 +1659,216 @@ async function loadProjectDetail(id) {
         navigate(tab, navId || undefined);
       });
     });
+    mountProjectHistory(id, detail, history);
   } catch {
     readerEl.innerHTML = '<div class="usage-empty"><strong>详情加载失败</strong><span>稍后再试。</span></div>';
   }
+}
+
+const RH_COLORS = {
+  claude: '#f59e0b',
+  codex: '#10b981',
+  devin: '#38bdf8',
+  factory: '#a855f7',
+  cursor: '#ec4899',
+  zcode: '#14b8a6',
+  dependabot: '#64748b',
+  unattributed: '#4b5563',
+};
+const RH_PROVIDERS = ['claude', 'codex', 'devin', 'factory', 'cursor', 'zcode', 'dependabot', 'unattributed'];
+
+function rhTierClass(tier) {
+  if (!tier) return 'rh-tier-unatt';
+  if (tier.startsWith('hunk')) return 'rh-tier-hunk';
+  if (tier === 'declared') return 'rh-tier-decl';
+  if (tier.startsWith('witnessed')) return 'rh-tier-wit';
+  if (tier.includes('touch') || tier.includes('bash')) return 'rh-tier-touch';
+  return 'rh-tier-unatt';
+}
+
+function mountProjectHistory(projectId, detail, initialReport) {
+  const container = document.getElementById('projectHistoryBox');
+  if (!container) return;
+  let report = initialReport;
+  let filterProv = '';
+  let filterTier = '';
+  let filterRelay = false;
+  let filterQuery = '';
+  let scanning = false;
+
+  const render = () => {
+    const s = report?.summary;
+    const hasData = Boolean(report?.cached && s && s.totalCommits > 0);
+    const headerHtml = `
+      <div class="rh-header">
+        <h3 style="margin:0">开发历史考古 <span class="muted">Commit 级 Agent × Model × 接力（零 LLM · 增量缓存）</span></h3>
+        <div class="rh-actions">
+          <button type="button" class="secondary-btn" data-rh-scan="30" ${scanning ? 'disabled' : ''}>${scanning ? '扫描中…' : '扫描近 30 天'}</button>
+          <button type="button" class="secondary-btn" data-rh-scan="all" ${scanning ? 'disabled' : ''}>扫描全量历史</button>
+        </div>
+      </div>
+    `;
+    if (!hasData) {
+      container.innerHTML = `${headerHtml}<div class="muted">${detail.root ? '尚无缓存记录，点击上方按钮按需扫描本地 L0 日志与 Git 历史（首次约数秒，后续增量毫秒级）。' : '该项目未关联本地 .git 目录，无法扫描 commit 历史。'}</div>`;
+      bindScanButtons();
+      return;
+    }
+
+    const totalRelays = (s.relayCounts?.crossAgentCode || 0) + (s.relayCounts?.crossModelCode || 0) + (s.relayCounts?.multiSessionCode || 0) + (s.relayCounts?.writeThenMerge || 0);
+    const kpiHtml = `
+      <div class="rh-kpis">
+        <div class="rh-kpi"><div class="rh-kpi-label">作者归因覆盖</div><div class="rh-kpi-val">${s.authorAttributed}/${s.totalCommits}</div><div class="rh-kpi-hint">${s.authorPct}% · PR ${s.prCount}</div></div>
+        <div class="rh-kpi"><div class="rh-kpi-label">行级精确匹配</div><div class="rh-kpi-val">${s.matchedLinesPct}%</div><div class="rh-kpi-hint">${(s.matchedLines || 0).toLocaleString()}/${(s.totalLines || 0).toLocaleString()}L</div></div>
+        <div class="rh-kpi"><div class="rh-kpi-label">参与 Agent</div><div class="rh-kpi-val">${(s.activeProviders || []).length} 类</div><div class="rh-kpi-hint">${escapeHtml((s.activeProviders || []).slice(0, 4).join(', '))}</div></div>
+        <div class="rh-kpi"><div class="rh-kpi-label">多方接力</div><div class="rh-kpi-val">${totalRelays}</div><div class="rh-kpi-hint">跨Agent ${s.relayCounts?.crossAgentCode || 0} · 跨模型 ${s.relayCounts?.crossModelCode || 0}</div></div>
+      </div>
+    `;
+
+    const daily = s.daily || [];
+    const maxDay = Math.max(1, ...daily.map((d) => Object.values(d.providers || {}).reduce((a, b) => a + b, 0)));
+    const legendHtml = `<div class="rh-legend">${RH_PROVIDERS.filter((p) => p === 'unattributed' ? s.unattributed > 0 : (s.providerCommits?.[p] || 0) > 0).map((p) => `<span><i class="rh-dot" style="background:${RH_COLORS[p] || '#64748b'}"></i>${escapeHtml(p)} (${p === 'unattributed' ? s.unattributed : s.providerCommits[p]})</span>`).join('')}</div>`;
+    const timelineHtml = daily.length > 0 ? `
+      ${legendHtml}
+      <div class="rh-timeline">${daily.map((d) => {
+        const tot = Object.values(d.providers || {}).reduce((a, b) => a + b, 0);
+        const tip = `${d.day}: ${tot} commits (` + Object.entries(d.providers || {}).map(([k, v]) => `${k}:${v}`).join(', ') + ')';
+        const segs = RH_PROVIDERS.filter((p) => d.providers?.[p]).map((p) => {
+          const h = Math.max(2, (d.providers[p] / maxDay) * 100);
+          return `<div class="rh-bar-seg" style="height:${h.toFixed(1)}px;background:${RH_COLORS[p] || '#64748b'}"></div>`;
+        }).join('');
+        return `<div class="rh-bar-col" title="${escapeHtml(tip)}">${segs}</div>`;
+      }).join('')}</div>
+      <div class="rh-bar-labels">${daily.map((d, idx) => `<div class="rh-bar-lbl">${daily.length <= 16 || idx % Math.ceil(daily.length / 12) === 0 ? escapeHtml(d.day.slice(5)) : ''}</div>`).join('')}</div>
+    ` : '';
+
+    const models = s.modelLines || [];
+    const maxM = Math.max(1, ...models.map((m) => m.lines));
+    const modelHtml = models.slice(0, 8).map((m) => `
+      <div class="rh-mod-row">
+        <div class="rh-mod-name" title="${escapeHtml(`${m.provider}/${m.model}`)}"><i class="rh-dot" style="background:${RH_COLORS[m.provider] || '#64748b'}"></i>${escapeHtml(m.model)}</div>
+        <div class="rh-mod-bar"><div style="width:${(m.lines / maxM * 100).toFixed(1)}%;background:${RH_COLORS[m.provider] || '#64748b'}"></div></div>
+        <div class="rh-mod-val">${m.lines.toLocaleString()}L</div>
+      </div>
+    `).join('') || '<div class="muted">暂无精确行级匹配</div>';
+
+    const dirs = s.dirOwnership || [];
+    const dirHtml = dirs.slice(0, 8).map((d) => {
+      const tot = Object.values(d.providers || {}).reduce((a, b) => a + b, 0) || 1;
+      const segs = RH_PROVIDERS.filter((p) => d.providers?.[p]).map((p) => `<div style="width:${(d.providers[p] / tot * 100).toFixed(1)}%;background:${RH_COLORS[p] || '#64748b'}" title="${escapeHtml(`${p}: ${d.providers[p]}`)}"></div>`).join('');
+      return `
+        <div class="rh-mod-row">
+          <div class="rh-mod-name" title="${escapeHtml(d.dir)}">${escapeHtml(d.dir)}</div>
+          <div class="rh-mod-bar">${segs}</div>
+          <div class="rh-mod-val">${d.commits} cmt</div>
+        </div>
+      `;
+    }).join('');
+
+    const allRecs = report.records || [];
+    const filtered = allRecs.filter((r) => {
+      if (filterProv) {
+        const ps = (r.authors || []).map((a) => a.provider);
+        if (filterProv === 'unattributed' ? ps.length > 0 : !ps.includes(filterProv)) return false;
+      }
+      if (filterTier && r.tier !== filterTier) return false;
+      if (filterRelay && !r.relayKind) return false;
+      if (filterQuery) {
+        const q = filterQuery.toLowerCase();
+        const hay = `${r.sha} #${r.prNumber || ''} ${r.subject} ${(r.files || []).join(' ')} ${(r.authors || []).map((a) => `${a.provider} ${a.model}`).join(' ')}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+
+    const provOpts = (s.activeProviders || []).concat(['unattributed']).map((p) => `<option value="${escapeHtml(p)}"${filterProv === p ? ' selected' : ''}>${escapeHtml(p)}</option>`).join('');
+    const filtersHtml = `
+      <div class="rh-filters">
+        <input type="search" data-rh-q value="${escapeHtml(filterQuery)}" placeholder="搜索 SHA / PR / 标题 / 模型 / 文件…" />
+        <select data-rh-prov><option value="">全部 Agent</option>${provOpts}</select>
+        <select data-rh-tier>
+          <option value="">全部证据档</option>
+          ${['hunk-matched', 'declared', 'witnessed-author', 'bash-write', 'write-touch', 'merged-only', 'unattributed'].map((t) => `<option value="${t}"${filterTier === t ? ' selected' : ''}>${t}</option>`).join('')}
+        </select>
+        <label class="session-check"><input type="checkbox" data-rh-relay ${filterRelay ? 'checked' : ''} /> 仅看接力</label>
+        <span class="muted">显示 ${Math.min(filtered.length, 80)} / ${filtered.length}</span>
+      </div>
+    `;
+
+    const listHtml = filtered.slice(0, 80).map((r) => {
+      const prim = r.primaryProvider || 'unattributed';
+      const mod = r.primaryModel && r.primaryModel !== 'unknown' ? `/${r.primaryModel}` : '';
+      const cov = r.totalDistLines > 0 ? `${Math.round(r.matchedDistLines / r.totalDistLines * 100)}% (${r.matchedDistLines}/${r.totalDistLines}L)` : '—';
+      const dt = new Date(r.committedAt).toISOString().slice(5, 16).replace('T', ' ');
+      return `
+        <div class="rh-commit-row" data-rh-sha="${escapeHtml(r.sha)}">
+          <div class="rh-commit-head">
+            <span class="muted">${escapeHtml(dt)}</span>
+            <span class="attr-sha">${escapeHtml(r.sha.slice(0, 8))}${r.prNumber ? ` #${r.prNumber}` : ''}</span>
+            <strong style="color:${RH_COLORS[prim] || '#e2e8f0'}">${escapeHtml(prim)}${escapeHtml(mod)}</strong>
+            <span class="rh-pill ${rhTierClass(r.tier)}">${escapeHtml(r.tier)}</span>
+            ${r.relayKind ? `<span class="rh-pill rh-relay">${escapeHtml(r.relayKind)}</span>` : ''}
+            <span class="attr-summary">${escapeHtml(r.subject)}</span>
+            <span class="attr-meta">${escapeHtml(cov)}</span>
+          </div>
+          <div class="rh-commit-detail" hidden>
+            <div>文件 (${r.filesCount}): <span class="mono">${escapeHtml((r.files || []).slice(0, 8).join(', '))}${(r.files || []).length > 8 ? ' …' : ''}</span></div>
+            ${(r.declared || []).length ? `<div>Git Trailer: <span class="mono">${escapeHtml(r.declared.join(' | '))}</span></div>` : ''}
+            ${(r.witnessedAuthor || []).length ? `<div>作者目击: <span class="mono">${escapeHtml(r.witnessedAuthor.join(', '))}</span></div>` : ''}
+            ${(r.mergedBy || []).length ? `<div>合入目击: <span class="mono">${escapeHtml(r.mergedBy.join(', '))}</span></div>` : ''}
+            ${(r.reviewers || []).length ? `<div>只读审阅: <span class="mono">${escapeHtml(r.reviewers.join(', '))}</span></div>` : ''}
+            ${(r.sessions || []).length ? `<div>行级命中会话:${r.sessions.map((ss) => `<div class="mono">  • ${escapeHtml(ss.provider)}/${escapeHtml(ss.model)}: ${ss.lines}L (${ss.strongLines}sL) · ${escapeHtml(ss.sessionId)} · ${escapeHtml(ss.title || '')}</div>`).join('')}</div>` : ''}
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    container.innerHTML = `
+      ${headerHtml}
+      ${kpiHtml}
+      ${timelineHtml}
+      <div class="rh-two-col">
+        <div><div class="rh-subhead">Agent × Model 行级产出</div>${modelHtml}</div>
+        <div><div class="rh-subhead">目录模块归属</div>${dirHtml}</div>
+      </div>
+      ${filtersHtml}
+      <div class="rh-commit-list">${listHtml || '<div class="muted">当前筛选无匹配 commit</div>'}</div>
+    `;
+    bindScanButtons();
+    container.querySelector('[data-rh-q]')?.addEventListener('input', (e) => { filterQuery = e.target.value; render(); });
+    container.querySelector('[data-rh-prov]')?.addEventListener('change', (e) => { filterProv = e.target.value; render(); });
+    container.querySelector('[data-rh-tier]')?.addEventListener('change', (e) => { filterTier = e.target.value; render(); });
+    container.querySelector('[data-rh-relay]')?.addEventListener('change', (e) => { filterRelay = e.target.checked; render(); });
+    container.querySelectorAll('.rh-commit-row').forEach((row) => {
+      row.addEventListener('click', () => {
+        const det = row.querySelector('.rh-commit-detail');
+        if (det) det.hidden = !det.hidden;
+      });
+    });
+  };
+
+  const bindScanButtons = () => {
+    container.querySelectorAll('[data-rh-scan]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        if (scanning) return;
+        const mode = btn.getAttribute('data-rh-scan');
+        scanning = true;
+        render();
+        try {
+          const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/history/scan`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ days: mode === 'all' ? 'all' : Number(mode) || 30 }),
+          });
+          if (res.ok) report = await res.json();
+        } finally {
+          scanning = false;
+          if (openProjectId === projectId) render();
+        }
+      });
+    });
+  };
+
+  render();
 }
 
 function projectDetailHtml(detail) {
@@ -1719,6 +1929,7 @@ function projectDetailHtml(detail) {
       <dt>本地根</dt><dd>${escapeHtml(detail.root || '--')}</dd>
     </div>
     <div class="session-attrs"><h3>Agent × 活动</h3>${agentsHtml || '<div class="muted">窗口内无活动</div>'}</div>
+    <div class="session-attrs" id="projectHistoryBox"><h3>开发历史考古</h3><div class="muted">加载缓存…</div></div>
     <div class="session-attrs"><h3>需求流</h3>${requirementsHtml || '<div class="muted">窗口内没有可推导的需求</div>'}</div>
     <div class="session-attrs"><h3>计划 <span class="muted">${(detail.plans || []).length} 个 plan 文件</span></h3>${plansHtml || '<div class="muted">该 repo 下没有计划文件</div>'}</div>
     <div class="session-attrs"><h3>产出 commit <span class="muted">● 声明/文件交集 · ○ 时间窗</span></h3>${commitsHtml || '<div class="muted">窗口内无归因 commit</div>'}</div>

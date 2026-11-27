@@ -20,6 +20,7 @@ import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { sessionProject } from './repos.ts';
 import { searchSkills, syncSkillsCatalog } from './skills.ts';
+import { analyzeRepoHistory, resolveRepoTarget } from './repo-history.ts';
 import { rotateServeLogIfNeeded } from './serve-log.ts';
 import { DEFAULT_ALERT_SETTINGS } from './quota-alerts.ts';
 import { synthesizeExperienceGraph, refineExperienceSummaries } from './experience-graph.ts';
@@ -48,6 +49,7 @@ function help(): void {
   planofplan tokens [--json] [--days N] [--provider sl] token usage & spend 报表
   planofplan sessions [--json] [--days N] [--provider sl] [--search q] [--refresh] 本地 session 目录
   planofplan experience [--refresh] [--max-nodes N] [--yes]  经验图谱节点(合成/列表;超阈值需 --yes)
+  planofplan repo-history <repo> [--days N|--all] [--refresh] [--json]  仓库 Commit 级多 Agent 与模型归因考古
   planofplan skills [--json] [--search q] [--refresh] 本机 150+ coding agent skills 目录
   planofplan pricing refresh                拉取 LiteLLM 模型价格快照(离线时用内置家族表估算)
   planofplan hook install [--repo 路径]     装 commit trailer 钩子(agent 提交自动声明 session)
@@ -589,12 +591,65 @@ async function skillsCmd(): Promise<void> {
   }
 }
 
+async function repoHistoryCmd(): Promise<void> {
+  const f = flags();
+  const allTime = argv.includes('--all');
+  const query = argv.slice(1).find((a, idx, arr) => {
+    if (a.startsWith('-')) return false;
+    const prev = idx > 0 ? arr[idx - 1] : '';
+    if (['--days', '--db', '--provider', '--search', '-q', '--port', '--key', '--browser'].includes(prev ?? '')) return false;
+    return true;
+  }) ?? process.cwd();
+  const store = openDb(f.db ?? join(ensureHome(), 'planofplan.db'));
+  syncStore(store, loadConfig());
+  const target = resolveRepoTarget(store, query);
+  if (!target) {
+    console.error(`找不到匹配 "${query}" 的本地 Git 仓库或已索引项目`);
+    process.exit(1);
+  }
+  if (!target.repoRoot || !existsSync(join(target.repoRoot, '.git'))) {
+    console.error(`项目 ${target.repoName} 缺少本地 .git 根目录(${target.repoRoot ?? 'null'}),请直接传入本地仓库路径`);
+    process.exit(1);
+  }
+  const report = analyzeRepoHistory(store, {
+    repoUrl: target.repoUrl,
+    repoRoot: target.repoRoot,
+    repoName: target.repoName,
+    days: allTime ? null : f.days,
+    refresh: f.refresh || f.rescan,
+  });
+  if (f.json) {
+    console.log(JSON.stringify(report, null, 2));
+    return;
+  }
+  const s = report.summary;
+  console.log(`${s.repoName} · Commit 归因考古 (${allTime ? '全量' : `近 ${s.days} 天`} · ${s.dateRange || '无提交'})`);
+  console.log(`  commits: ${s.totalCommits} (PR ${s.prCount}) · 缓存命中 ${s.cachedCommits} / 本次分析 ${s.newlyAnalyzedCommits} · 扫描会话 ${s.sessionsScanned} · 耗时 ${s.elapsedMs}ms`);
+  console.log(`  作者归因: ${s.authorAttributed}/${s.totalCommits} (${s.authorPct}%) · 行级精确匹配: ${s.matchedLines.toLocaleString()}/${s.totalLines.toLocaleString()} (${s.matchedLinesPct}%)`);
+  const tierLine = Object.entries(s.tierCounts).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}:${v}`).join(' · ');
+  if (tierLine) console.log(`  证据分档: ${tierLine}`);
+  const provLine = Object.entries(s.providerCommits).sort((a, b) => b[1] - a[1]).map(([p, c]) => `${p}:${c}`).join(' · ');
+  if (provLine) console.log(`  Agent 分布: ${provLine}`);
+  if (s.modelLines.length > 0) {
+    console.log('  Agent × Model 行级产出:');
+    for (const m of s.modelLines.slice(0, 8)) {
+      console.log(`    - ${m.provider}/${m.model}: ${m.lines.toLocaleString()} lines`);
+    }
+  }
+  const rc = s.relayCounts;
+  const totalRelays = rc.crossAgentCode + rc.crossModelCode + rc.multiSessionCode + rc.writeThenMerge;
+  console.log(`  接力提交: ${totalRelays} (跨Agent ${rc.crossAgentCode} / 跨模型 ${rc.crossModelCode} / 多子会话 ${rc.multiSessionCode} / 写→合 ${rc.writeThenMerge})`);
+}
+
 // ── main ────────────────────────────────────────────────────────────
 const cmd = argv[0] ?? 'help';
 
 switch (cmd) {
   case 'serve':
     await serve();
+    break;
+  case 'repo-history':
+    await repoHistoryCmd();
     break;
   case 'skills':
     await skillsCmd();
