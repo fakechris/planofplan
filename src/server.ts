@@ -540,6 +540,7 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
   };
   const invalidateSessionsBase = (): void => {
     sessionsBaseCache = null;
+    canonicalGroupsCache = null;
   };
 
   app.get('/api/sessions', (c) => {
@@ -550,6 +551,7 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
     const refresh = c.req.query('refresh') === '1';
     const includeSubagents = c.req.query('subagents') === '1';
     const includeHidden = c.req.query('hidden') === '1';
+    const includeGraph = c.req.query('graph') !== '0' && c.req.query('graph') !== 'false';
     const now = Date.now();
     const since = now - days * 86_400_000;
     // 需求(§1.5 实体化):user session 读 requirements 表(首条,显式
@@ -617,8 +619,9 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
       generatedAt: now,
       requirements,
       requirementLevels,
-      commits: base.commits,
+      commits: includeGraph ? base.commits : [],
       includeSubagents,
+      includeGraph,
     });
     return c.json({
       ...list,
@@ -826,10 +829,21 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
     return c.json({ sessionId, commits: store.listSessionCommits(sessionId) });
   });
 
-  // ── 项目页(IA 重设计第一步 + INV-2198 规范化归并)────────────────
+  // ── 项目页(IA 重设计第一步 + INV-2198 规范化归并 + INV-2208 短缓存)───
 
-  const canonicalProjectGroups = (): Array<CanonicalProjectGroup<Project>> =>
-    groupCanonicalProjects(store.listProjects());
+  let canonicalGroupsCache: { at: number; sig: string; groups: Array<CanonicalProjectGroup<Project>> } | null = null;
+  const canonicalProjectGroups = (): Array<CanonicalProjectGroup<Project>> => {
+    const raw = store.listProjects();
+    const maxSeen = raw.length > 0 ? raw[0]!.lastSeenAt : 0;
+    const sig = `${raw.length}:${maxSeen}:${raw[0]?.id ?? ''}`;
+    const now = Date.now();
+    if (canonicalGroupsCache && canonicalGroupsCache.sig === sig && now - canonicalGroupsCache.at < 15_000) {
+      return canonicalGroupsCache.groups;
+    }
+    const groups = groupCanonicalProjects(raw);
+    canonicalGroupsCache = { at: now, sig, groups };
+    return groups;
+  };
 
   const resolveCanonicalProject = (id: string): CanonicalProjectGroup<Project> | null => {
     const groups = canonicalProjectGroups();
@@ -1207,11 +1221,20 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
 
   // ── 需求实体(ia-redesign §1.5 / §2.3)──────────────────────────
 
+  const parseBoundedLimit = (raw: string | undefined, defaultLimit: number, maxLimit = 5000): number | null => {
+    if (raw == null || raw === '') return defaultLimit;
+    if (raw === '0' || raw === 'all') return null;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    return Math.min(maxLimit, Math.floor(n));
+  };
+
   app.get('/api/requirements', (c) => {
     const days = Math.min(365, Math.max(1, Number(c.req.query('days') ?? 30) || 30));
     const project = c.req.query('project')?.trim() || null;
     const provider = c.req.query('provider')?.trim() || null;
     const level = c.req.query('level')?.trim() || null;
+    const limit = parseBoundedLimit(c.req.query('limit'), 500, 5000);
     const now = Date.now();
     const since = now - days * 86_400_000;
     const sessions = new Map(store.listSessionRows().map((row) => [row.id, row]));
@@ -1252,11 +1275,14 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
       && (!provider || item.provider === provider)
       && (!level || item.originLevel === level)
     )).sort((a, b) => (b.ts ?? b.updatedAt) - (a.ts ?? a.updatedAt));
+    const sliced = limit != null && filtered.length > limit ? filtered.slice(0, limit) : filtered;
     return c.json({
       days,
       since,
       until: now,
-      requirements: filtered,
+      total: filtered.length,
+      truncated: sliced.length < filtered.length,
+      requirements: sliced,
       byProject: [...projectCounts.entries()].sort(sortDesc).map(([name, count]) => ({ name, count })),
       byProvider: [...byProvider.entries()].sort(sortDesc).map(([name, count]) => ({ name, count })),
       byLevel: [...byLevel.entries()].sort(sortDesc).map(([name, count]) => ({ name, count })),
@@ -1325,27 +1351,16 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
 
   app.get('/api/planfiles', (c) => {
     const days = Math.min(365, Math.max(1, Number(c.req.query('days') ?? 30) || 30));
+    const limit = parseBoundedLimit(c.req.query('limit'), 300, 5000);
     const now = Date.now();
     const since = now - days * 86_400_000;
-    // 活跃口径 = 文件 mtime(最新快照),不是扫描时间——扫描器每轮会给
-    // 所有发现的文件续命 lastSeenAt,按它过滤会让一年没动的死计划挤满
-    // 窗口(线上实测踩过)
-    const plans = store.listPlanFiles()
-      .map((plan) => {
-        const latest = store.planSnapshots(plan.id, 1)[0] ?? null;
-        const activeAt = plan.lastSnapshotMtimeMs ?? latest?.mtimeMs ?? plan.lastSeenAt;
-        return {
-          ...plan,
-          activeAt,
-          goal: plan.goal ? plan.goal.slice(0, 400) : null,
-          checkboxChecked: latest?.checkboxChecked ?? 0,
-          checkboxTotal: latest?.checkboxTotal ?? 0,
-          snapshotCount: store.planSnapshotCount(plan.id),
-        };
-      })
-      .filter((plan) => plan.activeAt >= since)
-      .sort((a, b) => b.activeAt - a.activeAt);
-    return c.json({ days, since, until: now, plans });
+    // 活跃口径 = 文件 mtime(最新快照),单次 SQL 联查消除 2×N+1 快照查询(INV-2208)
+    const { total, plans: rows } = store.listPlanFilesSummary(since, limit);
+    const plans = rows.map((plan) => ({
+      ...plan,
+      goal: plan.goal ? plan.goal.slice(0, 400) : null,
+    }));
+    return c.json({ days, since, until: now, total, truncated: plans.length < total, plans });
   });
 
   app.get('/api/planfiles/:id', (c) => {
