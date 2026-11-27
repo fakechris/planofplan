@@ -448,3 +448,70 @@ describe('INV-2200: 跨仓广播 touch 过滤、updated_at 漂移校准与 days=
     expect(store.getSession('claude:fresh')?.updatedAt).toBe(now);
   });
 });
+
+describe('INV-2206: 依赖缓存/内部目录折叠、0-commit 蹭边只读过滤与 4 种排序', () => {
+  test('isToolOrNoiseRoot 覆盖 cargo 依赖缓存、codex memories 与 esp-idf SDK', () => {
+    expect(isToolOrNoiseRoot('/Users/chris/.cargo/git/checkouts/lumen-suite-6af7ae16d8ed3389/22c1e6c/')).toBe(true);
+    expect(isToolOrNoiseRoot('/Users/chris/.codex/memories')).toBe(true);
+    expect(isToolOrNoiseRoot('/Users/chris/esp/esp-idf-v5.5.3')).toBe(true);
+    expect(isToolOrNoiseRoot('/Users/chris/source/lumen-suite')).toBe(false);
+  });
+
+  test('codeOnly=1 折叠工具目录与 0-commit 仅 touch/子代理只读仓,且默认 commit_recent 排序有 commit 优先', async () => {
+    const store = openMemoryDb();
+    const now = Date.now();
+    const uCommitOld = 'https://github.com/org/main-repo.git';
+    const uCommitNew = 'https://github.com/org/newer-repo.git';
+    const uWorkNoCommit = 'https://github.com/org/wip-repo.git';
+    const uTouchOnly = 'https://github.com/org/sdk-touch-only.git';
+    const uSubagentOnly = 'https://github.com/org/subagent-read.git';
+    const uMemories = '/Users/chris/.codex/memories';
+
+    store.upsertSessions([
+      session({ id: 'claude:c1', provider: 'claude', nativeId: 'c1', updatedAt: now - 60_000, origin: 'user' }),
+      session({ id: 'claude:c2', provider: 'claude', nativeId: 'c2', updatedAt: now - 30_000, origin: 'user' }),
+      session({ id: 'claude:wip', provider: 'claude', nativeId: 'wip', updatedAt: now - 1_000, origin: 'user' }), // 最近但 0 commit
+      session({ id: 'claude:sub', provider: 'claude', nativeId: 'sub', updatedAt: now - 500, origin: 'subagent' }),
+      session({ id: 'codex:mem', provider: 'codex', nativeId: 'mem', updatedAt: now - 200, origin: 'exec' }),
+    ]);
+    store.replaceSessionRepos('claude:c1', [repo('claude:c1', 'work', uCommitOld, '/repo/main-repo', 'main-repo')]);
+    store.replaceSessionRepos('claude:c2', [repo('claude:c2', 'work', uCommitNew, '/repo/newer-repo', 'newer-repo')]);
+    store.replaceSessionRepos('claude:wip', [
+      repo('claude:wip', 'work', uWorkNoCommit, '/repo/wip-repo', 'wip-repo'),
+      repo('claude:wip', 'touch', uTouchOnly, '/repo/sdk-touch-only', 'sdk-touch-only'),
+    ]);
+    store.replaceSessionRepos('claude:sub', [repo('claude:sub', 'work', uSubagentOnly, '/repo/subagent-read', 'subagent-read')]);
+    store.replaceSessionRepos('codex:mem', [repo('codex:mem', 'work', uMemories, uMemories, 'memories')]);
+    store.upsertSessionCommits([
+      { sessionId: 'claude:c1', repo: uCommitOld, sha: 'a'.repeat(40), kind: 'declared', ts: now - 60_000, summary: 'c1', fileOverlap: true, pushed: true },
+      { sessionId: 'claude:c1', repo: uCommitOld, sha: 'b'.repeat(40), kind: 'declared', ts: now - 55_000, summary: 'c2', fileOverlap: true, pushed: true },
+      { sessionId: 'claude:c2', repo: uCommitNew, sha: 'c'.repeat(40), kind: 'declared', ts: now - 30_000, summary: 'c3', fileOverlap: true, pushed: true },
+      // 即使 memories 偶然有 1 条 commit,工具目录在 codeOnly=1 下也必须被折叠
+      { sessionId: 'codex:mem', repo: uMemories, sha: 'd'.repeat(40), kind: 'candidate', ts: now - 200, summary: 'mem', fileOverlap: false, pushed: true },
+    ]);
+    store.materializeProjects();
+
+    const server = createServer(store, scheduler as never, { port: 9291, plans: DEFAULT_PLANS });
+    // 默认 sort=commit_recent + codeOnly=1:
+    // 1) sdk-touch-only (0 work), subagent-read (0 user), memories (isToolRepo) 全部折叠
+    // 2) 有 commit 的 newer-repo(更近) > main-repo(更早) 排在 0-commit 但最新的 wip-repo 前面!
+    const rDefault = await (await server.request('http://localhost/api/projects?days=30&codeOnly=1')).json() as {
+      sort: string;
+      projects: Array<{ name: string; commitCount: number }>;
+    };
+    expect(rDefault.sort).toBe('commit_recent');
+    expect(rDefault.projects.map((p) => p.name)).toEqual(['newer-repo', 'main-repo', 'wip-repo']);
+
+    // sort=commits: main-repo(2) > newer-repo(1) > wip-repo(0)
+    const rCommits = await (await server.request('http://localhost/api/projects?days=30&codeOnly=1&sort=commits')).json() as {
+      projects: Array<{ name: string }>;
+    };
+    expect(rCommits.projects.map((p) => p.name)).toEqual(['main-repo', 'newer-repo', 'wip-repo']);
+
+    // sort=recent: wip-repo(1s ago) > newer-repo(30s ago) > main-repo(60s ago)
+    const rRecent = await (await server.request('http://localhost/api/projects?days=30&codeOnly=1&sort=recent')).json() as {
+      projects: Array<{ name: string }>;
+    };
+    expect(rRecent.projects.map((p) => p.name)).toEqual(['wip-repo', 'newer-repo', 'main-repo']);
+  });
+});

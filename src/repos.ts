@@ -118,8 +118,8 @@ export function isRemoteRepoUrl(url: string): boolean {
   return /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(s) || /^(?:[^@\s]+@)?[A-Za-z0-9.-]+:[^/]/.test(s);
 }
 
-/** 只读外部工具/Skill/参考调研克隆/临时目录判定(供项目页默认折叠零 commit 噪音,不删数据)。 */
-const TOOL_OR_NOISE_PATH_RE = /(?:^\/opt\/homebrew(?:\/|$)|^\/usr\/local\/(?:Homebrew|Cellar)(?:\/|$)|\/\.skills\/|\/\.agents\/skills\/|\/\.claude\/(?:plugins|skills)\/|\/\.codex\/skills\/|\/\.local\/share\/|\/node_modules\/|\/research\/20\d\d-|\/analysis\/sources\/|\/github\/repos\/|^\/(?:private\/)?tmp\/)/i;
+/** 只读外部工具/Skill/依赖缓存/SDK/Agent 内部目录判定(供项目页默认折叠噪音,不删数据)。 */
+const TOOL_OR_NOISE_PATH_RE = /(?:^\/opt\/homebrew(?:\/|$)|^\/usr\/local\/(?:Homebrew|Cellar)(?:\/|$)|\/\.skills\/|\/\.agents\/skills\/|\/\.claude\/|\/\.codex\/|\/\.gemini\/|\/\.cargo\/|\/\.rustup\/|\/\.cache\/|\/\.npm\/|\/\.local\/share\/|\/Library\/Caches\/|\/node_modules\/|\/esp\/esp-idf|\/research\/20\d\d-|\/analysis\/sources\/|\/github\/repos\/|^\/(?:private\/)?tmp\/)/i;
 
 export function isToolOrNoiseRoot(root: string | null | undefined): boolean {
   if (!root) return false;
