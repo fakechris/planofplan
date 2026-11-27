@@ -29,6 +29,11 @@ import type {
   UsageScanFile,
   ExperienceNodeRecord,
   ExperienceNodeSaveResult,
+  CommitProvenanceAuthor,
+  CommitProvenanceRecord,
+  CommitProvenanceSessionHit,
+  CommitProvenanceTier,
+  CommitRelayKind,
 } from './types.ts';
 import { buildUsageReport } from './usage.ts';
 import { nameOfUrl } from './repos.ts';
@@ -443,6 +448,29 @@ CREATE TABLE IF NOT EXISTS experience_nodes (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_experience_nodes_active ON experience_nodes(node_kind, path) WHERE status = 'active';
 CREATE INDEX IF NOT EXISTS idx_experience_nodes_repo ON experience_nodes(repo, status, updated_at);
+-- 仓库 Commit 级多 Agent 与模型归因缓存(INV-2195,M3):
+-- L1 可重建索引,按 (repo_url, sha) 增量持久化,与 session_user_meta 隔离;
+-- git commit 不可变,分析过且 analyzer_version 相同的 SHA 永不重复计算。
+CREATE TABLE IF NOT EXISTS commit_provenance (
+  repo_url TEXT NOT NULL,
+  sha TEXT NOT NULL,
+  pr_number INTEGER,
+  committed_at INTEGER NOT NULL,
+  author_name TEXT NOT NULL DEFAULT '',
+  subject TEXT NOT NULL DEFAULT '',
+  tier TEXT NOT NULL,
+  primary_provider TEXT,
+  primary_model TEXT,
+  total_dist_lines INTEGER NOT NULL DEFAULT 0,
+  matched_dist_lines INTEGER NOT NULL DEFAULT 0,
+  relay_kind TEXT NOT NULL DEFAULT '',
+  files_count INTEGER NOT NULL DEFAULT 0,
+  evidence_json TEXT NOT NULL DEFAULT '{}',
+  analyzer_version INTEGER NOT NULL DEFAULT 1,
+  analyzed_at INTEGER NOT NULL,
+  PRIMARY KEY (repo_url, sha)
+);
+CREATE INDEX IF NOT EXISTS idx_commit_provenance_repo_time ON commit_provenance(repo_url, committed_at DESC);
 `;
 
 interface SnapshotRow {
@@ -3702,6 +3730,156 @@ export class Store {
        LIMIT ?`,
     ).all(...patterns, limit) as Array<{ sessionId: string; text: string | null }>;
     return aggregateMessageHits(rows.map((row) => ({ sessionId: row.sessionId, snippet: likeSnippet(row.text ?? '', terms) })));
+  }
+
+  // ── 仓库 Commit 级多 Agent 与模型归因缓存(INV-2195) ────────────────
+
+  upsertCommitProvenance(rows: CommitProvenanceRecord[]): void {
+    if (rows.length === 0) return;
+    const stmt = this.db.query(
+      `INSERT INTO commit_provenance (
+        repo_url, sha, pr_number, committed_at, author_name, subject,
+        tier, primary_provider, primary_model, total_dist_lines, matched_dist_lines,
+        relay_kind, files_count, evidence_json, analyzer_version, analyzed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(repo_url, sha) DO UPDATE SET
+        pr_number = excluded.pr_number,
+        committed_at = excluded.committed_at,
+        author_name = excluded.author_name,
+        subject = excluded.subject,
+        tier = excluded.tier,
+        primary_provider = excluded.primary_provider,
+        primary_model = excluded.primary_model,
+        total_dist_lines = excluded.total_dist_lines,
+        matched_dist_lines = excluded.matched_dist_lines,
+        relay_kind = excluded.relay_kind,
+        files_count = excluded.files_count,
+        evidence_json = excluded.evidence_json,
+        analyzer_version = excluded.analyzer_version,
+        analyzed_at = excluded.analyzed_at`,
+    );
+    this.withTransaction(() => {
+      for (const r of rows) {
+        const evidenceJson = JSON.stringify({
+          files: r.files,
+          authors: r.authors,
+          declared: r.declared,
+          witnessedAuthor: r.witnessedAuthor,
+          mergedBy: r.mergedBy,
+          reviewers: r.reviewers,
+          sessions: r.sessions,
+        });
+        stmt.run(
+          r.repoUrl,
+          r.sha,
+          r.prNumber,
+          r.committedAt,
+          r.authorName,
+          r.subject,
+          r.tier,
+          r.primaryProvider,
+          r.primaryModel,
+          r.totalDistLines,
+          r.matchedDistLines,
+          r.relayKind,
+          r.filesCount,
+          evidenceJson,
+          r.analyzerVersion,
+          r.analyzedAt,
+        );
+      }
+    });
+  }
+
+  getCachedProvenanceShas(repoUrl: string, analyzerVersion: number): Set<string> {
+    const rows = this.db.query(
+      `SELECT sha FROM commit_provenance WHERE repo_url = ? AND analyzer_version = ?`,
+    ).all(repoUrl, analyzerVersion) as Array<{ sha: string }>;
+    return new Set(rows.map((r) => r.sha));
+  }
+
+  listCommitProvenance(repoUrl: string, sinceMs?: number | null): CommitProvenanceRecord[] {
+    const rows = sinceMs != null
+      ? this.db.query(
+        `SELECT * FROM commit_provenance WHERE repo_url = ? AND committed_at >= ? ORDER BY committed_at DESC`,
+      ).all(repoUrl, sinceMs)
+      : this.db.query(
+        `SELECT * FROM commit_provenance WHERE repo_url = ? ORDER BY committed_at DESC`,
+      ).all(repoUrl);
+    return (rows as Array<{
+      repo_url: string;
+      sha: string;
+      pr_number: number | null;
+      committed_at: number;
+      author_name: string;
+      subject: string;
+      tier: string;
+      primary_provider: string | null;
+      primary_model: string | null;
+      total_dist_lines: number;
+      matched_dist_lines: number;
+      relay_kind: string;
+      files_count: number;
+      evidence_json: string;
+      analyzer_version: number;
+      analyzed_at: number;
+    }>).map((row) => {
+      let ev: {
+        files?: string[];
+        authors?: CommitProvenanceAuthor[];
+        declared?: string[];
+        witnessedAuthor?: string[];
+        mergedBy?: string[];
+        reviewers?: string[];
+        sessions?: CommitProvenanceSessionHit[];
+      } = {};
+      try {
+        ev = JSON.parse(row.evidence_json) as typeof ev;
+      } catch {
+        ev = {};
+      }
+      return {
+        repoUrl: row.repo_url,
+        sha: row.sha,
+        prNumber: row.pr_number,
+        committedAt: row.committed_at,
+        authorName: row.author_name,
+        subject: row.subject,
+        tier: row.tier as CommitProvenanceTier,
+        primaryProvider: row.primary_provider,
+        primaryModel: row.primary_model,
+        totalDistLines: row.total_dist_lines,
+        matchedDistLines: row.matched_dist_lines,
+        relayKind: (row.relay_kind || '') as CommitRelayKind,
+        filesCount: row.files_count,
+        files: Array.isArray(ev.files) ? ev.files : [],
+        authors: Array.isArray(ev.authors) ? ev.authors : [],
+        declared: Array.isArray(ev.declared) ? ev.declared : [],
+        witnessedAuthor: Array.isArray(ev.witnessedAuthor) ? ev.witnessedAuthor : [],
+        mergedBy: Array.isArray(ev.mergedBy) ? ev.mergedBy : [],
+        reviewers: Array.isArray(ev.reviewers) ? ev.reviewers : [],
+        sessions: Array.isArray(ev.sessions) ? ev.sessions : [],
+        analyzerVersion: row.analyzer_version,
+        analyzedAt: row.analyzed_at,
+      };
+    });
+  }
+
+  deleteCommitProvenanceForRepo(repoUrl: string): number {
+    const res = this.db.query(`DELETE FROM commit_provenance WHERE repo_url = ?`).run(repoUrl);
+    return Number(res.changes ?? 0);
+  }
+
+  commitProvenanceStats(repoUrl?: string): { count: number; latestAnalyzedAt: number | null } {
+    const row = (repoUrl
+      ? this.db.query(`SELECT COUNT(*) AS cnt, MAX(analyzed_at) AS latest FROM commit_provenance WHERE repo_url = ?`).get(repoUrl)
+      : this.db.query(`SELECT COUNT(*) AS cnt, MAX(analyzed_at) AS latest FROM commit_provenance`).get()) as { cnt: number; latest: number | null };
+    return { count: row?.cnt ?? 0, latestAnalyzedAt: row?.latest ?? null };
+  }
+
+  /** SQLite 文件路径;内存库返回 ':memory:' 或空串,供 server 决定是否派发子进程。 */
+  get dbFilename(): string {
+    return this.db.filename ?? '';
   }
 }
 

@@ -811,3 +811,48 @@ select:focus, input:focus { border-color: var(--accent-2); box-shadow: 0 0 0 2px
 /* ── 限流冷却(INV-466)与 MCP 接入区(INV-467)────────────────────── */
 .cooldown-line { color: var(--warn, #b8860b); }
 .mcp-copy-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+
+/* ── 项目开发历史考古(INV-2195):Agent × Model × 接力可视化 ────────── */
+.rh-header { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.rh-actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.rh-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin-bottom: 12px; }
+.rh-kpi { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+.rh-kpi-label { font-size: 11px; color: var(--muted); }
+.rh-kpi-val { font-size: 16px; font-weight: 700; color: var(--text); margin-top: 2px; }
+.rh-kpi-hint { font-size: 11px; color: var(--muted); }
+.rh-legend { display: flex; flex-wrap: wrap; gap: 10px; font-size: 11px; color: var(--muted); margin-bottom: 6px; }
+.rh-dot { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 4px; vertical-align: middle; }
+.rh-timeline { display: flex; align-items: flex-end; gap: 3px; height: 110px; padding-top: 6px; border-bottom: 1px solid var(--border); margin-bottom: 4px; }
+.rh-bar-col { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; height: 100%; min-width: 8px; }
+.rh-bar-seg { width: 100%; }
+.rh-bar-labels { display: flex; gap: 3px; margin-bottom: 12px; }
+.rh-bar-lbl { flex: 1; min-width: 8px; font-size: 9px; color: var(--muted); text-align: center; overflow: hidden; white-space: nowrap; }
+.rh-two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+@media (max-width: 900px) { .rh-two-col { grid-template-columns: 1fr; } }
+.rh-subhead { font-size: 12px; font-weight: 600; color: var(--text); margin: 0 0 6px; }
+.rh-mod-row { display: grid; grid-template-columns: 120px 1fr 56px; align-items: center; gap: 6px; margin-bottom: 5px; font-size: 11px; }
+.rh-mod-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono, monospace); color: var(--text); }
+.rh-mod-bar { height: 11px; background: var(--surface); border-radius: 3px; overflow: hidden; display: flex; }
+.rh-mod-val { text-align: right; font-family: var(--font-mono, monospace); color: var(--muted); }
+.rh-filters { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 8px; align-items: center; }
+.rh-filters input[type="search"], .rh-filters select {
+  background: var(--surface); color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; padding: 4px 8px; font-size: 11px;
+}
+.rh-pill { display: inline-block; padding: 1px 6px; border-radius: 999px; font-size: 10px; font-weight: 600; }
+.rh-tier-hunk { background: rgba(47, 158, 99, 0.22); color: #6ee7b7; }
+.rh-tier-decl { background: rgba(59, 130, 246, 0.22); color: #93c5fd; }
+.rh-tier-wit { background: rgba(168, 85, 247, 0.22); color: #d8b4fe; }
+.rh-tier-touch { background: rgba(234, 179, 8, 0.22); color: #fde047; }
+.rh-tier-unatt { background: rgba(148, 163, 184, 0.2); color: var(--muted); }
+.rh-relay { background: rgba(249, 115, 22, 0.25); color: #fdba74; margin-left: 4px; }
+.rh-commit-list { max-height: 360px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+.rh-commit-row {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+  padding: 6px 8px; font-size: 11px; cursor: pointer;
+}
+.rh-commit-row:hover { border-color: var(--accent-2); }
+.rh-commit-head { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+.rh-commit-detail { margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--border); color: var(--muted); font-size: 11px; }
+.rh-commit-detail .mono { font-family: var(--font-mono, monospace); }
+
