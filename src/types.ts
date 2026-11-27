@@ -385,6 +385,8 @@ export interface ProjectListItem extends Project {
   sessionCount: number;
   /** 窗口内 origin='user' 的 session 数。 */
   userSessionCount: number;
+  /** 窗口内真实在该仓库工作(role='work'/'commit',不含仅顺带 touch)的 session 数。 */
+  workSessionCount?: number;
   /** 按 sessions 倒排。 */
   agents: ProjectAgentStat[];
   lastActive: number | null;

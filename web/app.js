@@ -1590,14 +1590,19 @@ function currentProjectDays() {
   return document.getElementById('projectDays')?.value || document.getElementById('usageDays')?.value || '30';
 }
 
+function currentProjectSort() {
+  return document.getElementById('projectSort')?.value || 'commit_recent';
+}
+
 async function refreshProjects() {
   const listEl = document.getElementById('projectList');
   if (!listEl) return;
   const seq = ++projectsFetchSeq;
   try {
     const days = currentProjectDays();
+    const sort = currentProjectSort();
     const codeOnly = document.getElementById('projectCodeOnly')?.checked ?? true;
-    const next = await request(`/api/projects?days=${encodeURIComponent(days)}${codeOnly ? '&codeOnly=1' : ''}`);
+    const next = await request(`/api/projects?days=${encodeURIComponent(days)}&sort=${encodeURIComponent(sort)}${codeOnly ? '&codeOnly=1' : ''}`);
     if (seq !== projectsFetchSeq) return;
     latestProjects = next;
   } catch {
@@ -1697,6 +1702,7 @@ function renderProjects(forceDetail = false) {
 }
 
 document.getElementById('projectDays')?.addEventListener('change', () => { void refreshProjects(); });
+document.getElementById('projectSort')?.addEventListener('change', () => { void refreshProjects(); });
 document.getElementById('projectSearch')?.addEventListener('input', () => renderProjects(false));
 document.getElementById('projectCodeOnly')?.addEventListener('change', () => { void refreshProjects(); });
 

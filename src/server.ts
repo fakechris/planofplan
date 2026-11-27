@@ -827,6 +827,7 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
     const byPrimary = new Map<string, {
       sessions: Set<string>;
       userSessions: Set<string>;
+      workSessions: Set<string>;
       agents: Map<string, ProjectAgentStat>;
       lastActive: number;
       lastWorkActive: number;
@@ -836,11 +837,14 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
       if (!primaryId) continue;
       let agg = byPrimary.get(primaryId);
       if (!agg) {
-        agg = { sessions: new Set(), userSessions: new Set(), agents: new Map(), lastActive: 0, lastWorkActive: 0 };
+        agg = { sessions: new Set(), userSessions: new Set(), workSessions: new Set(), agents: new Map(), lastActive: 0, lastWorkActive: 0 };
         byPrimary.set(primaryId, agg);
       }
       if (row.updatedAt > agg.lastActive) agg.lastActive = row.updatedAt;
-      if (row.role !== 'touch' && row.updatedAt > agg.lastWorkActive) agg.lastWorkActive = row.updatedAt;
+      if (row.role !== 'touch') {
+        agg.workSessions.add(row.sessionId);
+        if (row.updatedAt > agg.lastWorkActive) agg.lastWorkActive = row.updatedAt;
+      }
       if (agg.sessions.has(row.sessionId)) continue; // 跨别名同 session 不重复计数
       agg.sessions.add(row.sessionId);
       const isUser = row.origin === 'user';
@@ -877,9 +881,44 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
     return Math.min(365, Math.max(1, Math.floor(n)));
   };
 
+  type ProjectSortMode = 'commit_recent' | 'commits' | 'recent' | 'sessions';
+  const parseProjectSort = (raw: string | undefined): ProjectSortMode => {
+    if (raw === 'commits' || raw === 'recent' || raw === 'sessions' || raw === 'commit_recent') return raw;
+    return 'commit_recent';
+  };
+
+  const sortProjectItems = (items: ProjectListItem[], mode: ProjectSortMode): ProjectListItem[] => {
+    return items.sort((a, b) => {
+      if (mode === 'commits') {
+        return b.commitCount - a.commitCount
+          || (b.totalCommitCount ?? 0) - (a.totalCommitCount ?? 0)
+          || (b.lastActive ?? 0) - (a.lastActive ?? 0)
+          || b.sessionCount - a.sessionCount;
+      }
+      if (mode === 'sessions') {
+        return b.sessionCount - a.sessionCount
+          || b.commitCount - a.commitCount
+          || (b.lastActive ?? 0) - (a.lastActive ?? 0);
+      }
+      if (mode === 'recent') {
+        return (b.lastActive ?? 0) - (a.lastActive ?? 0)
+          || b.commitCount - a.commitCount
+          || b.sessionCount - a.sessionCount;
+      }
+      // 默认 commit_recent:窗口内有 commit 的项目优先,组内按最近活跃倒排(INV-2206)
+      const aHas = a.commitCount > 0 ? 1 : 0;
+      const bHas = b.commitCount > 0 ? 1 : 0;
+      return bHas - aHas
+        || (b.lastActive ?? 0) - (a.lastActive ?? 0)
+        || b.commitCount - a.commitCount
+        || (b.totalCommitCount ?? 0) - (a.totalCommitCount ?? 0)
+        || b.sessionCount - a.sessionCount;
+    });
+  };
+
   const toListItem = (
     group: CanonicalProjectGroup<Project>,
-    agg: { sessions: Set<string>; userSessions: Set<string>; agents: Map<string, ProjectAgentStat>; lastActive: number; lastWorkActive?: number } | undefined,
+    agg: { sessions: Set<string>; userSessions: Set<string>; workSessions?: Set<string>; agents: Map<string, ProjectAgentStat>; lastActive: number; lastWorkActive?: number } | undefined,
     commitCount: number,
     commitSource: 'provenance' | 'session_commits',
     requirementCount: number | null,
@@ -888,6 +927,7 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
     ...group.primary,
     sessionCount: agg?.sessions.size ?? 0,
     userSessionCount: agg?.userSessions.size ?? 0,
+    ...(agg?.workSessions ? { workSessionCount: agg.workSessions.size } : {}),
     agents: [...(agg?.agents.values() ?? [])].sort((a, b) => b.sessions - a.sessions || a.provider.localeCompare(b.provider)),
     lastActive: (agg?.lastWorkActive || agg?.lastActive) || null,
     commitCount,
@@ -902,6 +942,7 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
 
   app.get('/api/projects', (c) => {
     const days = parseProjectDays(c.req.query('days'));
+    const sortMode = parseProjectSort(c.req.query('sort'));
     const codeOnly = c.req.query('codeOnly') === '1' || c.req.query('codeOnly') === 'true';
     const now = Date.now();
     const since = days != null ? now - days * 86_400_000 : null;
@@ -911,21 +952,26 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
     const allProvShas = since != null ? store.projectProvenanceShas(null) : provShas;
     const sessShas = store.projectCommitShas(since);
     const requirementCounts = store.projectRequirementCounts(since);
-    const allItems = groups
-      .map((group) => {
-        const provCount = countDistinctShas(provShas, group.aliasUrls);
-        const totalProvCount = countDistinctShas(allProvShas, group.aliasUrls);
-        const commitSource = (provCount > 0 || totalProvCount > 0) ? 'provenance' : 'session_commits';
-        const commitCount = commitSource === 'provenance' ? provCount : countDistinctShas(sessShas, group.aliasUrls);
-        let reqCount = 0;
-        for (const u of group.aliasUrls) reqCount += requirementCounts.get(u) ?? 0;
-        return toListItem(group, aggregates.get(group.primary.id), commitCount, commitSource, reqCount, totalProvCount);
-      })
-      .sort((a, b) => (b.lastActive ?? 0) - (a.lastActive ?? 0) || b.commitCount - a.commitCount || b.sessionCount - a.sessionCount);
+    const allItems = sortProjectItems(groups.map((group) => {
+      const provCount = countDistinctShas(provShas, group.aliasUrls);
+      const totalProvCount = countDistinctShas(allProvShas, group.aliasUrls);
+      const commitSource = (provCount > 0 || totalProvCount > 0) ? 'provenance' : 'session_commits';
+      const commitCount = commitSource === 'provenance' ? provCount : countDistinctShas(sessShas, group.aliasUrls);
+      let reqCount = 0;
+      for (const u of group.aliasUrls) reqCount += requirementCounts.get(u) ?? 0;
+      return toListItem(group, aggregates.get(group.primary.id), commitCount, commitSource, reqCount, totalProvCount);
+    }), sortMode);
+    // 仅看活跃代码仓(INV-2206):
+    // 1) 始终折叠只读依赖缓存/SDK/Agent 内部目录(如 ~/.cargo, ~/.codex/memories, esp-idf)
+    // 2) 非工具仓保留:有 commit(窗口内或全量考古缓存),或真实在仓内工作且有用户对话(排除 0 commit 仅顺带 touch / 仅子代理读过的外部仓)
     const projects = codeOnly
-      ? allItems.filter((p) => p.commitCount > 0 || (p.totalCommitCount ?? 0) > 0 || (Boolean(p.hasGit) && !p.isToolRepo && p.sessionCount > 0))
+      ? allItems.filter((p) => !p.isToolRepo && (
+        p.commitCount > 0
+        || (p.totalCommitCount ?? 0) > 0
+        || (Boolean(p.hasGit) && (p.workSessionCount ?? 0) > 0 && p.userSessionCount > 0)
+      ))
       : allItems;
-    return c.json({ days: days ?? 'all', since, until: now, totalProjects: allItems.length, projects });
+    return c.json({ days: days ?? 'all', sort: sortMode, since, until: now, totalProjects: allItems.length, projects });
   });
 
   app.get('/api/projects/:id', (c) => {

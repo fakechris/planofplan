@@ -133,6 +133,12 @@
           <option value="90">近 90 天</option>
           <option value="all">全量</option>
         </select>
+        <select id="projectSort" aria-label="项目排序">
+          <option value="commit_recent" selected>最近活跃（有 commit 优先）</option>
+          <option value="commits">按 Commit 数</option>
+          <option value="recent">按最近活跃时间</option>
+          <option value="sessions">按对话数</option>
+        </select>
         <input id="projectSearch" type="search" placeholder="搜索项目名 / 路径 / 别名" aria-label="搜索项目" />
         <label class="session-check">
           <input id="projectCodeOnly" type="checkbox" checked />
