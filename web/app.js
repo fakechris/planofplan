@@ -1760,6 +1760,7 @@ function mountProjectHistory(projectId, detail, initialReport) {
         <div class="rh-actions">
           <button type="button" class="secondary-btn" data-rh-scan="30" ${scanning ? 'disabled' : ''}>${scanning ? '扫描中…' : '扫描近 30 天'}</button>
           <button type="button" class="secondary-btn" data-rh-scan="all" ${scanning ? 'disabled' : ''}>扫描全量历史</button>
+          <button type="button" class="secondary-btn" data-rh-scan="all" data-rh-refresh="1" ${scanning ? 'disabled' : ''} title="忽略缓存重新计算全部 commit 归因（含合并别名日志）">强制重扫全量</button>
         </div>
       </div>
     `;
@@ -1936,6 +1937,7 @@ function mountProjectHistory(projectId, detail, initialReport) {
       btn.addEventListener('click', async () => {
         if (scanning) return;
         const mode = btn.getAttribute('data-rh-scan');
+        const refresh = btn.getAttribute('data-rh-refresh') === '1';
         currentDays = mode === 'all' ? 'all' : String(Number(mode) || 30);
         scanning = true;
         render();
@@ -1943,7 +1945,7 @@ function mountProjectHistory(projectId, detail, initialReport) {
           const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/history/scan`, {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ days: mode === 'all' ? 'all' : Number(mode) || 30 }),
+            body: JSON.stringify({ days: mode === 'all' ? 'all' : Number(mode) || 30, ...(refresh ? { refresh: true } : {}) }),
           });
           if (res.ok) {
             report = await res.json();

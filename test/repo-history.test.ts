@@ -21,6 +21,7 @@ import {
   readCachedRepoHistory,
   readFactorySessionModel,
   resolveRelPath,
+  resolveRepoTarget,
   scanSessionFileIntoContext,
   trailerToAgent,
   trailerToModel,
@@ -603,5 +604,87 @@ describe('L0 文件扫描、增量缓存、HTTP API 与只读 MCP repo_history',
     expect(rAll.recordsTotal).toBe(5);
     expect(rAll.recordsTruncated).toBe(false);
     expect(rAll.summary.totalCommits).toBe(5);
+  });
+
+  test('INV-2199: analyzeRepoHistory 自动从规范化归并组发现父目录别名 L0 日志,且前端暴露强制重扫入口', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'pop-rh-inv2199-'));
+    try {
+      const parentDir = join(tmp, 'grokbot');
+      const repoDir = join(parentDir, 'agentbox');
+      mkdirSync(join(repoDir, '.git'), { recursive: true });
+      const home = join(tmp, 'home');
+      // 日志仅放在父目录名 -tmp-grokbot 下(路径不含 demo/agentbox),验证自动别名发现
+      const claudeDir = join(home, '.claude', 'projects', '-tmp-grokbot');
+      mkdirSync(claudeDir, { recursive: true });
+      const sessionFile = join(claudeDir, 'sess-grok-1.jsonl');
+      const tCommit = Date.now() - 120_000;
+      const addedLine = 'export const parentAliasRecoveredFeature = computeGrokbotBridge(77);';
+      writeFileSync(sessionFile, [
+        JSON.stringify({
+          type: 'assistant',
+          timestamp: new Date(tCommit - 30_000).toISOString(),
+          message: {
+            role: 'assistant',
+            model: 'claude-opus-5-5',
+            content: [{
+              type: 'tool_use', id: 'tu1', name: 'Write',
+              input: { file_path: join(repoDir, 'src/bridge.ts'), content: `${addedLine}\n` },
+            }],
+          },
+        }),
+      ].join('\n') + '\n');
+
+      const fakeGit = (args: string[]): string => {
+        if (args.includes('log') && !args.includes('-p')) {
+          return `${SHA_B}\x1f${new Date(tCommit).toISOString()}\n`;
+        }
+        return [
+          `<<<POP_COMMIT>>>${SHA_B}\x1f${new Date(tCommit).toISOString()}\x1f${new Date(tCommit).toISOString()}\x1fChris\x1ffeat: bridge (#88)\x1f<<<POP_BODYEND>>>`,
+          'diff --git a/src/bridge.ts b/src/bridge.ts',
+          '+++ b/src/bridge.ts',
+          `+${addedLine}`,
+        ].join('\n');
+      };
+
+      const store = openMemoryDb();
+      store.upsertSessions([
+        {
+          id: 'claude:main1', provider: 'claude', nativeId: 'main1', cwd: repoDir,
+          title: 'main', sourceFile: null, startedAt: tCommit - 60_000, updatedAt: tCommit,
+          inputTokens: 0, outputTokens: 0, totalTokens: 10, estimatedCostUsd: null, seenAt: Date.now(),
+        },
+        {
+          id: 'claude:parent1', provider: 'claude', nativeId: 'parent1', cwd: parentDir,
+          title: 'parent', sourceFile: null, startedAt: tCommit - 60_000, updatedAt: tCommit,
+          inputTokens: 0, outputTokens: 0, totalTokens: 10, estimatedCostUsd: null, seenAt: Date.now(),
+        },
+      ]);
+      store.replaceSessionRepos('claude:main1', [{
+        sessionId: 'claude:main1', role: 'work', url: REPO_URL, root: repoDir, name: 'demo', evidenceKind: 'observed',
+      }]);
+      store.replaceSessionRepos('claude:parent1', [{
+        sessionId: 'claude:parent1', role: 'work', url: parentDir, root: parentDir, name: 'grokbot', evidenceKind: 'observed',
+      }]);
+      store.materializeProjects();
+
+      // resolveRepoTarget 支持按归并别名 'grokbot' 定位到主仓库
+      const resolved = resolveRepoTarget(store, 'grokbot');
+      expect(resolved).toMatchObject({ repoUrl: REPO_URL, repoRoot: repoDir, repoName: 'demo' });
+
+      // 调用方不手动传 aliasUrls/extraTokens,analyzeRepoHistory 仍自动发现 -tmp-grokbot 下的 L0 日志
+      const report = analyzeRepoHistory(store, {
+        repoUrl: REPO_URL, repoRoot: repoDir, repoName: 'demo', days: 30, homeDir: home, git: fakeGit,
+      });
+      expect(report.records).toHaveLength(1);
+      expect(report.records[0]!.tier).toBe('hunk-matched');
+      expect(report.records[0]!.primaryProvider).toBe('claude');
+      expect(report.records[0]!.matchedDistLines).toBe(1);
+
+      const appJs = readFileSync(join(import.meta.dir, '../web/app.js'), 'utf8');
+      expect(appJs).toContain('data-rh-refresh="1"');
+      expect(appJs).toContain('refresh: true');
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });

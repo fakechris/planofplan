@@ -25,7 +25,7 @@ import type {
   RepoHistoryReport,
   RepoHistorySummary,
 } from './types.ts';
-import { nameOfUrl, repoRefOf } from './repos.ts';
+import { canonicalRepoUrl, groupCanonicalProjects, nameOfUrl, repoRefOf } from './repos.ts';
 import { wholeMtimeMs } from './mtime.ts';
 
 export const REPO_HISTORY_ANALYZER_VERSION = 1;
@@ -1559,7 +1559,7 @@ export interface RepoTarget {
   repoName: string;
 }
 
-/** 根据本地路径、项目名或 URL 片段解析目标仓库。 */
+/** 根据本地路径、项目名、合并别名或 URL 片段解析目标仓库(优先定位规范化主仓,INV-2199)。 */
 export function resolveRepoTarget(store: Store, query: string): RepoTarget | null {
   const q = query.trim();
   if (!q) return null;
@@ -1571,12 +1571,26 @@ export function resolveRepoTarget(store: Store, query: string): RepoTarget | nul
     return { repoUrl: resolved, repoRoot: resolved, repoName: basename(resolved) };
   }
   const low = q.toLowerCase();
-  // 2) 优先匹配 projects 表
-  const projects = store.listProjects();
-  const exact = projects.find((p) => p.id === q || p.name.toLowerCase() === low || p.url.toLowerCase() === low);
-  if (exact) return { repoUrl: exact.url, repoRoot: exact.root, repoName: exact.name };
-  const partial = projects.find((p) => p.name.toLowerCase().includes(low) || p.url.toLowerCase().includes(low) || (p.root?.toLowerCase().includes(low) ?? false));
-  if (partial) return { repoUrl: partial.url, repoRoot: partial.root, repoName: partial.name };
+  // 2) 优先匹配规范化主项目组(含合并别名,如 grokbot → lumenbox)
+  const groups = groupCanonicalProjects(store.listProjects());
+  const exactGroup = groups.find((g) => (
+    g.primary.id === q
+    || g.primary.name.toLowerCase() === low
+    || g.primary.url.toLowerCase() === low
+    || g.aliases.some((a) => a.id === q || a.name.toLowerCase() === low || a.url.toLowerCase() === low)
+  ));
+  if (exactGroup) {
+    return { repoUrl: exactGroup.primary.url, repoRoot: exactGroup.primary.root, repoName: exactGroup.primary.name };
+  }
+  const partialGroup = groups.find((g) => (
+    g.primary.name.toLowerCase().includes(low)
+    || g.primary.url.toLowerCase().includes(low)
+    || (g.primary.root?.toLowerCase().includes(low) ?? false)
+    || g.aliasNames.some((n) => n.toLowerCase().includes(low))
+  ));
+  if (partialGroup) {
+    return { repoUrl: partialGroup.primary.url, repoRoot: partialGroup.primary.root, repoName: partialGroup.primary.name };
+  }
   // 3) 兜底从 commit_provenance / session_repos 找
   for (const session of store.listSessionRows()) {
     for (const r of session.repos ?? []) {
@@ -1586,6 +1600,24 @@ export function resolveRepoTarget(store: Store, query: string): RepoTarget | nul
     }
   }
   return null;
+}
+
+/** 自动从规范化项目组补齐目标仓库的全部合并别名 URL 与名称(INV-2199:CLI/子进程/MCP 统一生效)。 */
+function resolveCanonicalAliases(
+  store: Store,
+  repoUrl: string,
+  repoRoot: string | null,
+): { aliasUrls: string[]; aliasNames: string[] } {
+  const canon = canonicalRepoUrl(repoUrl);
+  const cleanRoot = repoRoot ? repoRoot.replace(/\/+$/, '') : null;
+  const groups = groupCanonicalProjects(store.listProjects());
+  const match = groups.find((g) => (
+    g.aliasUrls.includes(repoUrl)
+    || (canon !== '' && canonicalRepoUrl(g.primary.url) === canon)
+    || (cleanRoot != null && g.primary.root?.replace(/\/+$/, '') === cleanRoot)
+  ));
+  if (!match) return { aliasUrls: [], aliasNames: [] };
+  return { aliasUrls: match.aliasUrls, aliasNames: match.aliasNames };
 }
 
 export interface AnalyzeRepoHistoryOptions {
@@ -1715,6 +1747,10 @@ export function analyzeRepoHistory(
     const ctx = createScanContext(options.repoName, byBase, targetLinesByFile);
 
     // 只扫描 mtime >= 最早待分析 commit - 7d 的 L0 文件,大幅缩短增量扫描耗时
+    // 自动补齐规范化归并的父目录/别名工作树词(INV-2199),确保 CLI 子进程与 Web 行为完全一致
+    const autoAliases = resolveCanonicalAliases(store, options.repoUrl, options.repoRoot);
+    const mergedAliasUrls = [...new Set([...(options.aliasUrls ?? []), ...autoAliases.aliasUrls])];
+    const mergedExtraTokens = [...new Set([...(options.extraTokens ?? []), ...autoAliases.aliasNames])];
     const logSinceMs = Number.isFinite(earliestCommitTs) ? earliestCommitTs - 7 * DAY_MS : (sinceMs ?? 0);
     const discovered = discoverCandidateL0Files(
       store,
@@ -1723,7 +1759,7 @@ export function analyzeRepoHistory(
       options.repoName,
       logSinceMs,
       options.homeDir,
-      { aliasUrls: options.aliasUrls, extraTokens: options.extraTokens },
+      { aliasUrls: mergedAliasUrls, extraTokens: mergedExtraTokens },
     );
     for (const item of discovered.claude) scanSessionFileIntoContext('claude', item.path, item.isSubagent, ctx);
     for (const path of discovered.codex) scanSessionFileIntoContext('codex', path, false, ctx);
