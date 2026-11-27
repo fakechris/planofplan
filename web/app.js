@@ -296,29 +296,32 @@ async function request(path, options = {}) {
   return data;
 }
 
-async function load() {
+async function load(includeUsage = false) {
   const days = document.getElementById('usageDays')?.value || '30';
   const [overview, buildInfo, usage] = await Promise.all([
     request('/api/overview'),
-    request('/api/build-info'),
-    request(`/api/usage?days=${encodeURIComponent(days)}`),
+    latestBuildInfo ? Promise.resolve(latestBuildInfo) : request('/api/build-info'),
+    includeUsage ? request(`/api/usage?days=${encodeURIComponent(days)}`) : Promise.resolve(null),
   ]);
   return { overview, buildInfo, usage };
 }
 
 let sessionsLoading = false;
 
-async function loadSessionsBackground(generation) {
+async function loadSessionsBackground(generation, withGraph = false) {
   if (sessionsLoading) return;
   sessionsLoading = true;
   try {
-    const sessions = await request(`/api/sessions?${sessionListParams()}`).catch(() => null);
+    const baseParams = withGraph ? sessionListParams().replace('&graph=0', '') : sessionListParams();
+    const sessions = await request(`/api/sessions?${baseParams}`).catch(() => null);
     if (generation && generation !== renderGeneration) return;
     latestSessions = sessions;
-    renderSessions(latestSessions);
-    if (currentTab() === 'graph') void refreshGraph();
-    if (currentTab() === 'projects') void refreshProjects();
-    maybePollSessionIndex(latestSessions);
+    if (currentTab() === 'sessions') {
+      renderSessions(latestSessions);
+      maybePollSessionIndex(latestSessions);
+    } else if (currentTab() === 'graph' && withGraph) {
+      renderGraph(latestSessions);
+    }
   } finally {
     sessionsLoading = false;
   }
@@ -1058,14 +1061,16 @@ function renderLineageReport(report) {
 
 async function refreshGraph() {
   void refreshLineageReport();
-  if (graphIncludeSubagents) {
-    try {
-      const days = document.getElementById('usageDays')?.value || '30';
-      renderGraph(await request(`/api/sessions?days=${encodeURIComponent(days)}&subagents=1`));
-      return;
-    } catch {
-      /* 失败退回缓存数据 */
-    }
+  const days = document.getElementById('usageDays')?.value || '30';
+  try {
+    const sub = graphIncludeSubagents ? '&subagents=1' : '';
+    const data = await request(`/api/sessions?days=${encodeURIComponent(days)}${sub}`);
+    if (currentTab() !== 'graph') return;
+    if (!graphIncludeSubagents) latestSessions = data;
+    renderGraph(data);
+    return;
+  } catch {
+    /* 失败退回缓存数据 */
   }
   renderGraph(latestSessions);
 }
@@ -1487,10 +1492,6 @@ function renderCalendar() {
         g.appendChild(dia);
       }
     }
-    g.addEventListener('click', (event) => {
-      event.stopPropagation();
-      navigate('sessions', t.sid);
-    });
     svg.appendChild(g);
   }
 
@@ -1506,12 +1507,24 @@ function renderCalendar() {
     const title = document.createElementNS(svgNs, 'title');
     title.textContent = `${r.text} · ${r.events} events · ${r.originLevel}`;
     circle.appendChild(title);
-    circle.addEventListener('click', (event) => {
-      event.stopPropagation();
-      navigate('requirements', r.id);
-    });
     svg.appendChild(circle);
   }
+
+  // 单监听器事件委托(INV-2208):避免给 3500+ SVG 节点逐一挂闭包引发 Safari 内存暴涨
+  svg.addEventListener('click', (event) => {
+    const target = event.target;
+    const reqEl = target?.closest?.('[data-cal-req]');
+    if (reqEl) {
+      event.stopPropagation();
+      navigate('requirements', reqEl.getAttribute('data-cal-req'));
+      return;
+    }
+    const sessEl = target?.closest?.('[data-cal-session]');
+    if (sessEl) {
+      event.stopPropagation();
+      navigate('sessions', sessEl.getAttribute('data-cal-session'));
+    }
+  });
 
   el.replaceChildren(svg);
   const stats = document.getElementById('graphStats');
@@ -1666,11 +1679,14 @@ function renderProjects(forceDetail = false) {
     return;
   }
   listEl.innerHTML = projects.map(projectItemHtml).join('');
-  listEl.querySelectorAll('[data-project-id]').forEach((row) => {
-    row.addEventListener('click', () => {
+  if (!listEl.dataset.delegated) {
+    listEl.dataset.delegated = '1';
+    listEl.addEventListener('click', (event) => {
+      const row = event.target?.closest?.('[data-project-id]');
+      if (!row || !listEl.contains(row)) return;
       const nextId = row.getAttribute('data-project-id');
       if (!nextId || nextId === openProjectId) return;
-      // O(1) 切换左侧选中态,不再重建整棵项目列表 DOM(INV-2198)
+      // O(1) 切换左侧选中态,不再重建整棵项目列表 DOM(INV-2198 + INV-2208 事件委托)
       listEl.querySelector('.session-item.active')?.classList.remove('active');
       row.classList.add('active');
       openProjectId = nextId;
@@ -1680,7 +1696,7 @@ function renderProjects(forceDetail = false) {
       renderedProjectKey = wantKey;
       void loadProjectDetail(nextId, days, wantKey);
     });
-  });
+  }
   const open = allProjects.find((project) => project.id === openProjectId);
   if (open) {
     const days = currentProjectDays();
@@ -2003,14 +2019,18 @@ function projectDetailHtml(detail) {
     </div>
   `).join('');
 
-  const requirementsHtml = (detail.requirements || []).map((req) => `
+  const allReqs = detail.requirements || [];
+  const REQ_CAP = 30;
+  const requirementsHtml = allReqs.slice(0, REQ_CAP).map((req) => `
     <button type="button" class="session-related-req" data-nav="requirements" data-nav-id="${escapeHtml(req.id || '')}" data-nav-session="${escapeHtml(req.sessionId)}">
       ${escapeHtml(req.text)}
       <span><i class="req-origin req-origin-${escapeHtml(req.originLevel || 'system_inferred')}">${req.originLevel === 'user_explicit' ? '用户原话' : '推断'}</i> · ${escapeHtml(req.provider)} · ${fmtAgo(req.updatedAt, Date.now())}</span>
     </button>
-  `).join('');
+  `).join('') + (allReqs.length > REQ_CAP ? `<div class="muted">仅展示最近 ${REQ_CAP} / 共 ${allReqs.length} 条需求</div>` : '');
 
-  const commitsHtml = (detail.commits || []).map((commit) => {
+  const allCommits = detail.commits || [];
+  const COMMIT_CAP = 50;
+  const commitsHtml = allCommits.slice(0, COMMIT_CAP).map((commit) => {
     const strong = commit.kind !== 'candidate' || commit.fileOverlap;
     const url = commit.pushed === false ? null : commitUrl(commit.repo, commit.sha);
     const sha = escapeHtml(commit.sha.slice(0, 8));
@@ -2024,11 +2044,14 @@ function projectDetailHtml(detail) {
       <span class="attr-summary">${escapeHtml(commit.summary || '(no subject)')}</span>
       <span class="attr-meta">${commit.ts ? fmtAgo(commit.ts, Date.now()) : ''}</span>
     </div>`;
-  }).join('');
+  }).join('') + (allCommits.length > COMMIT_CAP ? `<div class="muted">仅展示最近 ${COMMIT_CAP} / 共 ${allCommits.length} 条归因 commit（完整历史见上方「开发历史考古」）</div>` : '');
 
-  // session 时间线:倒排;parentId 命中列表内父 session 的 subagent 缩进
-  const ids = new Set((detail.sessions || []).map((session) => session.id));
-  const sessionsHtml = (detail.sessions || []).map((session) => {
+  // session 时间线:倒排,上限 50 条防大项目 DOM 膨胀(INV-2208)
+  const allSessions = detail.sessions || [];
+  const SESSION_CAP = 50;
+  const shownSessions = allSessions.slice(0, SESSION_CAP);
+  const ids = new Set(shownSessions.map((session) => session.id));
+  const sessionsHtml = shownSessions.map((session) => {
     const origin = session.origin && session.origin !== 'user' ? (ORIGIN_LABELS[session.origin] || session.origin) : '';
     const nested = session.parentId && ids.has(session.parentId);
     return `
@@ -2036,7 +2059,7 @@ function projectDetailHtml(detail) {
       <span class="attr-path">${nested ? '↳ ' : ''}${escapeHtml(session.title || '无标题')}</span>
       <span class="attr-meta">${escapeHtml(session.provider)}${origin ? ` · ${escapeHtml(origin)}` : ''} · ${fmtAgo(session.updatedAt, Date.now())}</span>
     </div>`;
-  }).join('');
+  }).join('') + (allSessions.length > SESSION_CAP ? `<div class="muted">仅展示最近 ${SESSION_CAP} / 共 ${allSessions.length} 条对话</div>` : '');
 
   // 计划区(项目 → 计划):该 repo 下的 plan 文件,跳计划详情
   const plansHtml = (detail.plans || []).slice(0, 12).map((plan) => `
@@ -2742,19 +2765,34 @@ function renderPlans() {
       byRepo.set(name, list);
     }
     const groups = [...byRepo.entries()].sort((a, b) => Math.max(...b[1].map((p) => p.activeAt ?? p.lastSeenAt)) - Math.max(...a[1].map((p) => p.activeAt ?? p.lastSeenAt)));
-    const GROUP_CAP = 50;
-    listEl.innerHTML = groups.map(([name, items]) => `
-      <div class="plan-group-head" title="${items[0]?.repo || ''}">${escapeHtml(name)}<span>${items.length} 个文件</span></div>
-      ${items.slice(0, GROUP_CAP).map(planItemHtml).join('')}
-      ${items.length > GROUP_CAP ? `<div class="session-more" disabled>… 该项目还有 ${items.length - GROUP_CAP} 个,选项目或类型收窄</div>` : ''}
-    `).join('');
+    const GROUP_CAP = 30;
+    const TOTAL_CAP = 250;
+    let rendered = 0;
+    const chunks = [];
+    for (const [name, items] of groups) {
+      if (rendered >= TOTAL_CAP) break;
+      const take = Math.min(GROUP_CAP, TOTAL_CAP - rendered);
+      rendered += take;
+      chunks.push(`
+        <div class="plan-group-head" title="${items[0]?.repo || ''}">${escapeHtml(name)}<span>${items.length} 个文件</span></div>
+        ${items.slice(0, take).map(planItemHtml).join('')}
+        ${items.length > take ? `<div class="session-more" disabled>… 该项目还有 ${items.length - take} 个,选项目或类型收窄</div>` : ''}
+      `);
+    }
+    if (visible.length > rendered) {
+      chunks.push(`<div class="session-more" disabled>… 窗口内共 ${latestPlans.total ?? visible.length} 个计划文件,已展示前 ${rendered} 个</div>`);
+    }
+    listEl.innerHTML = chunks.join('');
   }
-  listEl.querySelectorAll('[data-plan-open]').forEach((row) => {
-    row.addEventListener('click', () => {
+  if (!listEl.dataset.delegated) {
+    listEl.dataset.delegated = '1';
+    listEl.addEventListener('click', (event) => {
+      const row = event.target?.closest?.('[data-plan-open]');
+      if (!row || !listEl.contains(row)) return;
       openPlanId = row.getAttribute('data-plan-open');
       renderPlans();
     });
-  });
+  }
   const open = (latestPlans.plans || []).find((plan) => plan.id === openPlanId);
   if (open) {
     readerEl.innerHTML = '<div class="muted">读取计划详情…</div>';
@@ -3533,11 +3571,12 @@ function showToast(message, error = false) {
 }
 
 function tickClock() {
+  if (document.hidden) return; // 后台标签页不唤醒 DOM 写入(INV-2208)
   const clock = document.getElementById('heroClock');
   if (clock) clock.textContent = new Intl.DateTimeFormat('zh-CN', {
     weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
   }).format(new Date());
-  if (latestOverview) {
+  if (latestOverview && currentTab() === 'plans') {
     let hasNewlyReset = false;
     const now = Date.now();
     document.querySelectorAll('[data-reset-at]').forEach((el) => {
@@ -3555,15 +3594,19 @@ function tickClock() {
 }
 
 let renderGeneration = 0;
+let lastRenderAt = 0;
 
-async function render() {
+async function render(force = false) {
+  if (!force && document.hidden) return; // 后台暂停轮询与重绘,防止 Safari 内存持续膨胀(INV-2208)
   const generation = ++renderGeneration;
+  lastRenderAt = Date.now();
+  const tab = currentTab();
   try {
-    const result = await load();
+    const result = await load(tab === 'usage');
     if (generation !== renderGeneration) return;
     latestOverview = result.overview;
     latestBuildInfo = result.buildInfo;
-    latestUsage = result.usage;
+    if (result.usage) latestUsage = result.usage;
     const now = Date.now();
     document.getElementById('connectionState').className = 'connection connected';
     document.getElementById('connectionState').innerHTML = '<i></i> live';
@@ -3578,13 +3621,23 @@ async function render() {
     const visiblePlans = orderedPlans.filter((p) => !hiddenPlans.has(p.slug));
 
     renderSummary(latestOverview, visiblePlans);
-    renderUsage(latestUsage);
-    if (latestSessions) {
-      renderSessions(latestSessions);
-      if (currentTab() === 'graph') void refreshGraph();
-      if (currentTab() === 'projects') void refreshProjects();
-      maybePollSessionIndex(latestSessions);
+    // 仅刷新当前激活 Tab(INV-2208):避免停留在 #projects 时每 30s 重拉 1.7MB /api/sessions 或重绘隐藏 Tab DOM
+    if (tab === 'usage' && latestUsage) {
+      renderUsage(latestUsage);
+    } else if (tab === 'sessions') {
+      void loadSessionsBackground(generation, false);
+    } else if (tab === 'graph') {
+      void refreshGraph();
+    } else if (tab === 'projects') {
+      void refreshProjects();
+    } else if (tab === 'requirements') {
+      void refreshRequirements();
+    } else if (tab === 'planfiles') {
+      void refreshPlans();
+    } else if (tab === 'files') {
+      void refreshFileEdits();
     }
+    if (tab !== 'plans') return;
     if (dragInFlight) return;
     // 设置弹窗打开时不替换卡片 DOM：弹窗挂在卡片里，整批 replaceChildren
     // 会把它连根拔掉——表现为「点开设置一闪而关」（恰逢后台轮询渲染时必现，
@@ -3613,7 +3666,6 @@ async function render() {
     grid.replaceChildren(nextGrid);
     syncResetOrderVisibility();
     syncRestoreHiddenVisibility();
-    void loadSessionsBackground(generation);
   } catch (error) {
     if (generation !== renderGeneration) return;
     document.getElementById('connectionState').className = 'connection disconnected';
@@ -3726,11 +3778,11 @@ function resetSessionFilters() {
   if (latestSessions) renderSessions(latestSessions);
 }
 
-// 列表请求的公共参数:窗口天数 + 「显示已隐藏」时带 hidden=1(默认服务端排除)
+// 列表请求的公共参数:窗口天数 + 「显示已隐藏」时带 hidden=1 + graph=0 跳过大 work graph(INV-2208)
 function sessionListParams() {
   const days = document.getElementById('usageDays')?.value || '30';
   const hidden = document.getElementById('sessionShowHidden')?.checked ? '&hidden=1' : '';
-  return `days=${encodeURIComponent(days)}${hidden}`;
+  return `days=${encodeURIComponent(days)}${hidden}&graph=0`;
 }
 
 // 用户动作(星标/隐藏/删除/恢复)后按当前过滤条件原样重取列表
@@ -3813,8 +3865,47 @@ function applyRoute() {
   }
 }
 
+let activeTabName = null;
+
+/** 切离重型 Tab 时释放离屏 DOM 与全局大缓存,防止 Safari 多 Tab 累积触发 Jetsam 重载(INV-2208)。 */
+function releaseHiddenTabMemory(prevTab, nextTab) {
+  if (!prevTab || prevTab === nextTab) return;
+  const clear = (id) => {
+    const el = document.getElementById(id);
+    if (el) el.replaceChildren();
+  };
+  if (prevTab === 'requirements') {
+    latestRequirements = null;
+    clear('reqList');
+    clear('reqReader');
+  } else if (prevTab === 'planfiles') {
+    latestPlans = null;
+    clear('planList');
+    clear('planReader');
+  } else if (prevTab === 'graph') {
+    latestCalendar = null;
+    clear('graphCanvas');
+    clear('calendarCanvas');
+    if (nextTab !== 'sessions') latestSessions = null;
+  } else if (prevTab === 'sessions') {
+    clear('sessionList');
+    clear('sessionReader');
+    if (nextTab !== 'graph') latestSessions = null;
+  } else if (prevTab === 'files') {
+    latestFileEdits = null;
+    clear('fileEdits');
+  } else if (prevTab === 'projects') {
+    renderedProjectKey = null;
+    latestProjects = null;
+    clear('projectList');
+    clear('projectReader');
+  }
+}
+
 function showTab(name) {
   if (!['plans', 'sessions', 'files', 'projects', 'requirements', 'planfiles', 'knowledge', 'graph', 'usage', 'settings'].includes(name)) name = 'plans';
+  releaseHiddenTabMemory(activeTabName, name);
+  activeTabName = name;
   const hash = `#${name}`;
   // 深链(#tab/id)不回写成裸 #tab,避免路由器丢 id 死循环
   if (location.hash !== hash && !location.hash.startsWith(`${hash}/`)) location.hash = hash;
@@ -3824,7 +3915,9 @@ function showTab(name) {
   document.querySelectorAll('.tab-panel').forEach((panel) => {
     panel.hidden = panel.getAttribute('data-panel') !== name;
   });
-  if (name === 'sessions' && !latestSessions) void loadSessionsBackground();
+  if (name === 'plans' && !document.getElementById('grid')?.children.length) void render(true);
+  if (name === 'usage') void render(true);
+  if (name === 'sessions') void loadSessionsBackground(undefined, false);
   if (name === 'graph') void refreshGraph();
   if (name === 'files') void refreshFileEdits();
   if (name === 'projects') void refreshProjects();
@@ -4181,12 +4274,20 @@ applyRoute();
 let lastEventRenderAt = 0;
 
 function refreshFromLiveEvent() {
+  if (document.hidden) return; // 后台暂停 SSE 重绘(INV-2208)
   const now = Date.now();
   if (now - lastEventRenderAt >= 30_000) {
     lastEventRenderAt = now;
     void render();
   }
 }
+
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && Date.now() - lastRenderAt >= 20_000) {
+    tickClock();
+    void render(true);
+  }
+});
 
 function initLiveEvents() {
   if (!('EventSource' in window)) return;
@@ -4215,6 +4316,7 @@ initLiveEvents();
 
 function maybePollSessionIndex(list) {
   if (list?.indexStatus !== 'running') return;
+  if (document.hidden || currentTab() !== 'sessions') return;
   if (sessionIndexPollTimer != null) return;
   sessionIndexPollTimer = setTimeout(async () => {
     sessionIndexPollTimer = null;

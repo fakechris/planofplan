@@ -1808,6 +1808,8 @@ export function buildSessionList(
     commits?: SessionCommit[];
     /** true 时图谱包含 subagent 派工 session(默认排除,见其「需求」是派工 prompt)。 */
     includeSubagents?: boolean;
+    /** false 时跳过 buildWorkGraph(列表接口瘦身,INV-2208);默认 true 保持向后兼容。 */
+    includeGraph?: boolean;
   },
 ): SessionList {
   const inWindow = sessions.filter((session) => (
@@ -1837,13 +1839,15 @@ export function buildSessionList(
     byProject: [...byProject.entries()]
       .map(([project, count]) => ({ project, count }))
       .sort((a, b) => b.count - a.count || a.project.localeCompare(b.project)),
-    graph: buildWorkGraph(
-      sorted,
-      options.requirements,
-      options.commits,
-      options.includeSubagents ?? false,
-      options.requirementLevels,
-    ),
+    graph: options.includeGraph === false
+      ? { projects: [], nodes: [], edges: [] }
+      : buildWorkGraph(
+        sorted,
+        options.requirements,
+        options.commits,
+        options.includeSubagents ?? false,
+        options.requirementLevels,
+      ),
     indexedAt,
     indexStatus: 'idle',
   };

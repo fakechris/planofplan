@@ -3505,6 +3505,74 @@ export class Store {
     }));
   }
 
+  /** 窗口内计划文件摘要(单次联查最新快照与快照计数,消除 /api/planfiles 的 2×N+1 查询,INV-2208)。 */
+  listPlanFilesSummary(
+    since: number,
+    limit: number | null = 300,
+  ): {
+    total: number;
+    plans: Array<PlanFileRecord & {
+      activeAt: number;
+      checkboxChecked: number;
+      checkboxTotal: number;
+      snapshotCount: number;
+    }>;
+  } {
+    const totalRow = this.db.query(
+      `SELECT COUNT(*) AS n
+       FROM plan_files p
+       LEFT JOIN plan_snapshots s ON s.id = p.last_snapshot_id
+       WHERE COALESCE(p.last_snapshot_mtime_ms, s.mtime_ms, p.last_seen_at) >= ?`,
+    ).get(since) as { n: number };
+    const baseSql = `
+      WITH snap_counts AS (
+        SELECT plan_file_id, COUNT(*) AS cnt FROM plan_snapshots GROUP BY plan_file_id
+      )
+      SELECT p.id, p.path, p.kind, p.title, p.goal, p.current_phase, p.repo,
+             p.first_seen_at, p.last_seen_at, p.missing_since,
+             p.last_snapshot_id, p.last_snapshot_mtime_ms, p.last_snapshot_hash,
+             COALESCE(p.last_snapshot_mtime_ms, s.mtime_ms, p.last_seen_at) AS active_at,
+             COALESCE(s.checkbox_checked, 0) AS checkbox_checked,
+             COALESCE(s.checkbox_total, 0) AS checkbox_total,
+             COALESCE(sc.cnt, 0) AS snapshot_count
+      FROM plan_files p
+      LEFT JOIN plan_snapshots s ON s.id = p.last_snapshot_id
+      LEFT JOIN snap_counts sc ON sc.plan_file_id = p.id
+      WHERE COALESCE(p.last_snapshot_mtime_ms, s.mtime_ms, p.last_seen_at) >= ?
+      ORDER BY active_at DESC`;
+    const rows = (limit != null && limit > 0
+      ? this.db.query(`${baseSql} LIMIT ?`).all(since, limit)
+      : this.db.query(baseSql).all(since)) as Array<{
+      id: string; path: string; kind: string; title: string | null; goal: string | null;
+      current_phase: string | null; repo: string | null; first_seen_at: number; last_seen_at: number;
+      missing_since: number | null; last_snapshot_id: string | null;
+      last_snapshot_mtime_ms: number | null; last_snapshot_hash: string | null;
+      active_at: number; checkbox_checked: number; checkbox_total: number; snapshot_count: number;
+    }>;
+    return {
+      total: totalRow?.n ?? rows.length,
+      plans: rows.map((row) => ({
+        id: row.id,
+        path: row.path,
+        kind: row.kind,
+        title: row.title,
+        goal: row.goal,
+        currentPhase: row.current_phase,
+        repo: row.repo,
+        firstSeenAt: row.first_seen_at,
+        lastSeenAt: row.last_seen_at,
+        missingSince: row.missing_since,
+        lastSnapshotId: row.last_snapshot_id,
+        lastSnapshotMtimeMs: row.last_snapshot_mtime_ms,
+        lastSnapshotHash: row.last_snapshot_hash,
+        activeAt: row.active_at,
+        checkboxChecked: row.checkbox_checked,
+        checkboxTotal: row.checkbox_total,
+        snapshotCount: row.snapshot_count,
+      })),
+    };
+  }
+
   /** upsert 文件行 + 捕获快照(确定性 id,同内容重捕幂等)。 */
   upsertPlanFileWithSnapshot(row: {
     id: string; path: string; kind: string; title: string | null; goal: string | null;
@@ -3594,10 +3662,33 @@ export class Store {
   // ── 跨实体关联(计划↔对话↔需求↔项目↔commit 的导航层)──────────
 
   planFilesByPaths(paths: string[]): PlanFileRecord[] {
-    if (paths.length === 0) return [];
-    const files = this.listPlanFiles();
-    const wanted = new Set(paths);
-    return files.filter((file) => wanted.has(file.path));
+    const uniq = [...new Set(paths.filter(Boolean))];
+    if (uniq.length === 0) return [];
+    const out: PlanFileRecord[] = [];
+    for (let i = 0; i < uniq.length; i += 400) {
+      const chunk = uniq.slice(i, i + 400);
+      const placeholders = chunk.map(() => '?').join(', ');
+      const rows = this.db.query(
+        `SELECT id, path, kind, title, goal, current_phase, repo, first_seen_at, last_seen_at,
+                missing_since, last_snapshot_id, last_snapshot_mtime_ms, last_snapshot_hash
+         FROM plan_files WHERE path IN (${placeholders})`,
+      ).all(...chunk) as Array<{
+        id: string; path: string; kind: string; title: string | null; goal: string | null;
+        current_phase: string | null; repo: string | null; first_seen_at: number; last_seen_at: number;
+        missing_since: number | null; last_snapshot_id: string | null;
+        last_snapshot_mtime_ms: number | null; last_snapshot_hash: string | null;
+      }>;
+      for (const row of rows) {
+        out.push({
+          id: row.id, path: row.path, kind: row.kind, title: row.title, goal: row.goal,
+          currentPhase: row.current_phase, repo: row.repo, firstSeenAt: row.first_seen_at,
+          lastSeenAt: row.last_seen_at, missingSince: row.missing_since,
+          lastSnapshotId: row.last_snapshot_id, lastSnapshotMtimeMs: row.last_snapshot_mtime_ms,
+          lastSnapshotHash: row.last_snapshot_hash,
+        });
+      }
+    }
+    return out;
   }
 
   /** session 碰过的计划文件(session → plan 导航)。 */
@@ -3618,11 +3709,37 @@ export class Store {
     return this.planFilesForRepos([repoUrl]);
   }
 
-  /** 多别名合并项目的计划文件列表。 */
+  /** 多别名合并项目的计划文件列表(直查 SQL,避免全表扫描 13k 行,INV-2208)。 */
   planFilesForRepos(repoUrls: string[]): PlanFileRecord[] {
-    const wanted = new Set(repoUrls.filter(Boolean));
-    if (wanted.size === 0) return [];
-    return this.listPlanFiles().filter((file) => file.repo != null && wanted.has(file.repo));
+    const uniq = [...new Set(repoUrls.filter(Boolean))];
+    if (uniq.length === 0) return [];
+    const placeholders = uniq.map(() => '?').join(', ');
+    const rows = this.db.query(
+      `SELECT id, path, kind, title, goal, current_phase, repo, first_seen_at, last_seen_at,
+              missing_since, last_snapshot_id, last_snapshot_mtime_ms, last_snapshot_hash
+       FROM plan_files WHERE repo IN (${placeholders})
+       ORDER BY last_seen_at DESC`,
+    ).all(...uniq) as Array<{
+      id: string; path: string; kind: string; title: string | null; goal: string | null;
+      current_phase: string | null; repo: string | null; first_seen_at: number; last_seen_at: number;
+      missing_since: number | null; last_snapshot_id: string | null;
+      last_snapshot_mtime_ms: number | null; last_snapshot_hash: string | null;
+    }>;
+    return rows.map((row) => ({
+      id: row.id,
+      path: row.path,
+      kind: row.kind,
+      title: row.title,
+      goal: row.goal,
+      currentPhase: row.current_phase,
+      repo: row.repo,
+      firstSeenAt: row.first_seen_at,
+      lastSeenAt: row.last_seen_at,
+      missingSince: row.missing_since,
+      lastSnapshotId: row.last_snapshot_id,
+      lastSnapshotMtimeMs: row.last_snapshot_mtime_ms,
+      lastSnapshotHash: row.last_snapshot_hash,
+    }));
   }
 
   /** 计划文件关联的需求(plan → requirement:触碰 session 的全部需求,不只首条)。 */

@@ -146,7 +146,15 @@ export function groupCanonicalProjects<T extends { id: string; url: string; name
   projects: T[],
   options: { hasGitDir?: (root: string) => boolean } = {},
 ): Array<CanonicalProjectGroup<T>> {
-  const hasGitDir = options.hasGitDir ?? ((r: string) => hasGitMarker(r));
+  const rawHasGitDir = options.hasGitDir ?? ((r: string) => hasGitMarker(r));
+  const gitDirMemo = new Map<string, boolean>();
+  const hasGitDir = (r: string): boolean => {
+    const cached = gitDirMemo.get(r);
+    if (cached !== undefined) return cached;
+    const hit = rawHasGitDir(r);
+    gitDirMemo.set(r, hit);
+    return hit;
+  };
   const checkHasGit = (p: T): boolean => {
     if (isRemoteRepoUrl(p.url)) return true;
     return Boolean(p.root && hasGitDir(p.root));

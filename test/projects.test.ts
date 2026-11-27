@@ -515,3 +515,91 @@ describe('INV-2206: 依赖缓存/内部目录折叠、0-commit 蹭边只读过�
     expect(rRecent.projects.map((p) => p.name)).toEqual(['wip-repo', 'newer-repo', 'main-repo']);
   });
 });
+
+describe('INV-2208: 全面性能与 Safari 内存优化回归锁定', () => {
+  test('/api/sessions?graph=0 跳过大 work graph 构建,不传时保持向后兼容', async () => {
+    const store = seededStore();
+    const server = createServer(store, scheduler as never, { port: 9291, plans: DEFAULT_PLANS });
+    const withGraph = await (await server.request('http://localhost/api/sessions?days=30')).json() as {
+      sessions: unknown[];
+      graph: { nodes: unknown[]; edges: unknown[] };
+    };
+    expect(withGraph.sessions.length).toBeGreaterThan(0);
+    expect(withGraph.graph.nodes.length).toBeGreaterThan(0);
+
+    const noGraph = await (await server.request('http://localhost/api/sessions?days=30&graph=0')).json() as {
+      sessions: unknown[];
+      graph: { nodes: unknown[]; edges: unknown[] };
+    };
+    expect(noGraph.sessions.length).toBe(withGraph.sessions.length);
+    expect(noGraph.graph.nodes).toEqual([]);
+    expect(noGraph.graph.edges).toEqual([]);
+  });
+
+  test('/api/requirements 与 /api/planfiles 支持有界 limit、total 计数与单次联查', async () => {
+    const store = openMemoryDb();
+    const now = Date.now();
+    store.upsertSessions([
+      session({ id: 'claude:r1', provider: 'claude', nativeId: 'r1', updatedAt: now - 1000 }),
+    ]);
+    store.replaceAllRequirements([1, 2, 3, 4].map((i) => ({
+      id: `req:r1:${i}`,
+      sessionId: 'claude:r1',
+      seq: i,
+      text: `需求 ${i}`,
+      originLevel: 'user_explicit' as const,
+      ts: now - i * 1000,
+      repos: [URL_A],
+    })));
+    for (let i = 1; i <= 4; i++) {
+      store.upsertPlanFileWithSnapshot({
+        id: `pf-${i}`,
+        path: `/repo/alpha/plan-${i}.md`,
+        kind: 'plan',
+        title: `Plan ${i}`,
+        goal: `Goal ${i}`,
+        currentPhase: 'P1',
+        repo: URL_A,
+        mtimeMs: now - i * 1000,
+        rawHash: `hash-${i}-abcdef012345`,
+        sections: [],
+        checkboxChecked: i,
+        checkboxTotal: 5,
+        commitSha: null,
+        now,
+      });
+    }
+    const server = createServer(store, scheduler as never, { port: 9291, plans: DEFAULT_PLANS });
+
+    const reqRes = await (await server.request('http://localhost/api/requirements?days=30&limit=2')).json() as {
+      total: number;
+      truncated: boolean;
+      requirements: unknown[];
+      byProject: Array<{ name: string; count: number }>;
+    };
+    expect(reqRes.total).toBe(4);
+    expect(reqRes.truncated).toBe(true);
+    expect(reqRes.requirements).toHaveLength(2);
+    expect(reqRes.byProject[0]?.count).toBe(4); // facets 始终基于全量
+
+    const planRes = await (await server.request('http://localhost/api/planfiles?days=30&limit=2')).json() as {
+      total: number;
+      truncated: boolean;
+      plans: Array<{ id: string; checkboxChecked: number; snapshotCount: number }>;
+    };
+    expect(planRes.total).toBe(4);
+    expect(planRes.truncated).toBe(true);
+    expect(planRes.plans).toHaveLength(2);
+    expect(planRes.plans[0]).toMatchObject({ id: 'pf-1', checkboxChecked: 1, snapshotCount: 1 });
+    expect(store.planFilesForRepos([URL_A])).toHaveLength(4);
+  });
+
+  test('web/app.js 具备后台休眠(document.hidden)、离屏 Tab 释放与事件委托守卫', async () => {
+    const { readFileSync } = await import('node:fs');
+    const appJs = readFileSync(join(import.meta.dir, '../web/app.js'), 'utf8');
+    expect(appJs).toContain('if (!force && document.hidden) return;');
+    expect(appJs).toContain('function releaseHiddenTabMemory(');
+    expect(appJs).toContain("document.addEventListener('visibilitychange'");
+    expect(appJs).toContain('&graph=0');
+  });
+});
