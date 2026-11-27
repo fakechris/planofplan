@@ -88,6 +88,12 @@ export interface SessionCollectOptions {
   devinRoot?: string;
   /** 消息/touch/水位保留天数(目录行永久保留);0 = 关闭清理。默认取 PLANOFPLAN_MESSAGE_RETENTION_DAYS 或 60。 */
   messageRetentionDays?: number;
+  /**
+   * commit 归因的 git runner 注入口(INV-2194):默认 boundedGitRunner(5s
+   * timeout);传 null 完全关掉归因。水位/入库语义与归因无关,单测不需要
+   * 真跑 git——fixture 的临时目录在系统忙时会吃满 5s 超时,污染测试时序。
+   */
+  git?: import('./session-repos.ts').GitRunner | null;
 }
 
 const DAY_MS = 86_400_000;
@@ -1553,9 +1559,10 @@ export async function collectSessionCatalog(store: Store, options: SessionCollec
   applySessionUsage(store, since, until);
   scanTrace('usage-apply');
   // commit 归因(第二环):有界 git 调用(每 repo 一次 git log + timeout),
-  // 失败不拖垮目录扫描
+  // 失败不拖垮目录扫描。git 注入口透传(INV-2194):测试可传 null 关掉归因,
+  // 不为 fixture 的非 git 临时目录付真 git 的时序抖动。
   try {
-    await collectSessionCommits(store, { since, until });
+    await collectSessionCommits(store, { since, until, git: options.git === undefined ? undefined : options.git });
   } catch {
     /* commit attribution is best-effort */
   }

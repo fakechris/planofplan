@@ -265,7 +265,11 @@ describe('写入失败不推进水位(INV-903)', () => {
       const consoleError = console.error;
       console.error = (...args: unknown[]) => { errors.push(args.join(' ')); };
       try {
-        await collectSessionCatalog(store, roots);
+        // git: null 关掉 commit 归因(INV-2194):本用例只测水位不变量,与归因
+        // 无关;fixture 的临时目录不是 git repo,真跑 git log 在系统忙时吃满
+        // 5s 超时(boundedGitRunner 的 GIT_TIMEOUT_MS),是本用例 5000.3x ms
+        // 偶发失败的根因。
+        await collectSessionCatalog(store, { ...roots, git: null });
       } finally {
         console.error = consoleError;
       }
@@ -276,7 +280,7 @@ describe('写入失败不推进水位(INV-903)', () => {
       expect(store.getSessionIndexState(healthyFile)).not.toBeNull();
       expect(errors.some((line) => line.includes(failingFile) && line.includes('SQLITE_BUSY'))).toBe(true);
 
-      await collectSessionCatalog(store, roots);
+      await collectSessionCatalog(store, { ...roots, git: null });
       expect(store.countSessionMessages(`claude:${failing}`)).toBeGreaterThan(0);
       expect(store.getSessionIndexState(failingFile)).not.toBeNull();
     } finally {
