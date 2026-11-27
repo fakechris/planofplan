@@ -58,6 +58,14 @@ export function snapshotRetentionDays(): number {
 /** 库空间回收阈值:空闲页超过它才值得 VACUUM/增量回收,常态扫描零成本。 */
 export const SPACE_RECLAIM_THRESHOLD_BYTES = 256 * 1024 * 1024;
 
+/** 单条会话允许归属为项目活跃证据的最大 touch 仓库数(INV-2200):
+ *  全盘清理/备份/盘点类会话常一次 touch 10~60 个仓库,超过此阈值时仅保留其 role='work'/'commit',
+ *  不再向所有路过仓库广播「刚活跃」假象。 */
+export const MAX_TOUCH_REPOS_PER_SESSION = 5;
+
+/** 一次性存量 updated_at 漂移校准哨兵(INV-2200)。 */
+export const UPDATED_AT_RECONCILE_STATE_PATH = '__reconcile_drifted_updated_at_v1__';
+
 /** 稳定窗口键：跨批次语义稳定，可安全粘性沿用（latestStickyByPlan 只回填这些键）。 */
 const STABLE_SNAPSHOT_WINDOWS = ['rolling_5h', 'weekly', 'monthly', 'requests', 'credits_period'] as const;
 
@@ -825,6 +833,36 @@ export class Store {
         path: REDACT_BACKFILL_STATE_PATH, mtimeMs: Date.now(), size: 0, parsedBytes: 0, lines: changed, parserVersion: 0,
       });
     }
+    // 存量 updated_at 漂移一次性校准(INV-2200):Claude/Codex 向老日志尾部追加
+    // cost-state/permission-mode/pr-link 等非对话元事件会顶高文件 mtime,导致休眠数月的老会话
+    // 复活为「刚刚活跃」。按 idx_session_messages_session 倒序单点 seek 回拨到最后一条真实消息时间。
+    if (!this.getSessionIndexState(UPDATED_AT_RECONCILE_STATE_PATH)) {
+      const fixed = this.reconcileDriftedSessionUpdatedAt();
+      this.upsertSessionIndexState({
+        path: UPDATED_AT_RECONCILE_STATE_PATH, mtimeMs: Date.now(), size: 0, parsedBytes: 0, lines: fixed, parserVersion: 0,
+      });
+    }
+  }
+
+  /** 将 updated_at 比最后一条真实消息时间虚高超过阈值(默认 1h)的会话回拨到真实消息时间(INV-2200)。 */
+  reconcileDriftedSessionUpdatedAt(driftThresholdMs = 3_600_000): number {
+    const sessions = this.db.query('SELECT id, updated_at FROM sessions').all() as Array<{ id: string; updated_at: number }>;
+    if (sessions.length === 0) return 0;
+    const lastMsgStmt = this.db.query(
+      'SELECT timestamp FROM session_messages WHERE session_id = ? AND timestamp IS NOT NULL ORDER BY seq DESC LIMIT 1',
+    );
+    const updateStmt = this.db.query('UPDATE sessions SET updated_at = ? WHERE id = ?');
+    let fixed = 0;
+    this.withTransaction(() => {
+      for (const s of sessions) {
+        const last = lastMsgStmt.get(s.id) as { timestamp: number | null } | null;
+        if (last?.timestamp != null && last.timestamp > 0 && s.updated_at - last.timestamp > driftThresholdMs) {
+          updateStmt.run(last.timestamp, s.id);
+          fixed += 1;
+        }
+      }
+    });
+    return fixed;
   }
 
   /**
@@ -976,44 +1014,70 @@ export class Store {
     };
   }
 
-  /** 窗口内 session↔project 活动(列表/详情聚合的公共原料,已按 url+session 去重)。 */
-  projectActivity(since: number, until: number): Array<{
+  /** 窗口内 session↔project 活动(列表聚合公共原料,已按 url+session 去重,
+   *  并排除单会话 touch 超过 MAX_TOUCH_REPOS_PER_SESSION 仓的跨仓广播噪音,INV-2200)。 */
+  projectActivity(since: number | null, until: number): Array<{
     url: string;
     sessionId: string;
     provider: string;
     origin: string;
     totalTokens: number;
     updatedAt: number;
+    role: string;
   }> {
-    return this.db.query(
-      `SELECT DISTINCT r.url AS url, s.id AS sessionId, s.provider AS provider,
-              s.origin AS origin, s.total_tokens AS totalTokens, s.updated_at AS updatedAt
-       FROM session_repos r
-       JOIN sessions s ON s.id = r.session_id
-       WHERE s.updated_at >= ? AND s.updated_at < ?`,
-    ).all(since, until) as Array<{
+    const cte = `WITH noisy_touch AS (
+      SELECT session_id
+      FROM session_repos
+      WHERE role = 'touch'
+      GROUP BY session_id
+      HAVING COUNT(DISTINCT url) > ?
+    )`;
+    const whereTime = since != null
+      ? 'AND s.updated_at >= ? AND s.updated_at < ?'
+      : 'AND s.updated_at < ?';
+    const sql = `${cte}
+      SELECT DISTINCT r.url AS url, s.id AS sessionId, s.provider AS provider,
+             s.origin AS origin, s.total_tokens AS totalTokens, s.updated_at AS updatedAt,
+             r.role AS role
+      FROM session_repos r
+      JOIN sessions s ON s.id = r.session_id
+      WHERE (r.role != 'touch' OR r.session_id NOT IN (SELECT session_id FROM noisy_touch))
+      ${whereTime}`;
+    const args = since != null
+      ? [MAX_TOUCH_REPOS_PER_SESSION, since, until]
+      : [MAX_TOUCH_REPOS_PER_SESSION, until];
+    return this.db.query(sql).all(...args) as Array<{
       url: string;
       sessionId: string;
       provider: string;
       origin: string;
       totalTokens: number;
       updatedAt: number;
+      role: string;
     }>;
   }
 
   /** 窗口内各 repo 的去重 commit 计数(INV-2198:按 DISTINCT sha,避免多候选会话虚增)。 */
-  projectCommitCounts(since: number): Map<string, number> {
-    const rows = this.db.query(
-      'SELECT repo, COUNT(DISTINCT sha) AS n FROM session_commits WHERE ts >= ? GROUP BY repo',
-    ).all(since) as Array<{ repo: string; n: number }>;
+  projectCommitCounts(since: number | null): Map<string, number> {
+    const rows = since != null
+      ? this.db.query(
+        'SELECT repo, COUNT(DISTINCT sha) AS n FROM session_commits WHERE ts >= ? GROUP BY repo',
+      ).all(since) as Array<{ repo: string; n: number }>
+      : this.db.query(
+        'SELECT repo, COUNT(DISTINCT sha) AS n FROM session_commits GROUP BY repo',
+      ).all() as Array<{ repo: string; n: number }>;
     return new Map(rows.map((row) => [row.repo, row.n]));
   }
 
   /** 窗口内各 repo 的去重 commit SHA 集合(供合并后的多别名项目跨 URL 去重计数)。 */
-  projectCommitShas(since: number): Map<string, Set<string>> {
-    const rows = this.db.query(
-      'SELECT DISTINCT repo, sha FROM session_commits WHERE ts >= ?',
-    ).all(since) as Array<{ repo: string; sha: string }>;
+  projectCommitShas(since: number | null): Map<string, Set<string>> {
+    const rows = since != null
+      ? this.db.query(
+        'SELECT DISTINCT repo, sha FROM session_commits WHERE ts >= ?',
+      ).all(since) as Array<{ repo: string; sha: string }>
+      : this.db.query(
+        'SELECT DISTINCT repo, sha FROM session_commits',
+      ).all() as Array<{ repo: string; sha: string }>;
     const out = new Map<string, Set<string>>();
     for (const row of rows) {
       let set = out.get(row.repo);
@@ -1057,25 +1121,39 @@ export class Store {
   }
 
   /** 详情:窗口内该项目的 session 时间线(updated_at 倒排)。 */
-  projectSessions(url: string, since: number, until: number): SessionRecord[] {
+  projectSessions(url: string, since: number | null, until: number): SessionRecord[] {
     return this.projectSessionsForUrls([url], since, until);
   }
 
-  /** 详情:窗口内合并多别名 URL 的 session 时间线(按 session.id 去重,updated_at 倒排)。 */
-  projectSessionsForUrls(urls: string[], since: number, until: number): SessionRecord[] {
+  /** 详情:窗口内合并多别名 URL 的 session 时间线(按 session.id 去重,过滤跨仓广播 touch,updated_at 倒排)。 */
+  projectSessionsForUrls(urls: string[], since: number | null, until: number): SessionRecord[] {
     const uniq = [...new Set(urls.filter(Boolean))];
     if (uniq.length === 0) return [];
     const placeholders = uniq.map(() => '?').join(', ');
-    const rows = this.db.query(
-      `SELECT DISTINCT s.id, s.provider, s.native_id, s.cwd, s.title, s.source_file,
+    const whereTime = since != null
+      ? 'AND s.updated_at >= ? AND s.updated_at < ?'
+      : 'AND s.updated_at < ?';
+    const sql = `WITH noisy_touch AS (
+        SELECT session_id
+        FROM session_repos
+        WHERE role = 'touch'
+        GROUP BY session_id
+        HAVING COUNT(DISTINCT url) > ?
+      )
+      SELECT DISTINCT s.id, s.provider, s.native_id, s.cwd, s.title, s.source_file,
               s.started_at, s.updated_at, s.input_tokens, s.output_tokens, s.total_tokens,
               s.estimated_cost_usd, s.seen_at, s.git_root, s.git_url, s.git_name,
               s.origin, s.parent_id, s.origin_detail
        FROM sessions s
        JOIN session_repos r ON r.session_id = s.id
-       WHERE r.url IN (${placeholders}) AND s.updated_at >= ? AND s.updated_at < ?
-       ORDER BY s.updated_at DESC`,
-    ).all(...uniq, since, until) as Array<{
+       WHERE r.url IN (${placeholders})
+         AND (r.role != 'touch' OR r.session_id NOT IN (SELECT session_id FROM noisy_touch))
+         ${whereTime}
+       ORDER BY s.updated_at DESC`;
+    const args = since != null
+      ? [MAX_TOUCH_REPOS_PER_SESSION, ...uniq, since, until]
+      : [MAX_TOUCH_REPOS_PER_SESSION, ...uniq, until];
+    const rows = this.db.query(sql).all(...args) as Array<{
       id: string;
       provider: string;
       native_id: string;
@@ -1100,19 +1178,24 @@ export class Store {
   }
 
   /** 详情:窗口内落在该项目的 commit(ts 倒排,按 sha 去重保留最高证据档)。 */
-  projectCommits(url: string, since: number): SessionCommit[] {
+  projectCommits(url: string, since: number | null): SessionCommit[] {
     return this.projectCommitsForUrls([url], since);
   }
 
   /** 详情:窗口内多别名 URL 合并后的 commit 列表(按 sha 去重,保留最高证据档)。 */
-  projectCommitsForUrls(urls: string[], since: number): SessionCommit[] {
+  projectCommitsForUrls(urls: string[], since: number | null): SessionCommit[] {
     const uniq = [...new Set(urls.filter(Boolean))];
     if (uniq.length === 0) return [];
     const placeholders = uniq.map(() => '?').join(', ');
-    const rows = this.db.query(
-      `SELECT session_id, repo, sha, kind, ts, summary, file_overlap, pushed
-       FROM session_commits WHERE repo IN (${placeholders}) AND ts >= ? ORDER BY ts DESC`,
-    ).all(...uniq, since) as Array<{
+    const rows = (since != null
+      ? this.db.query(
+        `SELECT session_id, repo, sha, kind, ts, summary, file_overlap, pushed
+         FROM session_commits WHERE repo IN (${placeholders}) AND ts >= ? ORDER BY ts DESC`,
+      ).all(...uniq, since)
+      : this.db.query(
+        `SELECT session_id, repo, sha, kind, ts, summary, file_overlap, pushed
+         FROM session_commits WHERE repo IN (${placeholders}) ORDER BY ts DESC`,
+      ).all(...uniq)) as Array<{
       session_id: string;
       repo: string;
       sha: string;
@@ -2957,15 +3040,22 @@ export class Store {
     return map;
   }
 
-  /** 项目 → 窗口内需求数(去重,按 span 归因的 repo url 聚合)。 */
-  projectRequirementCounts(since: number): Map<string, number> {
-    const rows = this.db.query(
-      `SELECT rr.url AS url, COUNT(DISTINCT r.id) AS n
-       FROM requirement_repos rr
-       JOIN requirements r ON r.id = rr.requirement_id
-       WHERE COALESCE(r.ts, r.created_at) >= ?
-       GROUP BY rr.url`,
-    ).all(since) as Array<{ url: string; n: number }>;
+  /** 项目 → 窗口内需求数(去重,按 span 归因的 repo url 聚合;since=null 表示全量)。 */
+  projectRequirementCounts(since: number | null): Map<string, number> {
+    const rows = since != null
+      ? this.db.query(
+        `SELECT rr.url AS url, COUNT(DISTINCT r.id) AS n
+         FROM requirement_repos rr
+         JOIN requirements r ON r.id = rr.requirement_id
+         WHERE COALESCE(r.ts, r.created_at) >= ?
+         GROUP BY rr.url`,
+      ).all(since) as Array<{ url: string; n: number }>
+      : this.db.query(
+        `SELECT rr.url AS url, COUNT(DISTINCT r.id) AS n
+         FROM requirement_repos rr
+         JOIN requirements r ON r.id = rr.requirement_id
+         GROUP BY rr.url`,
+      ).all() as Array<{ url: string; n: number }>;
     return new Map(rows.map((row) => [row.url, row.n]));
   }
 

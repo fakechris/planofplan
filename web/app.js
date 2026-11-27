@@ -1586,12 +1586,16 @@ let renderedProjectKey = null;
 let projectDetailSeq = 0;
 let projectsFetchSeq = 0;
 
+function currentProjectDays() {
+  return document.getElementById('projectDays')?.value || document.getElementById('usageDays')?.value || '30';
+}
+
 async function refreshProjects() {
   const listEl = document.getElementById('projectList');
   if (!listEl) return;
   const seq = ++projectsFetchSeq;
   try {
-    const days = document.getElementById('usageDays')?.value || '30';
+    const days = currentProjectDays();
     const codeOnly = document.getElementById('projectCodeOnly')?.checked ?? true;
     const next = await request(`/api/projects?days=${encodeURIComponent(days)}${codeOnly ? '&codeOnly=1' : ''}`);
     if (seq !== projectsFetchSeq) return;
@@ -1611,11 +1615,14 @@ function projectItemHtml(project) {
     ? ` <span class="muted" title="已合并: ${escapeHtml(project.aliasNames.join(', '))}">+${project.aliasNames.length}</span>`
     : '';
   const commitHint = project.commitSource === 'provenance' ? '来自真实 Git 历史归因缓存' : '来自会话去重归因';
+  const totalExtra = project.totalCommitCount && project.totalCommitCount > project.commitCount
+    ? ` (全量 ${project.totalCommitCount})`
+    : '';
   return `
     <button type="button" class="session-item${project.id === openProjectId ? ' active' : ''}" data-project-id="${escapeHtml(project.id)}">
       <strong>${escapeHtml(project.name)}${aliasBadge}</strong>
       <span>${agents || '(窗口内无活动)'}</span>
-      <span title="${commitHint}">${project.sessionCount} 对话(${project.userSessionCount} 用户) · ${project.commitCount} commit${project.lastActive ? ` · ${fmtAgo(project.lastActive, Date.now())}` : ''}</span>
+      <span title="${commitHint}">${project.sessionCount} 对话(${project.userSessionCount} 用户) · ${project.commitCount} commit${totalExtra}${project.lastActive ? ` · ${fmtAgo(project.lastActive, Date.now())}` : ''}</span>
     </button>
   `;
 }
@@ -1642,7 +1649,9 @@ function renderProjects(forceDetail = false) {
   if (footEl) {
     const total = latestProjects.totalProjects ?? allProjects.length;
     const collapsed = Math.max(0, total - allProjects.length);
-    footEl.textContent = `显示 ${projects.length} 个项目（共 ${total} 个归并项目${codeOnly && collapsed > 0 ? `，已折叠 ${collapsed} 个无 git / 工具 / 零活动目录` : ''}）· commit 数优先取 Git 历史考古缓存。`;
+    const daysVal = currentProjectDays();
+    const winLabel = daysVal === 'all' ? '全量窗口' : `近 ${daysVal} 天`;
+    footEl.textContent = `${winLabel} · 显示 ${projects.length} 个项目（共 ${total} 个归并项目${codeOnly && collapsed > 0 ? `，已折叠 ${collapsed} 个无 git / 工具 / 零活动目录` : ''}）· 已自动过滤跨仓广播 touch。`;
   }
   if (projects.length === 0) {
     listEl.innerHTML = `<div class="usage-empty"><strong>${q ? '没有匹配的项目' : '还没有项目'}</strong><span>${q ? '换个关键词或取消勾选「仅看活跃代码仓」。' : 'session 索引出 git 归属后会出现在这里。'}</span></div>`;
@@ -1657,7 +1666,7 @@ function renderProjects(forceDetail = false) {
       listEl.querySelector('.session-item.active')?.classList.remove('active');
       row.classList.add('active');
       openProjectId = nextId;
-      const days = document.getElementById('usageDays')?.value || '30';
+      const days = currentProjectDays();
       const wantKey = `${nextId}:${days}`;
       readerEl.innerHTML = '<div class="muted">读取项目详情…</div>';
       renderedProjectKey = wantKey;
@@ -1666,7 +1675,7 @@ function renderProjects(forceDetail = false) {
   });
   const open = allProjects.find((project) => project.id === openProjectId);
   if (open) {
-    const days = document.getElementById('usageDays')?.value || '30';
+    const days = currentProjectDays();
     const wantKey = `${open.id}:${days}`;
     // 后台 SSE / 30s 轮询只刷新左侧列表，同一项目同窗口已渲染时绝不重写右侧 DOM，
     // 避免详情区反复闪回「读取项目详情…」或打断历史考古扫描与筛选操作(INV-2197)。
@@ -1687,6 +1696,7 @@ function renderProjects(forceDetail = false) {
   }
 }
 
+document.getElementById('projectDays')?.addEventListener('change', () => { void refreshProjects(); });
 document.getElementById('projectSearch')?.addEventListener('input', () => renderProjects(false));
 document.getElementById('projectCodeOnly')?.addEventListener('change', () => { void refreshProjects(); });
 
@@ -1695,7 +1705,7 @@ async function loadProjectDetail(id, daysParam, wantKey) {
   if (!readerEl) return;
   const seq = ++projectDetailSeq;
   try {
-    const days = daysParam || document.getElementById('usageDays')?.value || '30';
+    const days = daysParam || currentProjectDays();
     const [detail, history] = await Promise.all([
       request(`/api/projects/${encodeURIComponent(id)}?days=${encodeURIComponent(days)}`),
       request(`/api/projects/${encodeURIComponent(id)}/history?days=${encodeURIComponent(days)}`).catch(() => null),
@@ -1710,7 +1720,7 @@ async function loadProjectDetail(id, daysParam, wantKey) {
         navigate(tab, navId || undefined);
       });
     });
-    mountProjectHistory(id, detail, history);
+    mountProjectHistory(id, detail, history, days);
   } catch {
     if (seq !== projectDetailSeq || openProjectId !== id) return;
     renderedProjectKey = null;
@@ -1739,7 +1749,7 @@ function rhTierClass(tier) {
   return 'rh-tier-unatt';
 }
 
-function mountProjectHistory(projectId, detail, initialReport) {
+function mountProjectHistory(projectId, detail, initialReport, initialDays) {
   const container = document.getElementById('projectHistoryBox');
   if (!container) return;
   let report = initialReport;
@@ -1749,7 +1759,7 @@ function mountProjectHistory(projectId, detail, initialReport) {
   let filterQuery = '';
   let scanning = false;
   let loadingAll = false;
-  let currentDays = document.getElementById('usageDays')?.value || '30';
+  let currentDays = initialDays || currentProjectDays();
 
   const render = () => {
     const s = report?.summary;
@@ -1765,8 +1775,21 @@ function mountProjectHistory(projectId, detail, initialReport) {
       </div>
     `;
     if (!hasData) {
-      container.innerHTML = `${headerHtml}<div class="muted">${detail.root ? '尚无缓存记录，点击上方按钮按需扫描本地 L0 日志与 Git 历史（首次约数秒，后续增量毫秒级）。' : '该项目未关联本地 .git 目录，无法扫描 commit 历史。'}</div>`;
+      const hint = !detail.root
+        ? '该项目未关联本地 .git 目录，无法扫描 commit 历史。'
+        : (detail.totalCommitCount > 0 && currentDays !== 'all'
+          ? `当前时间窗（近 ${escapeHtml(currentDays)} 天）内无 commit，全量缓存已有 ${detail.totalCommitCount} 条记录。<button type="button" class="secondary-btn" data-rh-show-all style="margin-left:8px">查看全量 ${detail.totalCommitCount} 条</button>`
+          : '尚无缓存记录，点击上方按钮按需扫描本地 L0 日志与 Git 历史（首次约数秒，后续增量毫秒级）。');
+      container.innerHTML = `${headerHtml}<div class="muted">${hint}</div>`;
       bindScanButtons();
+      container.querySelector('[data-rh-show-all]')?.addEventListener('click', async () => {
+        currentDays = 'all';
+        const next = await request(`/api/projects/${encodeURIComponent(projectId)}/history?days=all`).catch(() => null);
+        if (next && openProjectId === projectId) {
+          report = next;
+          render();
+        }
+      });
       return;
     }
 

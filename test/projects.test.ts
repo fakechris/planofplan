@@ -338,3 +338,113 @@ describe('INV-2198: 项目归并、去重 commitCount 与 codeOnly 降噪', () =
     expect(detail.commits[0]).toMatchObject({ sha: sha1, kind: 'witnessed', fileOverlap: true });
   });
 });
+
+describe('INV-2200: 跨仓广播 touch 过滤、updated_at 漂移校准与 days=all / totalCommitCount', () => {
+  test('单会话 touch > 5 仓时过滤其 touch 广播噪音,但保留自身 work 归属', async () => {
+    const store = openMemoryDb();
+    const now = Date.now();
+    const urls = Array.from({ length: 7 }, (_, i) => `https://github.com/org/repo-${i}.git`);
+    store.upsertSessions([
+      session({ id: 'minimax-code:sweep', provider: 'minimax-code', nativeId: 'sweep', updatedAt: now - 1000 }),
+      session({ id: 'claude:real0', provider: 'claude', nativeId: 'real0', updatedAt: now - 5000 }),
+    ]);
+    // sweep 会话在 repo-0 上 work,但顺带 touch 了 6 个其它仓库(>5 阈值)
+    store.replaceSessionRepos('minimax-code:sweep', [
+      repo('minimax-code:sweep', 'work', urls[0]!, '/repo/0', 'repo-0'),
+      ...urls.slice(1).map((u, i) => repo('minimax-code:sweep', 'touch', u, `/repo/${i + 1}`, `repo-${i + 1}`)),
+    ]);
+    store.replaceSessionRepos('claude:real0', [
+      repo('claude:real0', 'work', urls[0]!, '/repo/0', 'repo-0'),
+    ]);
+    store.materializeProjects();
+
+    const server = createServer(store, scheduler as never, { port: 9291, plans: DEFAULT_PLANS });
+    const body = await (await server.request('http://localhost/api/projects?days=30')).json() as {
+      projects: Array<{ name: string; sessionCount: number; lastActive: number | null }>;
+    };
+    const r0 = body.projects.find((p) => p.name === 'repo-0');
+    const r1 = body.projects.find((p) => p.name === 'repo-1');
+    expect(r0?.sessionCount).toBe(2); // work 边完整保留
+    expect(r1?.sessionCount).toBe(0); // 广播 touch 不得污染 repo-1..6
+    expect(r1?.lastActive).toBeNull();
+
+    // 详情页 projectSessionsForUrls 同样排除广播 touch
+    const d1 = await (await server.request(`http://localhost/api/projects/${projectEntityId(urls[1]!)}?days=30`)).json() as {
+      sessions: Array<{ id: string }>;
+    };
+    expect(d1.sessions).toHaveLength(0);
+  });
+
+  test('days=30 返回 totalCommitCount(全量考古数)且 days=all 返回全量 commit 与会话', async () => {
+    const store = openMemoryDb();
+    const now = Date.now();
+    const oldTs = now - 45 * 86_400_000; // 45 天前(在 30 天外)
+    const repoUrl = 'https://github.com/fakechris/mreviewer.git';
+    store.upsertSessions([
+      session({ id: 'claude:old', provider: 'claude', nativeId: 'old', updatedAt: oldTs }),
+    ]);
+    store.replaceSessionRepos('claude:old', [repo('claude:old', 'work', repoUrl, '/repo/mreviewer', 'mreviewer')]);
+    store.upsertCommitProvenance([{
+      repoUrl,
+      sha: '9'.repeat(40),
+      prNumber: 1,
+      committedAt: oldTs,
+      authorName: 'Chris',
+      subject: 'old commit',
+      tier: 'hunk-matched',
+      primaryProvider: 'claude',
+      primaryModel: 'claude-opus-5-5',
+      totalDistLines: 10,
+      matchedDistLines: 10,
+      relayKind: '',
+      filesCount: 1,
+      files: ['src/a.ts'],
+      authors: [{ provider: 'claude', model: 'claude-opus-5-5', lines: 10, source: 'hunk' }],
+      declared: [],
+      witnessedAuthor: [],
+      mergedBy: [],
+      reviewers: [],
+      sessions: [],
+      analyzerVersion: 1,
+      analyzedAt: now,
+    }]);
+    store.materializeProjects();
+
+    const server = createServer(store, scheduler as never, { port: 9291, plans: DEFAULT_PLANS });
+    const d30 = await (await server.request('http://localhost/api/projects?days=30&codeOnly=1')).json() as {
+      projects: Array<{ name: string; commitCount: number; totalCommitCount?: number; sessionCount: number }>;
+    };
+    expect(d30.projects).toHaveLength(1);
+    expect(d30.projects[0]).toMatchObject({ name: 'mreviewer', commitCount: 0, totalCommitCount: 1, sessionCount: 0 });
+
+    const dAll = await (await server.request('http://localhost/api/projects?days=all&codeOnly=1')).json() as {
+      days: string | number;
+      projects: Array<{ name: string; commitCount: number; totalCommitCount?: number; sessionCount: number }>;
+    };
+    expect(dAll.days).toBe('all');
+    expect(dAll.projects[0]).toMatchObject({ name: 'mreviewer', commitCount: 1, totalCommitCount: 1, sessionCount: 1 });
+  });
+
+  test('reconcileDriftedSessionUpdatedAt 将被元事件顶高的旧会话 updated_at 回拨到真实消息时间', () => {
+    const store = openMemoryDb();
+    const now = Date.now();
+    const realMsgTs = now - 32 * 86_400_000;
+    store.upsertSessions([
+      session({ id: 'claude:drifted', provider: 'claude', nativeId: 'drifted', updatedAt: now }),
+      session({ id: 'claude:fresh', provider: 'claude', nativeId: 'fresh', updatedAt: now }),
+    ]);
+    store.upsertSessionMessages([
+      {
+        id: 'claude:drifted:1', sessionId: 'claude:drifted', seq: 1, role: 'assistant', kind: 'text',
+        toolName: null, text: 'done', timestamp: realMsgTs, model: null, inputTokens: null, outputTokens: null,
+      },
+      {
+        id: 'claude:fresh:1', sessionId: 'claude:fresh', seq: 1, role: 'assistant', kind: 'text',
+        toolName: null, text: 'recent', timestamp: now - 5_000, model: null, inputTokens: null, outputTokens: null,
+      },
+    ]);
+    expect(store.reconcileDriftedSessionUpdatedAt()).toBe(1);
+    expect(store.getSession('claude:drifted')?.updatedAt).toBe(realMsgTs);
+    expect(store.getSession('claude:fresh')?.updatedAt).toBe(now);
+  });
+});

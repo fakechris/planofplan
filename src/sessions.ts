@@ -319,6 +319,56 @@ function claudeCwd(records: Record<string, unknown>[]): string | null {
   return null;
 }
 
+/**
+ * 当 Claude JSONL 尾部被非对话元事件(如 cost-state / permission-mode / pr-link /
+ * session-owner / file-history-snapshot)顶高文件 mtime 时,回溯尾部 64KB 寻找最后一条
+ * 真实 user/assistant 消息的时间戳(INV-2200),防止休眠老会话复活为「刚刚活跃」。
+ * 若尾部最后一行本身就是 user/assistant 消息,原样返回 fallbackMs(保留既有语义)。
+ */
+export function claudeTailConversationTimestamp(path: string, fallbackMs: number): number {
+  if (!path.endsWith('.jsonl')) return fallbackMs;
+  let fd: number | null = null;
+  try {
+    const size = statSync(path).size;
+    if (size <= 0) return fallbackMs;
+    const TAIL_BYTES = 64 * 1024;
+    const offset = Math.max(0, size - TAIL_BYTES);
+    const len = size - offset;
+    fd = openSync(path, 'r');
+    const buf = Buffer.alloc(len);
+    const n = readSync(fd, buf, 0, len, offset);
+    const text = buf.subarray(0, n).toString('utf8');
+    const lines = text.split('\n');
+    const startIdx = offset > 0 ? 1 : 0; // 若从文件中间截断,丢弃首条残缺行
+    let sawTailRecord = false;
+    for (let i = lines.length - 1; i >= startIdx; i--) {
+      const raw = lines[i]?.trim();
+      if (!raw || !raw.startsWith('{')) continue;
+      let obj: Record<string, unknown>;
+      try {
+        obj = JSON.parse(raw) as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      const type = typeof obj.type === 'string' ? obj.type : '';
+      const isConv = type === 'user' || type === 'assistant';
+      if (!sawTailRecord) {
+        sawTailRecord = true;
+        if (isConv) return fallbackMs; // 尾部本来就是对话消息,直接用 mtimeMs
+      }
+      if (isConv) {
+        const ts = parseTimestamp(obj.timestamp, 0);
+        if (ts > 0 && ts <= fallbackMs + 60_000) return ts;
+      }
+    }
+    return fallbackMs;
+  } catch {
+    return fallbackMs;
+  } finally {
+    if (fd != null) closeSync(fd);
+  }
+}
+
 function extractClaude(path: string, mtimeMs: number): SessionRecord | null {
   const nativeId = basename(path).replace(/\.jsonl$/i, '');
   // 主会话文件名是 UUID;subagent 是 subagents/ 下的 agent-*(origin 由路径判定)
@@ -328,6 +378,7 @@ function extractClaude(path: string, mtimeMs: number): SessionRecord | null {
   const started = records
     .map((record) => parseTimestamp(record.timestamp, 0))
     .filter((value) => value > 0);
+  const updatedAt = claudeTailConversationTimestamp(path, mtimeMs);
   return {
     id: sessionKey('claude', nativeId),
     provider: 'claude',
@@ -336,7 +387,7 @@ function extractClaude(path: string, mtimeMs: number): SessionRecord | null {
     title: claudeTitle(records),
     sourceFile: path,
     startedAt: started.length ? Math.min(...started) : null,
-    updatedAt: mtimeMs,
+    updatedAt,
     inputTokens: 0,
     outputTokens: 0,
     totalTokens: 0,
