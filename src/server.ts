@@ -817,7 +817,7 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
   /** 列表聚合:projectActivity 行按规范化主项目分组聚合(跨别名 URL 按 sessionId 去重)。 */
   const projectAggregatesByGroup = (
     groups: Array<CanonicalProjectGroup<Project>>,
-    since: number,
+    since: number | null,
     until: number,
   ) => {
     const urlToPrimaryId = new Map<string, string>();
@@ -829,16 +829,18 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
       userSessions: Set<string>;
       agents: Map<string, ProjectAgentStat>;
       lastActive: number;
+      lastWorkActive: number;
     }>();
     for (const row of store.projectActivity(since, until)) {
       const primaryId = urlToPrimaryId.get(row.url);
       if (!primaryId) continue;
       let agg = byPrimary.get(primaryId);
       if (!agg) {
-        agg = { sessions: new Set(), userSessions: new Set(), agents: new Map(), lastActive: 0 };
+        agg = { sessions: new Set(), userSessions: new Set(), agents: new Map(), lastActive: 0, lastWorkActive: 0 };
         byPrimary.set(primaryId, agg);
       }
       if (row.updatedAt > agg.lastActive) agg.lastActive = row.updatedAt;
+      if (row.role !== 'touch' && row.updatedAt > agg.lastWorkActive) agg.lastWorkActive = row.updatedAt;
       if (agg.sessions.has(row.sessionId)) continue; // 跨别名同 session 不重复计数
       agg.sessions.add(row.sessionId);
       const isUser = row.origin === 'user';
@@ -867,20 +869,30 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
     return merged.size;
   };
 
+  const parseProjectDays = (raw: string | undefined): number | null => {
+    if (!raw || raw === '30') return 30;
+    if (raw === 'all' || raw === '0') return null;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) return 30;
+    return Math.min(365, Math.max(1, Math.floor(n)));
+  };
+
   const toListItem = (
     group: CanonicalProjectGroup<Project>,
-    agg: { sessions: Set<string>; userSessions: Set<string>; agents: Map<string, ProjectAgentStat>; lastActive: number } | undefined,
+    agg: { sessions: Set<string>; userSessions: Set<string>; agents: Map<string, ProjectAgentStat>; lastActive: number; lastWorkActive?: number } | undefined,
     commitCount: number,
     commitSource: 'provenance' | 'session_commits',
     requirementCount: number | null,
+    totalCommitCount?: number,
   ): ProjectListItem => ({
     ...group.primary,
     sessionCount: agg?.sessions.size ?? 0,
     userSessionCount: agg?.userSessions.size ?? 0,
     agents: [...(agg?.agents.values() ?? [])].sort((a, b) => b.sessions - a.sessions || a.provider.localeCompare(b.provider)),
-    lastActive: agg?.lastActive || null,
+    lastActive: (agg?.lastWorkActive || agg?.lastActive) || null,
     commitCount,
     commitSource,
+    ...(totalCommitCount != null && totalCommitCount > 0 ? { totalCommitCount } : {}),
     requirementCount,
     hasGit: group.hasGit,
     isToolRepo: group.isToolRepo,
@@ -889,46 +901,48 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
   });
 
   app.get('/api/projects', (c) => {
-    const days = Math.min(365, Math.max(1, Number(c.req.query('days') ?? 30) || 30));
+    const days = parseProjectDays(c.req.query('days'));
     const codeOnly = c.req.query('codeOnly') === '1' || c.req.query('codeOnly') === 'true';
     const now = Date.now();
-    const since = now - days * 86_400_000;
+    const since = days != null ? now - days * 86_400_000 : null;
     const groups = canonicalProjectGroups();
     const aggregates = projectAggregatesByGroup(groups, since, now);
     const provShas = store.projectProvenanceShas(since);
+    const allProvShas = since != null ? store.projectProvenanceShas(null) : provShas;
     const sessShas = store.projectCommitShas(since);
     const requirementCounts = store.projectRequirementCounts(since);
     const allItems = groups
       .map((group) => {
         const provCount = countDistinctShas(provShas, group.aliasUrls);
-        const commitSource = provCount > 0 ? 'provenance' : 'session_commits';
-        const commitCount = provCount > 0 ? provCount : countDistinctShas(sessShas, group.aliasUrls);
+        const totalProvCount = countDistinctShas(allProvShas, group.aliasUrls);
+        const commitSource = (provCount > 0 || totalProvCount > 0) ? 'provenance' : 'session_commits';
+        const commitCount = commitSource === 'provenance' ? provCount : countDistinctShas(sessShas, group.aliasUrls);
         let reqCount = 0;
         for (const u of group.aliasUrls) reqCount += requirementCounts.get(u) ?? 0;
-        return toListItem(group, aggregates.get(group.primary.id), commitCount, commitSource, reqCount);
+        return toListItem(group, aggregates.get(group.primary.id), commitCount, commitSource, reqCount, totalProvCount);
       })
       .sort((a, b) => (b.lastActive ?? 0) - (a.lastActive ?? 0) || b.commitCount - a.commitCount || b.sessionCount - a.sessionCount);
     const projects = codeOnly
-      ? allItems.filter((p) => p.commitCount > 0 || (Boolean(p.hasGit) && !p.isToolRepo && p.sessionCount > 0))
+      ? allItems.filter((p) => p.commitCount > 0 || (p.totalCommitCount ?? 0) > 0 || (Boolean(p.hasGit) && !p.isToolRepo && p.sessionCount > 0))
       : allItems;
-    return c.json({ days, since, until: now, totalProjects: allItems.length, projects });
+    return c.json({ days: days ?? 'all', since, until: now, totalProjects: allItems.length, projects });
   });
 
   app.get('/api/projects/:id', (c) => {
-    const days = Math.min(365, Math.max(1, Number(c.req.query('days') ?? 30) || 30));
+    const days = parseProjectDays(c.req.query('days'));
     const now = Date.now();
-    const since = now - days * 86_400_000;
+    const since = days != null ? now - days * 86_400_000 : null;
     const group = resolveCanonicalProject(c.req.param('id'));
     if (!group) return c.json({ ok: false, error: 'unknown project' }, 404);
     const sessions = store.projectSessionsForUrls(group.aliasUrls, since, now);
-    // 单仓按需查询(INV-2197) + 多别名归并(INV-2198)
+    // 单仓按需查询(INV-2197) + 多别名归并(INV-2198) + 广播 touch 过滤(INV-2200)
     const sessionById = new Map(sessions.map((session) => [session.id, session]));
     const requirements = store.listRequirementsForRepos(group.aliasUrls)
       .map((req) => {
         const session = sessionById.get(req.sessionId) ?? store.getSession(req.sessionId);
         if (!session) return null;
         const ts = req.ts ?? session.updatedAt;
-        if (ts < since || ts >= now) return null;
+        if ((since != null && ts < since) || ts >= now) return null;
         return {
           id: req.id,
           text: req.text,
@@ -965,10 +979,11 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
     }
     const commits = store.projectCommitsForUrls(group.aliasUrls, since);
     const provCount = countDistinctShas(store.projectProvenanceShas(since), group.aliasUrls);
-    const commitSource = provCount > 0 ? 'provenance' : 'session_commits';
-    const commitCount = provCount > 0 ? provCount : commits.length;
+    const totalProvCount = since != null ? countDistinctShas(store.projectProvenanceShas(null), group.aliasUrls) : provCount;
+    const commitSource = (provCount > 0 || totalProvCount > 0) ? 'provenance' : 'session_commits';
+    const commitCount = commitSource === 'provenance' ? provCount : commits.length;
     return c.json({
-      ...toListItem(group, agg, commitCount, commitSource, requirements.length),
+      ...toListItem(group, agg, commitCount, commitSource, requirements.length, totalProvCount),
       sessions,
       requirements,
       commits,

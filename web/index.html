@@ -127,6 +127,12 @@
         <p class="hero-copy">这个项目上有哪些 agent 干过什么。已自动合并同名仓库、工作树与单仓父目录。</p>
       </div>
       <div class="session-toolbar">
+        <select id="projectDays" aria-label="项目时间窗">
+          <option value="7">近 7 天</option>
+          <option value="30" selected>近 30 天</option>
+          <option value="90">近 90 天</option>
+          <option value="all">全量</option>
+        </select>
         <input id="projectSearch" type="search" placeholder="搜索项目名 / 路径 / 别名" aria-label="搜索项目" />
         <label class="session-check">
           <input id="projectCodeOnly" type="checkbox" checked />

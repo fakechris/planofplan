@@ -371,4 +371,25 @@ describe('无 git cwd 的项目身份(目录即项目)', () => {
     const count = store.listSessionRows()[0]!.repos!.filter((r) => r.role === 'work').length;
     expect(count).toBe(1);
   });
+
+  test('INV-2200: Claude JSONL 尾部追加无时间戳 cost-state/permission-mode/pr-link 不顶高 updatedAt', () => {
+    const root = tempRoot();
+    const id = 'cb755c09-d0d3-40dd-9a75-b044f6d7e5e5';
+    const file = join(root, `${id}.jsonl`);
+    const realMsgTs = Date.parse('2026-10-25T18:15:55.000Z');
+    const bumpedMtime = Date.parse('2026-11-27T00:45:51.000Z');
+    try {
+      writeFileSync(file, jsonl([
+        { type: 'user', timestamp: '2026-10-07T18:31:36.000Z', message: { content: [{ type: 'text', text: '对比 mreviewer' }] }, cwd: '/Users/chris/workspace/mreviewer' },
+        { type: 'assistant', timestamp: '2026-10-25T18:15:55.000Z', message: { content: [{ type: 'text', text: '分析完成' }] } },
+        { type: 'cost-state', sessionId: id, totalCostUSD: 1.2 },
+        { type: 'permission-mode', sessionId: id, permissionMode: 'default' },
+        { type: 'pr-link', timestamp: '2026-11-27T00:45:51.000Z', sessionId: id },
+      ]), 'utf8');
+      const row = extractSessionFile('claude', file, bumpedMtime);
+      expect(row?.updatedAt).toBe(realMsgTs);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

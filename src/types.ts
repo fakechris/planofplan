@@ -391,6 +391,8 @@ export interface ProjectListItem extends Project {
   commitCount: number;
   /** commitCount 来源:provenance=真实 git 历史归因缓存;session_commits=会话启发式归因。 */
   commitSource?: 'provenance' | 'session_commits';
+  /** 全量考古缓存 commit 总数(用于窗口内 0 commit 时提示「全量 N」,消除左右时间窗割裂)。 */
+  totalCommitCount?: number;
   /** 窗口内推导需求数。 */
   requirementCount: number | null;
   /** 是否为真实 git 仓库(远程 URL 或磁盘存在 .git)。 */
