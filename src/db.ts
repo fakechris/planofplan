@@ -454,7 +454,9 @@ CREATE TABLE IF NOT EXISTS experience_nodes (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_experience_nodes_active ON experience_nodes(node_kind, path) WHERE status = 'active';
+-- active 唯一性含 repo 维度(INV-2186):跨仓需求在关联的每个仓库各一行
+-- active 叶子;path 只是需求锚,不含仓库。
+CREATE UNIQUE INDEX IF NOT EXISTS idx_experience_nodes_active_repo ON experience_nodes(node_kind, repo, path) WHERE status = 'active';
 CREATE INDEX IF NOT EXISTS idx_experience_nodes_repo ON experience_nodes(repo, status, updated_at);
 -- 仓库 Commit 级多 Agent 与模型归因缓存(INV-2195,M3):
 -- L1 可重建索引,按 (repo_url, sha) 增量持久化,与 session_user_meta 隔离;
@@ -572,6 +574,10 @@ export class Store {
 
   constructor(public readonly db: Database) {
     db.exec(SCHEMA);
+    // INV-2186:旧 active 唯一索引缺 repo 维度(跨仓需求叶子互相顶掉)。SCHEMA 已建
+    // 新名索引(idx_experience_nodes_active_repo);这里解除旧名约束。新库从未有过
+    // 旧名索引,IF EXISTS 静默跳过——幂等。
+    db.exec('DROP INDEX IF EXISTS idx_experience_nodes_active');
     try {
       db.exec('ALTER TABLE usage_records ADD COLUMN fetched_at INTEGER');
     } catch {
@@ -3385,13 +3391,13 @@ export class Store {
     if (existing?.status === 'active') return { action: 'unchanged', id: node.id };
     try {
       this.db.exec('BEGIN');
-      // 先让位:同自然键的当前 active 行标 superseded(superseded 不删除)。
-      // 必须先让位再激活/插入——部分唯一索引 (node_kind,path) WHERE active
-      // 逐语句生效,顺序反了会撞唯一约束。
+      // 先让位:同自然键(含 repo 维度,INV-2186:跨仓需求各仓一行)的当前
+      // active 行标 superseded(superseded 不删除)。必须先让位再激活/插入
+      // ——部分唯一索引逐语句生效,顺序反了会撞唯一约束。
       this.db.query(
         `UPDATE experience_nodes SET status = 'superseded', superseded_by = ?, updated_at = ?
-         WHERE node_kind = ? AND path = ? AND status = 'active' AND id != ?`,
-      ).run(node.id, now, node.nodeKind, node.path, node.id);
+         WHERE node_kind = ? AND repo = ? AND path = ? AND status = 'active' AND id != ?`,
+      ).run(node.id, now, node.nodeKind, node.repo, node.path, node.id);
       if (existing?.status === 'superseded') {
         // 复活:同 id 的 superseded 行翻回 active(id=内容指纹,内容必相同;
         // summary_refined 等派生列保留)

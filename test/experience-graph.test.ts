@@ -202,6 +202,49 @@ describe('合成管道(确定性骨架)', () => {
     }
   });
 
+  test('跨仓需求双叶子共存(INV-2186):同 path 两仓库各一行 active,接触面各归各仓', () => {
+    const store = openMemoryDb();
+    try {
+      const REPO_B = 'git@x:expb.git';
+      const ROOT_B = '/repo/expb';
+      store.upsertSessions([session()]);
+      store.replaceSessionRepos(SID, [
+        { sessionId: SID, role: 'work', url: REPO, root: ROOT, name: 'exp', evidenceKind: 'observed' },
+        { sessionId: SID, role: 'touch', url: REPO_B, root: ROOT_B, name: 'expb', evidenceKind: 'observed' },
+      ]);
+      store.replaceAllRequirements([
+        { id: 'req:exp:1', sessionId: SID, seq: 1, text: '跨仓需求', originLevel: 'user_explicit', ts: t0 - 9000, repos: [REPO, REPO_B] },
+      ]);
+      store.upsertSessionTouches([
+        { id: 'touch:a', sessionId: SID, provider: 'claude', filePath: `${ROOT}/src/a.ts`, toolName: 'Edit', op: 'edit', ts: t0 + 100, ordinal: 1500 },
+        { id: 'touch:b', sessionId: SID, provider: 'claude', filePath: `${ROOT_B}/src/b.ts`, toolName: 'Edit', op: 'edit', ts: t0 + 101, ordinal: 1501 },
+      ]);
+      const result = synthesizeExperienceGraph(store);
+      expect(result.status).toBe('ok');
+      const leaves = store.listExperienceNodes({ nodeKind: 'leaf', includeSuperseded: true });
+      // 同 path 两个仓库各一行 active(修复前:后处理的仓库顶掉前者)
+      const activeLeaves = leaves.filter((leaf) => leaf.status === 'active');
+      expect(activeLeaves).toHaveLength(2);
+      expect(new Set(activeLeaves.map((leaf) => leaf.repo))).toEqual(new Set([REPO, REPO_B]));
+      expect(activeLeaves.every((leaf) => leaf.path === 'req:exp:1')).toBe(true);
+      // 接触面各归各仓(仓库相对路径)
+      const leafA = activeLeaves.find((leaf) => leaf.repo === REPO)!;
+      const leafB = activeLeaves.find((leaf) => leaf.repo === REPO_B)!;
+      expect(leafA.interface.join(' ')).toContain('src/a.ts');
+      expect(leafA.interface.join(' ')).not.toContain('src/b.ts');
+      expect(leafB.interface.join(' ')).toContain('src/b.ts');
+      expect(leafB.interface.join(' ')).not.toContain('src/a.ts');
+      // 无 superseded:互不顶掉
+      expect(leaves.filter((leaf) => leaf.status === 'superseded')).toHaveLength(0);
+      // 幂等:重跑仍两行
+      const rerun = synthesizeExperienceGraph(store);
+      expect(rerun.unchanged).toBe(rerun.discovered);
+      expect(store.listExperienceNodes({ nodeKind: 'leaf' })).toHaveLength(2);
+    } finally {
+      store.close();
+    }
+  });
+
   test('无证据来源的卡断言拒绝并计数;隐藏会话的需求与断言合成期过滤', () => {
     const store = fixture([requirement(1, '把配置迁移到 SQLite')]);
     try {

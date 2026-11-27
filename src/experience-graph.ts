@@ -177,6 +177,14 @@ function relativize(path: string, root: string | null): string {
   return path === norm ? '.' : path.startsWith(`${norm}/`) ? path.slice(norm.length + 1) : path;
 }
 
+/** 触碰路径是否落在仓库根下(两端都按 handoff 同款规则归一:/private 前缀与尾斜杠)。 */
+function pathUnderRepoRoot(filePath: string, repoRoot: string): boolean {
+  const norm = (p: string) => p.replace(/\/+$/, '').replace(/^\/private(?=\/)/, '');
+  const file = norm(filePath);
+  const root = norm(repoRoot);
+  return file === root || file.startsWith(`${root}/`);
+}
+
 /** 需求簇 → 叶子节点输入(确定性;invariants 只来自已审核知识卡)。 */
 function leafInputFor(args: {
   repo: string;
@@ -278,6 +286,9 @@ export function synthesizeExperienceGraph(store: Store, options: SynthesizeOptio
         ? store.spanTouches(leaf.requirement.sessionId, leaf.requirement.seq, next ? next.seq : null) : [];
       const fileCount = new Map<string, number>();
       for (const touch of touches) {
+        // 跨仓需求(INV-2186):叶子的接触面只计落在所属仓库根下的触碰;
+        // 根未知(URL-only 仓库)无法判定归属,保留全量并保持原路径。
+        if (entry.repoRoot != null && !pathUnderRepoRoot(touch.filePath, entry.repoRoot)) continue;
         const rel = relativize(touch.filePath, entry.repoRoot);
         fileCount.set(rel, (fileCount.get(rel) ?? 0) + 1);
       }
