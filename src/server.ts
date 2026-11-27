@@ -873,11 +873,9 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
     const project = store.getProject(c.req.param('id'));
     if (!project) return c.json({ ok: false, error: 'unknown project' }, 404);
     const sessions = store.projectSessions(project.url, since, now);
-    // requirements:需求实体(§1.5)按 span 归因落到本项目的,带 origin 分级;
-    // 归属依据是需求自己证据窗口里碰的 repo,不再按 session 整体推导
+    // 单仓按需查询(INV-2197):不再全库跑 listRequirements / projectAggregates / projectCommitCounts
     const sessionById = new Map(sessions.map((session) => [session.id, session]));
-    const requirements = store.listRequirements()
-      .filter((req) => req.repos.includes(project.url))
+    const requirements = store.listRequirementsForRepo(project.url)
       .map((req) => {
         const session = sessionById.get(req.sessionId) ?? store.getSession(req.sessionId);
         if (!session) return null;
@@ -894,13 +892,36 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
       })
       .filter((item): item is NonNullable<typeof item> => item !== null)
       .sort((a, b) => b.updatedAt - a.updatedAt);
-    const aggregates = projectAggregates(since, now);
-    const commitCounts = store.projectCommitCounts(since);
+
+    const agg = {
+      sessions: new Set<string>(),
+      userSessions: new Set<string>(),
+      agents: new Map<string, ProjectAgentStat>(),
+      lastActive: 0,
+    };
+    for (const s of sessions) {
+      agg.sessions.add(s.id);
+      const isUser = (s.origin ?? 'user') === 'user';
+      if (isUser) agg.userSessions.add(s.id);
+      let agent = agg.agents.get(s.provider);
+      if (!agent) {
+        agent = { provider: s.provider, sessions: 0, userSessions: 0, automatedSessions: 0, tokens: 0, lastActive: null };
+        agg.agents.set(s.provider, agent);
+      }
+      agent.sessions += 1;
+      if (isUser) agent.userSessions += 1;
+      else agent.automatedSessions += 1;
+      agent.tokens += s.totalTokens;
+      if (s.updatedAt > (agent.lastActive ?? 0)) agent.lastActive = s.updatedAt;
+      if (s.updatedAt > agg.lastActive) agg.lastActive = s.updatedAt;
+    }
+    const commits = store.projectCommits(project.url, since);
+    const uniqueCommitShas = new Set(commits.map((cm) => cm.sha)).size;
     return c.json({
-      ...toListItem(project, aggregates.get(project.url), commitCounts.get(project.url) ?? 0, requirements.length),
+      ...toListItem(project, agg, uniqueCommitShas, requirements.length),
       sessions,
       requirements,
-      commits: store.projectCommits(project.url, since),
+      commits,
       // 跨实体关联:项目下的计划文件(项目 → 计划;身份 = repo url 对齐)
       plans: store.planFilesForRepo(project.url).slice(0, 30)
         .map((file) => ({ id: file.id, title: file.title, kind: file.kind, path: file.path, lastSeenAt: file.lastSeenAt }))

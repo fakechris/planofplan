@@ -2807,6 +2807,28 @@ export class Store {
     }));
   }
 
+  /** 按单个仓库 URL 查关联需求(INV-2197):避免 GET /api/projects/:id 全库扫描 requirements。 */
+  listRequirementsForRepo(url: string): RequirementRecord[] {
+    const rows = this.db.query(
+      `SELECT DISTINCT r.id, r.session_id, r.seq, r.text, r.origin_level, r.ts, r.refined_text, r.refined_at
+       FROM requirements r
+       JOIN requirement_repos rr ON rr.requirement_id = r.id
+       WHERE rr.url = ?
+       ORDER BY r.session_id, r.seq`,
+    ).all(url) as Array<{ id: string; session_id: string; seq: number; text: string; origin_level: string; ts: number | null; refined_text: string | null; refined_at: number | null }>;
+    return rows.map((row) => ({
+      id: row.id,
+      sessionId: row.session_id,
+      seq: row.seq,
+      text: row.text,
+      originLevel: row.origin_level === 'user_explicit' ? 'user_explicit' : 'system_inferred',
+      ts: row.ts,
+      repos: [url],
+      refinedText: row.refined_text,
+      refinedAt: row.refined_at,
+    }));
+  }
+
   /** 需求→repo url 列表(纱线图项目归属用)。 */
   requirementRepoUrls(): Map<string, string[]> {
     const rows = this.db.query('SELECT requirement_id, url FROM requirement_repos').all() as Array<{

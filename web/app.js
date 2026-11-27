@@ -1582,16 +1582,24 @@ function renderFileEdits(data) {
   });
 }
 
+let renderedProjectKey = null;
+let projectDetailSeq = 0;
+let projectsFetchSeq = 0;
+
 async function refreshProjects() {
   const listEl = document.getElementById('projectList');
   if (!listEl) return;
+  const seq = ++projectsFetchSeq;
   try {
     const days = document.getElementById('usageDays')?.value || '30';
-    latestProjects = await request(`/api/projects?days=${encodeURIComponent(days)}`);
+    const next = await request(`/api/projects?days=${encodeURIComponent(days)}`);
+    if (seq !== projectsFetchSeq) return;
+    latestProjects = next;
   } catch {
+    if (seq !== projectsFetchSeq) return;
     latestProjects = null;
   }
-  renderProjects();
+  renderProjects(false);
 }
 
 function projectItemHtml(project) {
@@ -1607,31 +1615,45 @@ function projectItemHtml(project) {
   `;
 }
 
-function renderProjects() {
+function renderProjects(forceDetail = false) {
   const listEl = document.getElementById('projectList');
   const readerEl = document.getElementById('projectReader');
   if (!listEl || !readerEl) return;
   const projects = latestProjects?.projects || [];
   if (!latestProjects) {
+    renderedProjectKey = null;
     listEl.innerHTML = '<div class="usage-empty"><strong>项目数据不可用</strong><span>daemon 连接失败。</span></div>';
     return;
   }
   if (projects.length === 0) {
+    renderedProjectKey = null;
     listEl.innerHTML = '<div class="usage-empty"><strong>还没有项目</strong><span>session 索引出 git 归属后会出现在这里。</span></div>';
     return;
   }
   listEl.innerHTML = projects.map(projectItemHtml).join('');
   listEl.querySelectorAll('[data-project-id]').forEach((row) => {
     row.addEventListener('click', () => {
-      openProjectId = row.getAttribute('data-project-id');
-      renderProjects();
+      const nextId = row.getAttribute('data-project-id');
+      if (nextId !== openProjectId) {
+        openProjectId = nextId;
+        renderProjects(true);
+      }
     });
   });
   const open = projects.find((project) => project.id === openProjectId);
   if (open) {
-    readerEl.innerHTML = '<div class="muted">读取项目详情…</div>';
-    void loadProjectDetail(open.id);
+    const days = document.getElementById('usageDays')?.value || '30';
+    const wantKey = `${open.id}:${days}`;
+    // 后台 SSE / 30s 轮询只刷新左侧列表，同一项目同窗口已渲染时绝不重写右侧 DOM，
+    // 避免详情区反复闪回「读取项目详情…」或打断历史考古扫描与筛选操作(INV-2197)。
+    if (!forceDetail && renderedProjectKey === wantKey) return;
+    if (renderedProjectKey !== wantKey) {
+      readerEl.innerHTML = '<div class="muted">读取项目详情…</div>';
+    }
+    renderedProjectKey = wantKey;
+    void loadProjectDetail(open.id, days, wantKey);
   } else {
+    renderedProjectKey = null;
     readerEl.innerHTML = `
       <div class="usage-empty">
         <strong>从左边选一个项目</strong>
@@ -1641,16 +1663,18 @@ function renderProjects() {
   }
 }
 
-async function loadProjectDetail(id) {
+async function loadProjectDetail(id, daysParam, wantKey) {
   const readerEl = document.getElementById('projectReader');
   if (!readerEl) return;
+  const seq = ++projectDetailSeq;
   try {
-    const days = document.getElementById('usageDays')?.value || '30';
+    const days = daysParam || document.getElementById('usageDays')?.value || '30';
     const [detail, history] = await Promise.all([
       request(`/api/projects/${encodeURIComponent(id)}?days=${encodeURIComponent(days)}`),
       request(`/api/projects/${encodeURIComponent(id)}/history?days=${encodeURIComponent(days)}`).catch(() => null),
     ]);
-    if (openProjectId !== id) return; // 已切走
+    if (seq !== projectDetailSeq || openProjectId !== id) return; // 已切走或有更新请求
+    renderedProjectKey = wantKey || `${id}:${days}`;
     readerEl.innerHTML = projectDetailHtml(detail);
     readerEl.querySelectorAll('[data-nav]').forEach((el2) => {
       el2.addEventListener('click', () => {
@@ -1661,6 +1685,8 @@ async function loadProjectDetail(id) {
     });
     mountProjectHistory(id, detail, history);
   } catch {
+    if (seq !== projectDetailSeq || openProjectId !== id) return;
+    renderedProjectKey = null;
     readerEl.innerHTML = '<div class="usage-empty"><strong>详情加载失败</strong><span>稍后再试。</span></div>';
   }
 }
@@ -1834,7 +1860,16 @@ function mountProjectHistory(projectId, detail, initialReport) {
       <div class="rh-commit-list">${listHtml || '<div class="muted">当前筛选无匹配 commit</div>'}</div>
     `;
     bindScanButtons();
-    container.querySelector('[data-rh-q]')?.addEventListener('input', (e) => { filterQuery = e.target.value; render(); });
+    container.querySelector('[data-rh-q]')?.addEventListener('input', (e) => {
+      const pos = e.target.selectionStart;
+      filterQuery = e.target.value;
+      render();
+      const next = container.querySelector('[data-rh-q]');
+      if (next) {
+        next.focus();
+        if (typeof pos === 'number') next.setSelectionRange(pos, pos);
+      }
+    });
     container.querySelector('[data-rh-prov]')?.addEventListener('change', (e) => { filterProv = e.target.value; render(); });
     container.querySelector('[data-rh-tier]')?.addEventListener('change', (e) => { filterTier = e.target.value; render(); });
     container.querySelector('[data-rh-relay]')?.addEventListener('change', (e) => { filterRelay = e.target.checked; render(); });
@@ -1928,8 +1963,8 @@ function projectDetailHtml(detail) {
       <dt>url</dt><dd>${escapeHtml(detail.url)}</dd>
       <dt>本地根</dt><dd>${escapeHtml(detail.root || '--')}</dd>
     </div>
-    <div class="session-attrs"><h3>Agent × 活动</h3>${agentsHtml || '<div class="muted">窗口内无活动</div>'}</div>
     <div class="session-attrs" id="projectHistoryBox"><h3>开发历史考古</h3><div class="muted">加载缓存…</div></div>
+    <div class="session-attrs"><h3>Agent × 活动</h3>${agentsHtml || '<div class="muted">窗口内无活动</div>'}</div>
     <div class="session-attrs"><h3>需求流</h3>${requirementsHtml || '<div class="muted">窗口内没有可推导的需求</div>'}</div>
     <div class="session-attrs"><h3>计划 <span class="muted">${(detail.plans || []).length} 个 plan 文件</span></h3>${plansHtml || '<div class="muted">该 repo 下没有计划文件</div>'}</div>
     <div class="session-attrs"><h3>产出 commit <span class="muted">● 声明/文件交集 · ○ 时间窗</span></h3>${commitsHtml || '<div class="muted">窗口内无归因 commit</div>'}</div>

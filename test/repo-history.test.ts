@@ -478,4 +478,67 @@ describe('L0 文件扫描、增量缓存、HTTP API 与只读 MCP repo_history',
       rmSync(tmp, { recursive: true, force: true });
     }
   });
+
+  test('INV-2197: listRequirementsForRepo 单仓查询与 GET /api/projects/:id 聚合精确等价', async () => {
+    const store = openMemoryDb();
+    for (const plan of DEFAULT_PLANS) store.syncPlan(plan);
+    const now = Date.now();
+    store.upsertSessions([
+      {
+        id: 'claude:p1', provider: 'claude', nativeId: 'p1', cwd: '/repo/demo',
+        title: 'demo user task', sourceFile: null, startedAt: now - 30_000, updatedAt: now - 10_000,
+        inputTokens: 0, outputTokens: 0, totalTokens: 500, estimatedCostUsd: null, seenAt: now, origin: 'user',
+      },
+      {
+        id: 'codex:p2', provider: 'codex', nativeId: 'p2', cwd: '/repo/demo',
+        title: 'demo subagent', sourceFile: null, startedAt: now - 20_000, updatedAt: now - 5_000,
+        inputTokens: 0, outputTokens: 0, totalTokens: 300, estimatedCostUsd: null, seenAt: now, origin: 'subagent',
+      },
+      {
+        id: 'claude:other', provider: 'claude', nativeId: 'other', cwd: '/repo/other',
+        title: 'other repo', sourceFile: null, startedAt: now - 20_000, updatedAt: now - 5_000,
+        inputTokens: 0, outputTokens: 0, totalTokens: 900, estimatedCostUsd: null, seenAt: now, origin: 'user',
+      },
+    ]);
+    store.replaceSessionRepos('claude:p1', [{ sessionId: 'claude:p1', role: 'work', url: REPO_URL, root: '/repo/demo', name: 'demo', evidenceKind: 'observed' }]);
+    store.replaceSessionRepos('codex:p2', [{ sessionId: 'codex:p2', role: 'work', url: REPO_URL, root: '/repo/demo', name: 'demo', evidenceKind: 'observed' }]);
+    store.replaceSessionRepos('claude:other', [{ sessionId: 'claude:other', role: 'work', url: 'https://github.com/fakechris/other.git', root: '/repo/other', name: 'other', evidenceKind: 'observed' }]);
+    store.replaceAllRequirements([
+      { id: 'req:demo:1', sessionId: 'claude:p1', seq: 1, text: 'demo 需求', originLevel: 'user_explicit', ts: now - 25_000, repos: [REPO_URL] },
+      { id: 'req:other:1', sessionId: 'claude:other', seq: 1, text: 'other 需求', originLevel: 'user_explicit', ts: now - 15_000, repos: ['https://github.com/fakechris/other.git'] },
+    ]);
+    store.upsertSessionCommits([
+      { sessionId: 'claude:p1', repo: REPO_URL, sha: SHA_A, kind: 'declared', ts: now - 8_000, summary: 'feat: demo', fileOverlap: true },
+      { sessionId: 'codex:p2', repo: REPO_URL, sha: SHA_A, kind: 'witnessed', ts: now - 8_000, summary: 'feat: demo', fileOverlap: true },
+    ]);
+    store.materializeProjects();
+
+    expect(store.listRequirementsForRepo(REPO_URL).map((r) => r.id)).toEqual(['req:demo:1']);
+
+    const demoProject = store.listProjects().find((p) => p.url === REPO_URL)!;
+    const app = createServer(store, { refreshPlan: async () => ({ ok: true, slug: 'kimi', windows: [] }) } as never, { port: 9291, plans: DEFAULT_PLANS });
+    const res = await app.request(`http://localhost/api/projects/${demoProject.id}?days=30`);
+    expect(res.status).toBe(200);
+    const body = await res.json() as {
+      sessionCount: number;
+      userSessionCount: number;
+      commitCount: number;
+      requirementCount: number;
+      agents: Array<{ provider: string; sessions: number; userSessions: number; automatedSessions: number; tokens: number }>;
+      requirements: Array<{ id: string }>;
+    };
+    expect(body.sessionCount).toBe(2);
+    expect(body.userSessionCount).toBe(1);
+    expect(body.commitCount).toBe(1);
+    expect(body.requirementCount).toBe(1);
+    expect(body.requirements.map((r) => r.id)).toEqual(['req:demo:1']);
+    expect(body.agents.find((a) => a.provider === 'claude')?.tokens).toBe(500);
+    expect(body.agents.find((a) => a.provider === 'codex')?.automatedSessions).toBe(1);
+  });
+
+  test('INV-2197: web/app.js renderProjects 对同一项目同窗口具备 renderedProjectKey 防闪烁守卫', () => {
+    const appJs = readFileSync(join(import.meta.dir, '../web/app.js'), 'utf8');
+    expect(appJs).toContain('if (!forceDetail && renderedProjectKey === wantKey) return;');
+    expect(appJs).toContain('if (seq !== projectDetailSeq || openProjectId !== id) return;');
+  });
 });
