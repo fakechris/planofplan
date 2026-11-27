@@ -17,18 +17,18 @@ import { getBuildInfo } from './build-info.ts';
 import { buildUsageReport } from './usage.ts';
 import { buildSessionList, searchSessions } from './sessions.ts';
 import { pickRequirement } from './motivation.ts';
-import { nameOfUrl, sessionProjectNames } from './repos.ts';
+import { groupCanonicalProjects, nameOfUrl, sessionProjectNames, type CanonicalProjectGroup } from './repos.ts';
 import { buildHandoffPackage, deliverHandoff, handoffProviders } from './handoff.ts';
 import { LLM_PROVIDERS, llmKeyFor, llmProviderStatus, synthesizeHandoffSummary, withSummary } from './llm.ts';
 import { loadConfig, saveAlertsConfig, saveLlmConfig, savePlansConfig } from './config.ts';
-import type { PlanConfig, ProjectAgentStat, ProjectListItem, RequirementRecord } from './types.ts';
+import type { PlanConfig, Project, ProjectAgentStat, ProjectListItem, RequirementRecord } from './types.ts';
 import { readTranscript } from './transcript.ts';
 import { launchResume } from './resume.ts';
 import { getStartupSettings, setLaunchOnStartup } from './startup.ts';
 import { startSessionWatcher, createRateGate } from './watcher.ts';
 import { registerMcpRoutes } from './mcp.ts';
 import { buildLineageReport } from './lineage-report.ts';
-import { analyzeRepoHistory, readCachedRepoHistory } from './repo-history.ts';
+import { analyzeRepoHistory, readCachedRepoHistory, sliceHistoryReport } from './repo-history.ts';
 import { getAgentStatus } from './agent-status.ts';
 import { spawnSelf } from './spawn.ts';
 import { ScanQueue } from './scan-queue.ts';
@@ -804,22 +804,42 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
     return c.json({ sessionId, commits: store.listSessionCommits(sessionId) });
   });
 
-  // ── 项目页(IA 重设计第一步)──────────────────────────────────
+  // ── 项目页(IA 重设计第一步 + INV-2198 规范化归并)────────────────
 
-  /** 列表/详情共用的聚合:projectActivity 行 → 每个 url 的 agents 分解与计数。 */
-  const projectAggregates = (since: number, until: number) => {
-    const byUrl = new Map<string, {
+  const canonicalProjectGroups = (): Array<CanonicalProjectGroup<Project>> =>
+    groupCanonicalProjects(store.listProjects());
+
+  const resolveCanonicalProject = (id: string): CanonicalProjectGroup<Project> | null => {
+    const groups = canonicalProjectGroups();
+    return groups.find((g) => g.primary.id === id || g.aliases.some((a) => a.id === id)) ?? null;
+  };
+
+  /** 列表聚合:projectActivity 行按规范化主项目分组聚合(跨别名 URL 按 sessionId 去重)。 */
+  const projectAggregatesByGroup = (
+    groups: Array<CanonicalProjectGroup<Project>>,
+    since: number,
+    until: number,
+  ) => {
+    const urlToPrimaryId = new Map<string, string>();
+    for (const g of groups) {
+      for (const u of g.aliasUrls) urlToPrimaryId.set(u, g.primary.id);
+    }
+    const byPrimary = new Map<string, {
       sessions: Set<string>;
       userSessions: Set<string>;
       agents: Map<string, ProjectAgentStat>;
       lastActive: number;
     }>();
     for (const row of store.projectActivity(since, until)) {
-      let agg = byUrl.get(row.url);
+      const primaryId = urlToPrimaryId.get(row.url);
+      if (!primaryId) continue;
+      let agg = byPrimary.get(primaryId);
       if (!agg) {
         agg = { sessions: new Set(), userSessions: new Set(), agents: new Map(), lastActive: 0 };
-        byUrl.set(row.url, agg);
+        byPrimary.set(primaryId, agg);
       }
+      if (row.updatedAt > agg.lastActive) agg.lastActive = row.updatedAt;
+      if (agg.sessions.has(row.sessionId)) continue; // 跨别名同 session 不重复计数
       agg.sessions.add(row.sessionId);
       const isUser = row.origin === 'user';
       if (isUser) agg.userSessions.add(row.sessionId);
@@ -833,49 +853,77 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
       else agent.automatedSessions += 1;
       agent.tokens += row.totalTokens;
       if (row.updatedAt > (agent.lastActive ?? 0)) agent.lastActive = row.updatedAt;
-      if (row.updatedAt > agg.lastActive) agg.lastActive = row.updatedAt;
     }
-    return byUrl;
+    return byPrimary;
+  };
+
+  const countDistinctShas = (shasByUrl: Map<string, Set<string>>, urls: string[]): number => {
+    const merged = new Set<string>();
+    for (const u of urls) {
+      const set = shasByUrl.get(u);
+      if (!set) continue;
+      for (const sha of set) merged.add(sha);
+    }
+    return merged.size;
   };
 
   const toListItem = (
-    project: { id: string; url: string; name: string; root: string | null; createdAt: number; lastSeenAt: number },
+    group: CanonicalProjectGroup<Project>,
     agg: { sessions: Set<string>; userSessions: Set<string>; agents: Map<string, ProjectAgentStat>; lastActive: number } | undefined,
     commitCount: number,
+    commitSource: 'provenance' | 'session_commits',
     requirementCount: number | null,
   ): ProjectListItem => ({
-    ...project,
+    ...group.primary,
     sessionCount: agg?.sessions.size ?? 0,
     userSessionCount: agg?.userSessions.size ?? 0,
     agents: [...(agg?.agents.values() ?? [])].sort((a, b) => b.sessions - a.sessions || a.provider.localeCompare(b.provider)),
     lastActive: agg?.lastActive || null,
     commitCount,
+    commitSource,
     requirementCount,
+    hasGit: group.hasGit,
+    isToolRepo: group.isToolRepo,
+    aliasUrls: group.aliasUrls,
+    aliasNames: group.aliasNames,
   });
 
   app.get('/api/projects', (c) => {
     const days = Math.min(365, Math.max(1, Number(c.req.query('days') ?? 30) || 30));
+    const codeOnly = c.req.query('codeOnly') === '1' || c.req.query('codeOnly') === 'true';
     const now = Date.now();
     const since = now - days * 86_400_000;
-    const aggregates = projectAggregates(since, now);
-    const commitCounts = store.projectCommitCounts(since);
+    const groups = canonicalProjectGroups();
+    const aggregates = projectAggregatesByGroup(groups, since, now);
+    const provShas = store.projectProvenanceShas(since);
+    const sessShas = store.projectCommitShas(since);
     const requirementCounts = store.projectRequirementCounts(since);
-    const projects = store.listProjects()
-      .map((project) => toListItem(project, aggregates.get(project.url), commitCounts.get(project.url) ?? 0, requirementCounts.get(project.url) ?? 0))
-      .sort((a, b) => (b.lastActive ?? 0) - (a.lastActive ?? 0) || b.sessionCount - a.sessionCount);
-    return c.json({ days, since, until: now, projects });
+    const allItems = groups
+      .map((group) => {
+        const provCount = countDistinctShas(provShas, group.aliasUrls);
+        const commitSource = provCount > 0 ? 'provenance' : 'session_commits';
+        const commitCount = provCount > 0 ? provCount : countDistinctShas(sessShas, group.aliasUrls);
+        let reqCount = 0;
+        for (const u of group.aliasUrls) reqCount += requirementCounts.get(u) ?? 0;
+        return toListItem(group, aggregates.get(group.primary.id), commitCount, commitSource, reqCount);
+      })
+      .sort((a, b) => (b.lastActive ?? 0) - (a.lastActive ?? 0) || b.commitCount - a.commitCount || b.sessionCount - a.sessionCount);
+    const projects = codeOnly
+      ? allItems.filter((p) => p.commitCount > 0 || (Boolean(p.hasGit) && !p.isToolRepo && p.sessionCount > 0))
+      : allItems;
+    return c.json({ days, since, until: now, totalProjects: allItems.length, projects });
   });
 
   app.get('/api/projects/:id', (c) => {
     const days = Math.min(365, Math.max(1, Number(c.req.query('days') ?? 30) || 30));
     const now = Date.now();
     const since = now - days * 86_400_000;
-    const project = store.getProject(c.req.param('id'));
-    if (!project) return c.json({ ok: false, error: 'unknown project' }, 404);
-    const sessions = store.projectSessions(project.url, since, now);
-    // 单仓按需查询(INV-2197):不再全库跑 listRequirements / projectAggregates / projectCommitCounts
+    const group = resolveCanonicalProject(c.req.param('id'));
+    if (!group) return c.json({ ok: false, error: 'unknown project' }, 404);
+    const sessions = store.projectSessionsForUrls(group.aliasUrls, since, now);
+    // 单仓按需查询(INV-2197) + 多别名归并(INV-2198)
     const sessionById = new Map(sessions.map((session) => [session.id, session]));
-    const requirements = store.listRequirementsForRepo(project.url)
+    const requirements = store.listRequirementsForRepos(group.aliasUrls)
       .map((req) => {
         const session = sessionById.get(req.sessionId) ?? store.getSession(req.sessionId);
         if (!session) return null;
@@ -915,15 +963,17 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
       if (s.updatedAt > (agent.lastActive ?? 0)) agent.lastActive = s.updatedAt;
       if (s.updatedAt > agg.lastActive) agg.lastActive = s.updatedAt;
     }
-    const commits = store.projectCommits(project.url, since);
-    const uniqueCommitShas = new Set(commits.map((cm) => cm.sha)).size;
+    const commits = store.projectCommitsForUrls(group.aliasUrls, since);
+    const provCount = countDistinctShas(store.projectProvenanceShas(since), group.aliasUrls);
+    const commitSource = provCount > 0 ? 'provenance' : 'session_commits';
+    const commitCount = provCount > 0 ? provCount : commits.length;
     return c.json({
-      ...toListItem(project, agg, uniqueCommitShas, requirements.length),
+      ...toListItem(group, agg, commitCount, commitSource, requirements.length),
       sessions,
       requirements,
       commits,
-      // 跨实体关联:项目下的计划文件(项目 → 计划;身份 = repo url 对齐)
-      plans: store.planFilesForRepo(project.url).slice(0, 30)
+      // 跨实体关联:项目下的计划文件(项目 → 计划;身份 = 合并后的 repo urls 对齐)
+      plans: store.planFilesForRepos(group.aliasUrls).slice(0, 30)
         .map((file) => ({ id: file.id, title: file.title, kind: file.kind, path: file.path, lastSeenAt: file.lastSeenAt }))
         .sort((a, b) => b.lastSeenAt - a.lastSeenAt),
     });
@@ -941,17 +991,32 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
     return Math.min(3650, Math.floor(n));
   };
 
+  /** 默认每页返回 120 条 commit 明细(summary 仍基于全量计算);传 0/all 返回全量(INV-2198)。 */
+  const parseHistoryLimit = (raw: string | undefined): number | null => {
+    if (raw == null || raw === '') return 120;
+    if (raw === 'all' || raw === '0') return null;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    return Math.min(2000, Math.floor(n));
+  };
+
   const runHistoryScan = (
-    project: { id: string; url: string; root: string | null; name: string },
+    group: CanonicalProjectGroup<Project>,
     days: number | null,
     refresh: boolean,
   ): Promise<ReturnType<typeof analyzeRepoHistory>> => {
+    const project = group.primary;
     const key = `${project.id}:${days ?? 'all'}:${refresh ? 1 : 0}`;
     const existing = historyScansInFlight.get(key);
     if (existing) return existing;
     const task = (async () => {
       if (!project.root || !existsSync(resolve(project.root, '.git'))) {
-        return readCachedRepoHistory(store, { repoUrl: project.url, repoRoot: project.root, repoName: project.name }, days);
+        return readCachedRepoHistory(
+          store,
+          { repoUrl: project.url, repoRoot: project.root, repoName: project.name },
+          days,
+          { aliasUrls: group.aliasUrls },
+        );
       }
       // 生产文件库走单飞子进程(遵循 AGENTS.md §2.3:不阻塞 SSE/HTTP,且扫描峰值内存随子进程退出立刻归还 OS);
       // 内存测试库回退进程内执行。
@@ -971,12 +1036,19 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
         if (exitCode !== 0) {
           throw new Error(`repo-history 子进程扫描失败(exit ${exitCode})`);
         }
-        return readCachedRepoHistory(store, { repoUrl: project.url, repoRoot: project.root, repoName: project.name }, days);
+        return readCachedRepoHistory(
+          store,
+          { repoUrl: project.url, repoRoot: project.root, repoName: project.name },
+          days,
+          { aliasUrls: group.aliasUrls },
+        );
       }
       return analyzeRepoHistory(store, {
         repoUrl: project.url,
         repoRoot: project.root,
         repoName: project.name,
+        aliasUrls: group.aliasUrls,
+        extraTokens: group.aliasNames,
         days,
         refresh,
       });
@@ -988,36 +1060,44 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
   };
 
   app.get('/api/projects/:id/history', async (c) => {
-    const project = store.getProject(c.req.param('id'));
-    if (!project) return c.json({ ok: false, error: 'unknown project' }, 404);
+    const group = resolveCanonicalProject(c.req.param('id'));
+    if (!group) return c.json({ ok: false, error: 'unknown project' }, 404);
+    const project = group.primary;
     const days = parseHistoryDays(c.req.query('days'));
+    const limit = parseHistoryLimit(c.req.query('limit'));
     const refresh = c.req.query('refresh') === '1' || c.req.query('refresh') === 'true';
     const scan = refresh || c.req.query('scan') === '1' || c.req.query('scan') === 'true';
     if (!scan) {
-      return c.json(readCachedRepoHistory(store, { repoUrl: project.url, repoRoot: project.root, repoName: project.name }, days));
+      return c.json(readCachedRepoHistory(
+        store,
+        { repoUrl: project.url, repoRoot: project.root, repoName: project.name },
+        days,
+        { aliasUrls: group.aliasUrls, limit },
+      ));
     }
     try {
-      const report = await runHistoryScan(project, days, refresh);
-      return c.json(report);
+      const report = await runHistoryScan(group, days, refresh);
+      return c.json(sliceHistoryReport(report, limit));
     } catch (error) {
       return c.json({ ok: false, error: error instanceof Error ? error.message : 'history scan failed' }, 500);
     }
   });
 
   app.post('/api/projects/:id/history/scan', async (c) => {
-    const project = store.getProject(c.req.param('id'));
-    if (!project) return c.json({ ok: false, error: 'unknown project' }, 404);
-    let body: { days?: string | number | null; refresh?: boolean } = {};
+    const group = resolveCanonicalProject(c.req.param('id'));
+    if (!group) return c.json({ ok: false, error: 'unknown project' }, 404);
+    let body: { days?: string | number | null; refresh?: boolean; limit?: string | number | null } = {};
     try {
       body = (await c.req.json()) as typeof body;
     } catch { /* 空 body 允许 */ }
     const days = body.days === null || body.days === 'all' || body.days === 0
       ? null
       : parseHistoryDays(body.days != null ? String(body.days) : c.req.query('days'));
+    const limit = parseHistoryLimit(body.limit != null ? String(body.limit) : c.req.query('limit'));
     const refresh = Boolean(body.refresh);
     try {
-      const report = await runHistoryScan(project, days, refresh);
-      return c.json(report);
+      const report = await runHistoryScan(group, days, refresh);
+      return c.json(sliceHistoryReport(report, limit));
     } catch (error) {
       return c.json({ ok: false, error: error instanceof Error ? error.message : 'history scan failed' }, 500);
     }

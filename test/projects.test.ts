@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Database } from 'bun:sqlite';
 import { openDb, openMemoryDb, projectEntityId , SCHEMA_VERSION } from '../src/db.ts';
+import { canonicalRepoUrl, groupCanonicalProjects, isToolOrNoiseRoot } from '../src/repos.ts';
 import { materializeRequirements } from '../src/requirements.ts';
 import { createServer } from '../src/server.ts';
 import { DEFAULT_PLANS } from '../src/config.ts';
@@ -175,5 +176,165 @@ describe('project endpoints', () => {
 
     const missing = await server.request('http://localhost/api/projects/nope');
     expect(missing.status).toBe(404);
+  });
+});
+
+describe('INV-2198: 项目归并、去重 commitCount 与 codeOnly 降噪', () => {
+  test('canonicalRepoUrl 与 isToolOrNoiseRoot 判定准确(不误伤 ~/source/research 业务仓)', () => {
+    expect(canonicalRepoUrl('https://github.com/fakechris/lumenbox.git')).toBe('github.com/fakechris/lumenbox');
+    expect(canonicalRepoUrl('https://github.com/fakechris/lumenbox')).toBe('github.com/fakechris/lumenbox');
+    expect(canonicalRepoUrl('git@github.com:FakeChris/LumenBox.git')).toBe('github.com/fakechris/lumenbox');
+    expect(canonicalRepoUrl('file:///Users/chris/repo/')).toBe('/Users/chris/repo');
+
+    expect(isToolOrNoiseRoot('/opt/homebrew/Library/Taps/homebrew/homebrew-core')).toBe(true);
+    expect(isToolOrNoiseRoot('/Users/chris/.agents/skills/gstack')).toBe(true);
+    expect(isToolOrNoiseRoot('/Users/chris/.claude/skills/humanizer-zh')).toBe(true);
+    expect(isToolOrNoiseRoot('/tmp/scratch')).toBe(true);
+    // 业务项目放在 ~/source/research/ 下绝不被误判为工具目录
+    expect(isToolOrNoiseRoot('/Users/chris/source/research/grokbot/agentbox')).toBe(false);
+    expect(isToolOrNoiseRoot('/Users/chris/workspace/planofplan')).toBe(false);
+  });
+
+  test('groupCanonicalProjects 归并同源 .git/无.git、同 root、兄弟 worktree 与单仓父目录,但不误合并多仓父目录', () => {
+    const now = Date.now();
+    const gitRoots = new Set([
+      '/Users/chris/source/research/grokbot/agentbox',
+      '/Users/chris/workspace/repo-a',
+      '/Users/chris/workspace/repo-b',
+      '/opt/homebrew',
+    ]);
+    const items = [
+      { id: 'p-main', url: 'https://github.com/fakechris/lumenbox.git', name: 'lumenbox', root: '/Users/chris/source/research/grokbot/agentbox', lastSeenAt: now },
+      { id: 'p-nogit', url: 'https://github.com/fakechris/lumenbox', name: 'lumenbox', root: '/Users/chris/source/research/grokbot/agentbox', lastSeenAt: now - 100 },
+      { id: 'p-local', url: '/Users/chris/source/research/grokbot/agentbox', name: 'agentbox', root: '/Users/chris/source/research/grokbot/agentbox', lastSeenAt: now - 200 },
+      { id: 'p-wt', url: '/Users/chris/source/research/grokbot/agentbox-r30', name: 'agentbox-r30', root: '/Users/chris/source/research/grokbot/agentbox-r30', lastSeenAt: now - 300 },
+      { id: 'p-parent', url: '/Users/chris/source/research/grokbot', name: 'grokbot', root: '/Users/chris/source/research/grokbot', lastSeenAt: now - 400 },
+      { id: 'p-ra', url: 'https://github.com/org/repo-a.git', name: 'repo-a', root: '/Users/chris/workspace/repo-a', lastSeenAt: now },
+      { id: 'p-rb', url: 'https://github.com/org/repo-b.git', name: 'repo-b', root: '/Users/chris/workspace/repo-b', lastSeenAt: now },
+      { id: 'p-ws', url: '/Users/chris/workspace', name: 'workspace', root: '/Users/chris/workspace', lastSeenAt: now - 500 },
+      { id: 'p-brew', url: 'https://github.com/Homebrew/brew', name: 'brew', root: '/opt/homebrew', lastSeenAt: now - 600 },
+    ];
+    const groups = groupCanonicalProjects(items, { hasGitDir: (r) => gitRoots.has(r) });
+    const lumen = groups.find((g) => g.primary.id === 'p-main');
+    expect(lumen).toBeDefined();
+    expect(lumen!.aliases.map((a) => a.id).sort()).toEqual(['p-local', 'p-nogit', 'p-parent', 'p-wt']);
+    expect(lumen!.aliasNames.sort()).toEqual(['agentbox', 'agentbox-r30', 'grokbot']);
+    expect(lumen!.hasGit).toBe(true);
+    expect(lumen!.isToolRepo).toBe(false);
+
+    // 多仓父目录 ~/workspace 不得被合并到 repo-a 或 repo-b
+    const ws = groups.find((g) => g.primary.id === 'p-ws');
+    expect(ws).toBeDefined();
+    expect(ws!.hasGit).toBe(false);
+
+    // brew 标记为工具仓
+    const brew = groups.find((g) => g.primary.id === 'p-brew');
+    expect(brew?.isToolRepo).toBe(true);
+  });
+
+  test('COUNT(DISTINCT sha) 去重 + commit_provenance 优先 + codeOnly 过滤 + 别名 ID 路由兼容', async () => {
+    const store = openMemoryDb();
+    const now = Date.now();
+    const mainUrl = 'https://github.com/fakechris/lumenbox.git';
+    const aliasUrl = '/Users/chris/source/research/grokbot/agentbox';
+    const noiseUrl = '/Users/chris/scratch-empty-dir';
+    const sha1 = '1'.repeat(40);
+    const sha2 = '2'.repeat(40);
+    const sha3 = '3'.repeat(40);
+
+    store.upsertSessions([
+      session({ id: 'claude:s1', provider: 'claude', nativeId: 's1', updatedAt: now - 1000, totalTokens: 200 }),
+      session({ id: 'codex:s2', provider: 'codex', nativeId: 's2', updatedAt: now - 2000, totalTokens: 300 }),
+      session({ id: 'claude:noise', provider: 'claude', nativeId: 'noise', updatedAt: now - 3000, totalTokens: 10 }),
+    ]);
+    // 同一 session s1 同时关联 mainUrl 和 aliasUrl,合并后不能重复计 session/token
+    store.replaceSessionRepos('claude:s1', [
+      repo('claude:s1', 'work', mainUrl, '/repo/lumenbox', 'lumenbox'),
+      repo('claude:s1', 'touch', aliasUrl, '/repo/lumenbox', 'agentbox'),
+    ]);
+    store.replaceSessionRepos('codex:s2', [
+      repo('codex:s2', 'work', aliasUrl, '/repo/lumenbox', 'agentbox'),
+    ]);
+    store.replaceSessionRepos('claude:noise', [
+      repo('claude:noise', 'work', noiseUrl, noiseUrl, 'scratch-empty-dir'),
+    ]);
+    // 同一 SHA 被两个 session 匹配成 candidate,COUNT(DISTINCT sha) 应为 1 而非 2
+    store.upsertSessionCommits([
+      { sessionId: 'claude:s1', repo: mainUrl, sha: sha1, kind: 'candidate', ts: now - 500, summary: 'feat: one', fileOverlap: false, pushed: true },
+      { sessionId: 'codex:s2', repo: mainUrl, sha: sha1, kind: 'witnessed', ts: now - 500, summary: 'feat: one', fileOverlap: true, pushed: true },
+    ]);
+    store.materializeProjects();
+
+    expect(store.projectCommitCounts(now - 86_400_000).get(mainUrl)).toBe(1);
+
+    const server = createServer(store, scheduler as never, { port: 9291, plans: DEFAULT_PLANS });
+    // 未写 commit_provenance 前:回退 session_commits 去重数 (= 1)
+    const r1 = await (await server.request('http://localhost/api/projects?days=7&codeOnly=1')).json() as {
+      totalProjects: number;
+      projects: Array<{ id: string; name: string; sessionCount: number; commitCount: number; commitSource: string; aliasNames: string[] }>;
+    };
+    expect(r1.totalProjects).toBe(2); // lumenbox(合并后) + scratch-empty-dir
+    expect(r1.projects).toHaveLength(1); // codeOnly 折叠无 git 零 commit 目录
+    expect(r1.projects[0]).toMatchObject({
+      name: 'lumenbox',
+      sessionCount: 2, // s1 不双计!
+      commitCount: 1,
+      commitSource: 'session_commits',
+      aliasNames: ['agentbox'],
+    });
+
+    // 写入 3 条真实 commit_provenance 后:列表与详情 commitCount 立刻切换为 3 (provenance)
+    store.upsertCommitProvenance([sha1, sha2, sha3].map((sha, i) => ({
+      repoUrl: mainUrl,
+      sha,
+      prNumber: i + 1,
+      committedAt: now - (i + 1) * 1000,
+      authorName: 'Chris',
+      subject: `feat: c${i + 1}`,
+      tier: 'hunk-matched' as const,
+      primaryProvider: 'claude',
+      primaryModel: 'claude-opus-5-5',
+      totalDistLines: 10,
+      matchedDistLines: 10,
+      relayKind: '' as const,
+      filesCount: 1,
+      files: ['src/a.ts'],
+      authors: [{ provider: 'claude', model: 'claude-opus-5-5', lines: 10, source: 'hunk' }],
+      declared: [],
+      witnessedAuthor: [],
+      mergedBy: [],
+      reviewers: [],
+      sessions: [],
+      analyzerVersion: 1,
+      analyzedAt: now,
+    })));
+
+    const r2 = await (await server.request('http://localhost/api/projects?days=7&codeOnly=1')).json() as {
+      projects: Array<{ id: string; commitCount: number; commitSource: string }>;
+    };
+    expect(r2.projects[0]).toMatchObject({ commitCount: 3, commitSource: 'provenance' });
+
+    // 用旧别名 ID 访问 /api/projects/:aliasId 仍可自动路由到主项目并拿到合并后的全部 session/commit
+    const aliasId = projectEntityId(aliasUrl);
+    const detailRes = await server.request(`http://localhost/api/projects/${aliasId}?days=7`);
+    expect(detailRes.status).toBe(200);
+    const detail = await detailRes.json() as {
+      name: string;
+      sessionCount: number;
+      commitCount: number;
+      commitSource: string;
+      aliasNames: string[];
+      commits: Array<{ sha: string; kind: string; fileOverlap: boolean }>;
+    };
+    expect(detail).toMatchObject({
+      name: 'lumenbox',
+      sessionCount: 2,
+      commitCount: 3,
+      commitSource: 'provenance',
+      aliasNames: ['agentbox'],
+    });
+    // projectCommits 按 sha 去重并保留高证据档(witnessed)和 fileOverlap=true
+    expect(detail.commits).toHaveLength(1);
+    expect(detail.commits[0]).toMatchObject({ sha: sha1, kind: 'witnessed', fileOverlap: true });
   });
 });

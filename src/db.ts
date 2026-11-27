@@ -1001,16 +1001,71 @@ export class Store {
     }>;
   }
 
-  /** 窗口内各 repo 的 commit 计数。 */
+  /** 窗口内各 repo 的去重 commit 计数(INV-2198:按 DISTINCT sha,避免多候选会话虚增)。 */
   projectCommitCounts(since: number): Map<string, number> {
     const rows = this.db.query(
-      'SELECT repo, COUNT(*) AS n FROM session_commits WHERE ts >= ? GROUP BY repo',
+      'SELECT repo, COUNT(DISTINCT sha) AS n FROM session_commits WHERE ts >= ? GROUP BY repo',
     ).all(since) as Array<{ repo: string; n: number }>;
     return new Map(rows.map((row) => [row.repo, row.n]));
   }
 
+  /** 窗口内各 repo 的去重 commit SHA 集合(供合并后的多别名项目跨 URL 去重计数)。 */
+  projectCommitShas(since: number): Map<string, Set<string>> {
+    const rows = this.db.query(
+      'SELECT DISTINCT repo, sha FROM session_commits WHERE ts >= ?',
+    ).all(since) as Array<{ repo: string; sha: string }>;
+    const out = new Map<string, Set<string>>();
+    for (const row of rows) {
+      let set = out.get(row.repo);
+      if (!set) {
+        set = new Set<string>();
+        out.set(row.repo, set);
+      }
+      set.add(row.sha);
+    }
+    return out;
+  }
+
+  /** 窗口内 commit_provenance(真实 git 历史归因表)的去重 SHA 集合(按 repo_url 分组)。 */
+  projectProvenanceShas(since?: number | null): Map<string, Set<string>> {
+    const rows = since != null
+      ? this.db.query(
+        'SELECT repo_url AS repo, sha FROM commit_provenance WHERE committed_at >= ?',
+      ).all(since) as Array<{ repo: string; sha: string }>
+      : this.db.query(
+        'SELECT repo_url AS repo, sha FROM commit_provenance',
+      ).all() as Array<{ repo: string; sha: string }>;
+    const out = new Map<string, Set<string>>();
+    for (const row of rows) {
+      let set = out.get(row.repo);
+      if (!set) {
+        set = new Set<string>();
+        out.set(row.repo, set);
+      }
+      set.add(row.sha);
+    }
+    return out;
+  }
+
+  /** 窗口内 commit_provenance 各 repo_url 的真实 commit 计数。 */
+  projectProvenanceCounts(since?: number | null): Map<string, number> {
+    const out = new Map<string, number>();
+    for (const [repo, shas] of this.projectProvenanceShas(since)) {
+      out.set(repo, shas.size);
+    }
+    return out;
+  }
+
   /** 详情:窗口内该项目的 session 时间线(updated_at 倒排)。 */
   projectSessions(url: string, since: number, until: number): SessionRecord[] {
+    return this.projectSessionsForUrls([url], since, until);
+  }
+
+  /** 详情:窗口内合并多别名 URL 的 session 时间线(按 session.id 去重,updated_at 倒排)。 */
+  projectSessionsForUrls(urls: string[], since: number, until: number): SessionRecord[] {
+    const uniq = [...new Set(urls.filter(Boolean))];
+    if (uniq.length === 0) return [];
+    const placeholders = uniq.map(() => '?').join(', ');
     const rows = this.db.query(
       `SELECT DISTINCT s.id, s.provider, s.native_id, s.cwd, s.title, s.source_file,
               s.started_at, s.updated_at, s.input_tokens, s.output_tokens, s.total_tokens,
@@ -1018,9 +1073,9 @@ export class Store {
               s.origin, s.parent_id, s.origin_detail
        FROM sessions s
        JOIN session_repos r ON r.session_id = s.id
-       WHERE r.url = ? AND s.updated_at >= ? AND s.updated_at < ?
+       WHERE r.url IN (${placeholders}) AND s.updated_at >= ? AND s.updated_at < ?
        ORDER BY s.updated_at DESC`,
-    ).all(url, since, until) as Array<{
+    ).all(...uniq, since, until) as Array<{
       id: string;
       provider: string;
       native_id: string;
@@ -1044,12 +1099,20 @@ export class Store {
     return rows.map((row) => sessionFromRow(row));
   }
 
-  /** 详情:窗口内落在该项目的 commit(ts 倒排)。 */
+  /** 详情:窗口内落在该项目的 commit(ts 倒排,按 sha 去重保留最高证据档)。 */
   projectCommits(url: string, since: number): SessionCommit[] {
+    return this.projectCommitsForUrls([url], since);
+  }
+
+  /** 详情:窗口内多别名 URL 合并后的 commit 列表(按 sha 去重,保留最高证据档)。 */
+  projectCommitsForUrls(urls: string[], since: number): SessionCommit[] {
+    const uniq = [...new Set(urls.filter(Boolean))];
+    if (uniq.length === 0) return [];
+    const placeholders = uniq.map(() => '?').join(', ');
     const rows = this.db.query(
       `SELECT session_id, repo, sha, kind, ts, summary, file_overlap, pushed
-       FROM session_commits WHERE repo = ? AND ts >= ? ORDER BY ts DESC`,
-    ).all(url, since) as Array<{
+       FROM session_commits WHERE repo IN (${placeholders}) AND ts >= ? ORDER BY ts DESC`,
+    ).all(...uniq, since) as Array<{
       session_id: string;
       repo: string;
       sha: string;
@@ -1059,7 +1122,25 @@ export class Store {
       file_overlap: number;
       pushed: number;
     }>;
-    return rows.map(sessionCommitFromRow);
+    const rank = (kind: SessionCommit['kind']): number => (kind === 'declared' ? 3 : kind === 'witnessed' ? 2 : 1);
+    const bySha = new Map<string, SessionCommit>();
+    for (const raw of rows) {
+      const item = sessionCommitFromRow(raw);
+      const prev = bySha.get(item.sha);
+      if (!prev) {
+        bySha.set(item.sha, item);
+        continue;
+      }
+      const pick = rank(item.kind) > rank(prev.kind) ? item : prev;
+      bySha.set(item.sha, {
+        ...pick,
+        fileOverlap: Boolean(prev.fileOverlap || item.fileOverlap),
+        pushed: prev.pushed === true || item.pushed === true,
+        summary: pick.summary || prev.summary || item.summary,
+        ts: Math.max(prev.ts ?? 0, item.ts ?? 0) || null,
+      });
+    }
+    return [...bySha.values()].sort((a, b) => (b.ts ?? 0) - (a.ts ?? 0));
   }
 
   /** 配置 → db plans 表（INSERT OR IGNORE；已存在时只更新非运行时字段） */
@@ -2809,13 +2890,21 @@ export class Store {
 
   /** 按单个仓库 URL 查关联需求(INV-2197):避免 GET /api/projects/:id 全库扫描 requirements。 */
   listRequirementsForRepo(url: string): RequirementRecord[] {
+    return this.listRequirementsForRepos([url]);
+  }
+
+  /** 按合并后的多别名仓库 URL 查关联需求(按 requirement.id 去重)。 */
+  listRequirementsForRepos(urls: string[]): RequirementRecord[] {
+    const uniq = [...new Set(urls.filter(Boolean))];
+    if (uniq.length === 0) return [];
+    const placeholders = uniq.map(() => '?').join(', ');
     const rows = this.db.query(
       `SELECT DISTINCT r.id, r.session_id, r.seq, r.text, r.origin_level, r.ts, r.refined_text, r.refined_at
        FROM requirements r
        JOIN requirement_repos rr ON rr.requirement_id = r.id
-       WHERE rr.url = ?
+       WHERE rr.url IN (${placeholders})
        ORDER BY r.session_id, r.seq`,
-    ).all(url) as Array<{ id: string; session_id: string; seq: number; text: string; origin_level: string; ts: number | null; refined_text: string | null; refined_at: number | null }>;
+    ).all(...uniq) as Array<{ id: string; session_id: string; seq: number; text: string; origin_level: string; ts: number | null; refined_text: string | null; refined_at: number | null }>;
     return rows.map((row) => ({
       id: row.id,
       sessionId: row.session_id,
@@ -2823,7 +2912,7 @@ export class Store {
       text: row.text,
       originLevel: row.origin_level === 'user_explicit' ? 'user_explicit' : 'system_inferred',
       ts: row.ts,
-      repos: [url],
+      repos: uniq,
       refinedText: row.refined_text,
       refinedAt: row.refined_at,
     }));
@@ -3430,7 +3519,14 @@ export class Store {
 
   /** 项目下的计划文件(project → plan;repo url 对齐 projects 身份)。 */
   planFilesForRepo(repoUrl: string): PlanFileRecord[] {
-    return this.listPlanFiles().filter((file) => file.repo === repoUrl);
+    return this.planFilesForRepos([repoUrl]);
+  }
+
+  /** 多别名合并项目的计划文件列表。 */
+  planFilesForRepos(repoUrls: string[]): PlanFileRecord[] {
+    const wanted = new Set(repoUrls.filter(Boolean));
+    if (wanted.size === 0) return [];
+    return this.listPlanFiles().filter((file) => file.repo != null && wanted.has(file.repo));
   }
 
   /** 计划文件关联的需求(plan → requirement:触碰 session 的全部需求,不只首条)。 */
@@ -3821,14 +3917,23 @@ export class Store {
   }
 
   listCommitProvenance(repoUrl: string, sinceMs?: number | null): CommitProvenanceRecord[] {
+    return this.listCommitProvenanceForUrls([repoUrl], sinceMs);
+  }
+
+  listCommitProvenanceForUrls(repoUrls: string[], sinceMs?: number | null): CommitProvenanceRecord[] {
+    const uniq = [...new Set(repoUrls.filter(Boolean))];
+    if (uniq.length === 0) return [];
+    const placeholders = uniq.map(() => '?').join(', ');
     const rows = sinceMs != null
       ? this.db.query(
-        `SELECT * FROM commit_provenance WHERE repo_url = ? AND committed_at >= ? ORDER BY committed_at DESC`,
-      ).all(repoUrl, sinceMs)
+        `SELECT * FROM commit_provenance WHERE repo_url IN (${placeholders}) AND committed_at >= ? ORDER BY committed_at DESC, analyzed_at DESC`,
+      ).all(...uniq, sinceMs)
       : this.db.query(
-        `SELECT * FROM commit_provenance WHERE repo_url = ? ORDER BY committed_at DESC`,
-      ).all(repoUrl);
-    return (rows as Array<{
+        `SELECT * FROM commit_provenance WHERE repo_url IN (${placeholders}) ORDER BY committed_at DESC, analyzed_at DESC`,
+      ).all(...uniq);
+    const seenSha = new Set<string>();
+    const out: CommitProvenanceRecord[] = [];
+    for (const row of rows as Array<{
       repo_url: string;
       sha: string;
       pr_number: number | null;
@@ -3845,7 +3950,9 @@ export class Store {
       evidence_json: string;
       analyzer_version: number;
       analyzed_at: number;
-    }>).map((row) => {
+    }>) {
+      if (seenSha.has(row.sha)) continue;
+      seenSha.add(row.sha);
       let ev: {
         files?: string[];
         authors?: CommitProvenanceAuthor[];
@@ -3860,7 +3967,7 @@ export class Store {
       } catch {
         ev = {};
       }
-      return {
+      out.push({
         repoUrl: row.repo_url,
         sha: row.sha,
         prNumber: row.pr_number,
@@ -3883,8 +3990,9 @@ export class Store {
         sessions: Array.isArray(ev.sessions) ? ev.sessions : [],
         analyzerVersion: row.analyzer_version,
         analyzedAt: row.analyzed_at,
-      };
-    });
+      });
+    }
+    return out;
   }
 
   deleteCommitProvenanceForRepo(repoUrl: string): number {

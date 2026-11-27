@@ -1592,7 +1592,8 @@ async function refreshProjects() {
   const seq = ++projectsFetchSeq;
   try {
     const days = document.getElementById('usageDays')?.value || '30';
-    const next = await request(`/api/projects?days=${encodeURIComponent(days)}`);
+    const codeOnly = document.getElementById('projectCodeOnly')?.checked ?? true;
+    const next = await request(`/api/projects?days=${encodeURIComponent(days)}${codeOnly ? '&codeOnly=1' : ''}`);
     if (seq !== projectsFetchSeq) return;
     latestProjects = next;
   } catch {
@@ -1606,11 +1607,15 @@ function projectItemHtml(project) {
   const agents = (project.agents || []).slice(0, 4)
     .map((agent) => escapeHtml(agent.provider))
     .join(' · ');
+  const aliasBadge = (project.aliasNames || []).length > 0
+    ? ` <span class="muted" title="已合并: ${escapeHtml(project.aliasNames.join(', '))}">+${project.aliasNames.length}</span>`
+    : '';
+  const commitHint = project.commitSource === 'provenance' ? '来自真实 Git 历史归因缓存' : '来自会话去重归因';
   return `
     <button type="button" class="session-item${project.id === openProjectId ? ' active' : ''}" data-project-id="${escapeHtml(project.id)}">
-      <strong>${escapeHtml(project.name)}</strong>
+      <strong>${escapeHtml(project.name)}${aliasBadge}</strong>
       <span>${agents || '(窗口内无活动)'}</span>
-      <span>${project.sessionCount} 对话(${project.userSessionCount} 用户) · ${project.commitCount} commit${project.lastActive ? ` · ${fmtAgo(project.lastActive, Date.now())}` : ''}</span>
+      <span title="${commitHint}">${project.sessionCount} 对话(${project.userSessionCount} 用户) · ${project.commitCount} commit${project.lastActive ? ` · ${fmtAgo(project.lastActive, Date.now())}` : ''}</span>
     </button>
   `;
 }
@@ -1618,29 +1623,48 @@ function projectItemHtml(project) {
 function renderProjects(forceDetail = false) {
   const listEl = document.getElementById('projectList');
   const readerEl = document.getElementById('projectReader');
+  const footEl = document.getElementById('projectCountFoot');
   if (!listEl || !readerEl) return;
-  const projects = latestProjects?.projects || [];
+  const allProjects = latestProjects?.projects || [];
   if (!latestProjects) {
     renderedProjectKey = null;
     listEl.innerHTML = '<div class="usage-empty"><strong>项目数据不可用</strong><span>daemon 连接失败。</span></div>';
     return;
   }
+  const q = (document.getElementById('projectSearch')?.value || '').trim().toLowerCase();
+  const projects = q
+    ? allProjects.filter((p) => {
+      const hay = `${p.name} ${p.url || ''} ${p.root || ''} ${(p.aliasNames || []).join(' ')}`.toLowerCase();
+      return hay.includes(q);
+    })
+    : allProjects;
+  const codeOnly = document.getElementById('projectCodeOnly')?.checked ?? true;
+  if (footEl) {
+    const total = latestProjects.totalProjects ?? allProjects.length;
+    const collapsed = Math.max(0, total - allProjects.length);
+    footEl.textContent = `显示 ${projects.length} 个项目（共 ${total} 个归并项目${codeOnly && collapsed > 0 ? `，已折叠 ${collapsed} 个无 git / 工具 / 零活动目录` : ''}）· commit 数优先取 Git 历史考古缓存。`;
+  }
   if (projects.length === 0) {
-    renderedProjectKey = null;
-    listEl.innerHTML = '<div class="usage-empty"><strong>还没有项目</strong><span>session 索引出 git 归属后会出现在这里。</span></div>';
+    listEl.innerHTML = `<div class="usage-empty"><strong>${q ? '没有匹配的项目' : '还没有项目'}</strong><span>${q ? '换个关键词或取消勾选「仅看活跃代码仓」。' : 'session 索引出 git 归属后会出现在这里。'}</span></div>`;
     return;
   }
   listEl.innerHTML = projects.map(projectItemHtml).join('');
   listEl.querySelectorAll('[data-project-id]').forEach((row) => {
     row.addEventListener('click', () => {
       const nextId = row.getAttribute('data-project-id');
-      if (nextId !== openProjectId) {
-        openProjectId = nextId;
-        renderProjects(true);
-      }
+      if (!nextId || nextId === openProjectId) return;
+      // O(1) 切换左侧选中态,不再重建整棵项目列表 DOM(INV-2198)
+      listEl.querySelector('.session-item.active')?.classList.remove('active');
+      row.classList.add('active');
+      openProjectId = nextId;
+      const days = document.getElementById('usageDays')?.value || '30';
+      const wantKey = `${nextId}:${days}`;
+      readerEl.innerHTML = '<div class="muted">读取项目详情…</div>';
+      renderedProjectKey = wantKey;
+      void loadProjectDetail(nextId, days, wantKey);
     });
   });
-  const open = projects.find((project) => project.id === openProjectId);
+  const open = allProjects.find((project) => project.id === openProjectId);
   if (open) {
     const days = document.getElementById('usageDays')?.value || '30';
     const wantKey = `${open.id}:${days}`;
@@ -1652,7 +1676,7 @@ function renderProjects(forceDetail = false) {
     }
     renderedProjectKey = wantKey;
     void loadProjectDetail(open.id, days, wantKey);
-  } else {
+  } else if (!openProjectId) {
     renderedProjectKey = null;
     readerEl.innerHTML = `
       <div class="usage-empty">
@@ -1662,6 +1686,9 @@ function renderProjects(forceDetail = false) {
     `;
   }
 }
+
+document.getElementById('projectSearch')?.addEventListener('input', () => renderProjects(false));
+document.getElementById('projectCodeOnly')?.addEventListener('change', () => { void refreshProjects(); });
 
 async function loadProjectDetail(id, daysParam, wantKey) {
   const readerEl = document.getElementById('projectReader');
@@ -1721,6 +1748,8 @@ function mountProjectHistory(projectId, detail, initialReport) {
   let filterRelay = false;
   let filterQuery = '';
   let scanning = false;
+  let loadingAll = false;
+  let currentDays = document.getElementById('usageDays')?.value || '30';
 
   const render = () => {
     const s = report?.summary;
@@ -1807,6 +1836,14 @@ function mountProjectHistory(projectId, detail, initialReport) {
     });
 
     const provOpts = (s.activeProviders || []).concat(['unattributed']).map((p) => `<option value="${escapeHtml(p)}"${filterProv === p ? ' selected' : ''}>${escapeHtml(p)}</option>`).join('');
+    const totalRecs = report.recordsTotal ?? allRecs.length;
+    const isTruncated = Boolean(report.recordsTruncated && totalRecs > allRecs.length);
+    const loadAllBtn = isTruncated
+      ? `<button type="button" class="secondary-btn" data-rh-load-all ${loadingAll ? 'disabled' : ''}>${loadingAll ? '加载中…' : `加载全部 ${totalRecs} 条`}</button>`
+      : '';
+    const countLabel = isTruncated
+      ? `显示 ${Math.min(filtered.length, 80)} / ${filtered.length}（已拉取最近 ${allRecs.length} / 共 ${totalRecs} 条）`
+      : `显示 ${Math.min(filtered.length, 80)} / ${filtered.length}`;
     const filtersHtml = `
       <div class="rh-filters">
         <input type="search" data-rh-q value="${escapeHtml(filterQuery)}" placeholder="搜索 SHA / PR / 标题 / 模型 / 文件…" />
@@ -1816,7 +1853,8 @@ function mountProjectHistory(projectId, detail, initialReport) {
           ${['hunk-matched', 'declared', 'witnessed-author', 'bash-write', 'write-touch', 'merged-only', 'unattributed'].map((t) => `<option value="${t}"${filterTier === t ? ' selected' : ''}>${t}</option>`).join('')}
         </select>
         <label class="session-check"><input type="checkbox" data-rh-relay ${filterRelay ? 'checked' : ''} /> 仅看接力</label>
-        <span class="muted">显示 ${Math.min(filtered.length, 80)} / ${filtered.length}</span>
+        <span class="muted">${countLabel}</span>
+        ${loadAllBtn}
       </div>
     `;
 
@@ -1873,6 +1911,18 @@ function mountProjectHistory(projectId, detail, initialReport) {
     container.querySelector('[data-rh-prov]')?.addEventListener('change', (e) => { filterProv = e.target.value; render(); });
     container.querySelector('[data-rh-tier]')?.addEventListener('change', (e) => { filterTier = e.target.value; render(); });
     container.querySelector('[data-rh-relay]')?.addEventListener('change', (e) => { filterRelay = e.target.checked; render(); });
+    container.querySelector('[data-rh-load-all]')?.addEventListener('click', async () => {
+      if (loadingAll) return;
+      loadingAll = true;
+      render();
+      try {
+        const next = await request(`/api/projects/${encodeURIComponent(projectId)}/history?days=${encodeURIComponent(currentDays)}&limit=0`);
+        if (next) report = next;
+      } finally {
+        loadingAll = false;
+        if (openProjectId === projectId) render();
+      }
+    });
     container.querySelectorAll('.rh-commit-row').forEach((row) => {
       row.addEventListener('click', () => {
         const det = row.querySelector('.rh-commit-detail');
@@ -1886,6 +1936,7 @@ function mountProjectHistory(projectId, detail, initialReport) {
       btn.addEventListener('click', async () => {
         if (scanning) return;
         const mode = btn.getAttribute('data-rh-scan');
+        currentDays = mode === 'all' ? 'all' : String(Number(mode) || 30);
         scanning = true;
         render();
         try {
@@ -1894,7 +1945,10 @@ function mountProjectHistory(projectId, detail, initialReport) {
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ days: mode === 'all' ? 'all' : Number(mode) || 30 }),
           });
-          if (res.ok) report = await res.json();
+          if (res.ok) {
+            report = await res.json();
+            void refreshProjects();
+          }
         } finally {
           scanning = false;
           if (openProjectId === projectId) render();
@@ -1957,11 +2011,15 @@ function projectDetailHtml(detail) {
       <span>${escapeHtml(PLAN_KIND_LABELS[plan.kind] || plan.kind)} · ${fmtAgo(plan.activeAt ?? plan.lastSeenAt, Date.now())}</span>
     </button>
   `).join('');
+  const aliasRow = (detail.aliasNames || []).length > 0
+    ? `<dt>合并别名</dt><dd>${escapeHtml(detail.aliasNames.join(' · '))}</dd>`
+    : '';
   return `
     <div class="session-detail-grid">
       <dt>项目</dt><dd>${escapeHtml(detail.name)}</dd>
       <dt>url</dt><dd>${escapeHtml(detail.url)}</dd>
       <dt>本地根</dt><dd>${escapeHtml(detail.root || '--')}</dd>
+      ${aliasRow}
     </div>
     <div class="session-attrs" id="projectHistoryBox"><h3>开发历史考古</h3><div class="muted">加载缓存…</div></div>
     <div class="session-attrs"><h3>Agent × 活动</h3>${agentsHtml || '<div class="muted">窗口内无活动</div>'}</div>

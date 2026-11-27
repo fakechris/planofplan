@@ -1069,6 +1069,7 @@ export function discoverCandidateL0Files(
   repoName: string,
   logSinceMs: number,
   home = homedir(),
+  extra?: { aliasUrls?: string[]; extraTokens?: string[] },
 ): DiscoveredL0Files {
   const tokens = new Set<string>();
   const addTok = (s: string | null | undefined): void => {
@@ -1080,6 +1081,9 @@ export function discoverCandidateL0Files(
   if (repoRoot) addTok(basename(repoRoot));
   const urlName = nameOfUrl(repoUrl);
   addTok(urlName);
+  const aliasUrlSet = new Set<string>([repoUrl, ...(extra?.aliasUrls ?? [])]);
+  for (const u of extra?.aliasUrls ?? []) addTok(nameOfUrl(u));
+  for (const t of extra?.extraTokens ?? []) addTok(t);
   const matchesRepoText = (text: string): boolean => {
     const low = text.toLowerCase();
     for (const tok of tokens) {
@@ -1088,12 +1092,12 @@ export function discoverCandidateL0Files(
     return false;
   };
 
-  // 1) 从 planofplan.db 里拿所有已关联到该仓库的 session sourceFile
+  // 1) 从 planofplan.db 里拿所有已关联到该仓库(及其合并别名)的 session sourceFile
   const dbFilesByProvider = new Map<string, Set<string>>();
   for (const session of store.listSessionRows()) {
     if (!session.sourceFile || session.updatedAt < logSinceMs) continue;
     const hit = (session.repos ?? []).some((r) => (
-      r.url === repoUrl
+      aliasUrlSet.has(r.url)
       || (repoRoot != null && r.root === repoRoot)
       || matchesRepoText(r.name)
       || matchesRepoText(r.url)
@@ -1588,6 +1592,10 @@ export interface AnalyzeRepoHistoryOptions {
   repoUrl: string;
   repoRoot: string;
   repoName: string;
+  /** 合并到同一主项目的其它别名 URL(用于发现父目录/旧工作树上的会话)。 */
+  aliasUrls?: string[];
+  /** 额外匹配词(如归并的父目录名 grokbot)。 */
+  extraTokens?: string[];
   /** null = 全量历史;数字 = 近 N 天。 */
   days?: number | null;
   /** true = 忽略缓存重算范围内所有 commit。 */
@@ -1599,6 +1607,34 @@ export interface AnalyzeRepoHistoryOptions {
   now?: number;
 }
 
+export interface ReadCachedRepoHistoryOptions {
+  aliasUrls?: string[];
+  /** 限制返回的 records 长度(null/undefined/<=0 = 全量);summary 始终基于全量计算。 */
+  limit?: number | null;
+  now?: number;
+}
+
+/** 对报告的 records 做前端传输截断,保留完整 summary 与 total/truncated 元信息(INV-2198)。 */
+export function sliceHistoryReport(
+  report: RepoHistoryReport,
+  limit?: number | null,
+): RepoHistoryReport {
+  const total = report.recordsTotal ?? report.records.length;
+  if (limit == null || limit <= 0 || report.records.length <= limit) {
+    return {
+      ...report,
+      recordsTotal: total,
+      recordsTruncated: total > report.records.length,
+    };
+  }
+  return {
+    ...report,
+    records: report.records.slice(0, limit),
+    recordsTotal: total,
+    recordsTruncated: true,
+  };
+}
+
 /**
  * 读取已缓存的仓库历史报告(纯读库,零磁盘/git I/O)。
  */
@@ -1606,21 +1642,35 @@ export function readCachedRepoHistory(
   store: Store,
   target: RepoTarget,
   days: number | null,
-  now = Date.now(),
+  nowOrOptions: number | ReadCachedRepoHistoryOptions = Date.now(),
 ): RepoHistoryReport {
+  const opts: ReadCachedRepoHistoryOptions = typeof nowOrOptions === 'number'
+    ? { now: nowOrOptions }
+    : nowOrOptions;
+  const now = opts.now ?? Date.now();
   const sinceMs = days != null && days > 0 ? now - days * DAY_MS : null;
-  const records = store.listCommitProvenance(target.repoUrl, sinceMs);
-  const summary = buildRepoHistorySummary(records, {
+  const urls = opts.aliasUrls && opts.aliasUrls.length > 0
+    ? [...new Set([target.repoUrl, ...opts.aliasUrls])]
+    : [target.repoUrl];
+  const allRecords = store.listCommitProvenanceForUrls(urls, sinceMs);
+  const summary = buildRepoHistorySummary(allRecords, {
     repoUrl: target.repoUrl,
     repoName: target.repoName,
     repoRoot: target.repoRoot,
     days,
-    cachedCommits: records.length,
+    cachedCommits: allRecords.length,
     newlyAnalyzedCommits: 0,
     sessionsScanned: 0,
     elapsedMs: 0,
   });
-  return { cached: records.length > 0, summary, records };
+  const base: RepoHistoryReport = {
+    cached: allRecords.length > 0,
+    summary,
+    records: allRecords,
+    recordsTotal: allRecords.length,
+    recordsTruncated: false,
+  };
+  return sliceHistoryReport(base, opts.limit);
 }
 
 /**
@@ -1673,6 +1723,7 @@ export function analyzeRepoHistory(
       options.repoName,
       logSinceMs,
       options.homeDir,
+      { aliasUrls: options.aliasUrls, extraTokens: options.extraTokens },
     );
     for (const item of discovered.claude) scanSessionFileIntoContext('claude', item.path, item.isSubagent, ctx);
     for (const path of discovered.codex) scanSessionFileIntoContext('codex', path, false, ctx);
