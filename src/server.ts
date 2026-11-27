@@ -692,8 +692,30 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
   // 谱系周报 v0:需求 × commit × 额度 的静态聚合(纯 SQL 侧,不引 LLM)
   app.get('/api/lineage-report', (c) => {
     const days = Math.min(90, Math.max(1, Number(c.req.query('days') ?? 7) || 7));
+    // INV-2185:findings 服务端有界。真实数据 7 天窗口可产 6千+ 条裁决
+    // (无 commit 见证是常态),全量返回是数 MB 级 payload,而 web 只渲染 5 条。
+    // 裁决计算保持全量,只在出口切片:findings_total/by_ruling 让计数不丢失。
+    const rawLimit = c.req.query('findings_limit');
+    const parsedLimit = rawLimit == null || rawLimit === '' ? 100 : Number(rawLimit);
+    if (!Number.isInteger(parsedLimit) || parsedLimit < 1 || parsedLimit > 1000) {
+      return c.json({ ok: false, error: 'findings_limit must be an integer 1..1000' }, 400);
+    }
     const now = Date.now();
-    return c.json(buildLineageReport(store, now - days * 86_400_000, now));
+    const report = buildLineageReport(store, now - days * 86_400_000, now);
+    const findingsTotal = report.findings.length;
+    const findingsTruncated = findingsTotal > parsedLimit;
+    const byRuling: Record<string, number> = {};
+    for (const finding of report.findings) byRuling[finding.ruling] = (byRuling[finding.ruling] ?? 0) + 1;
+    return c.json({
+      ...report,
+      findings: report.findings.slice(0, parsedLimit),
+      findings_total: findingsTotal,
+      findings_truncated: findingsTruncated,
+      findings_by_ruling: byRuling,
+      findings_note: findingsTruncated
+        ? `另有 ${findingsTotal - parsedLimit} 条未返回——收窄 days 或提高 findings_limit(当前 ${parsedLimit})`
+        : null,
+    });
   });
 
   // 最近被 agent 改动的文件(recent-edits feed):session_file_touches 的文件维度查询面
