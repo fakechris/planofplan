@@ -918,7 +918,7 @@ const TOOLS: ToolDef[] = [
   {
     name: 'lineage_report',
     title: 'Lineage report',
-    description: '谱系周报:窗口内需求 × commit × token 消耗的静态汇总(declared=trailer 声明/witnessed=transcript 目击/candidate=时间窗推断),附偏差裁决段(只报差异,四分类 PROPOSE FIX/CONTEST/ESCALATE/DECLINE;CONTEST 附可两跳核验的引用)。用户问"这周做了什么、落了多少、各烧多少"时用它。',
+    description: '谱系周报:窗口内需求 × commit × token 消耗的静态汇总(declared=trailer 声明/witnessed=transcript 目击/candidate=时间窗推断),附偏差裁决段(只报差异,四分类 PROPOSE FIX/CONTEST/ESCALATE/DECLINE;CONTEST 附可两跳核验的引用;findings 有界——默认渲染 15 条,超出部分给全量计数,收窄 days 或提高 limit 可见更多)。用户问"这周做了什么、落了多少、各烧多少"时用它。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -951,8 +951,11 @@ const TOOLS: ToolDef[] = [
         lines.push(`- ${mark} ${clipLine(item.text, 60)}(${item.provider}${item.project ? ` · ${item.project}` : ''}${cost})`);
       }
       // 偏差裁决段(INV-2167):只报差异;全一致输出显式 No drift detected。
+      // 超限行用 findings_total(= report.findings.length,裁决层全量计数)——
+      // 与 /api/lineage-report 的 findings_total 同口径(INV-2185)。
       lines.push('', '偏差裁决(只报差异,四分类 PROPOSE FIX/CONTEST/ESCALATE/DECLINE;一致项不列):');
-      if (report.findings.length === 0) {
+      const findingsTotal = report.findings.length;
+      if (findingsTotal === 0) {
         lines.push(driftCleanMessage(report.totals.requirements));
       } else {
         for (const finding of report.findings.slice(0, limit)) {
@@ -960,8 +963,8 @@ const TOOLS: ToolDef[] = [
             ? ` · 证据:${finding.evidenceRefs.join(' ; ')}` : '';
           lines.push(`- [${finding.ruling}] ${clipLine(finding.text, 50)} · ${finding.note}${evidence}`);
         }
-        if (report.findings.length > limit) {
-          lines.push(`(另有 ${report.findings.length - limit} 条未展示 — pass a higher limit)`);
+        if (findingsTotal > limit) {
+          lines.push(`(另有 ${findingsTotal - limit} 条未展示(共 ${findingsTotal} 条) — pass a higher limit)`);
         }
       }
       const note = truncationNote(Math.min(limit, report.items.length), report.items.length, 'pass a higher limit (max 60) or shorten days');

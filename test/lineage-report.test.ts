@@ -366,3 +366,98 @@ describe('偏差裁决层(INV-2167)', () => {
     }
   });
 });
+
+// ── findings 服务端 limit(INV-2185:千条级裁决的无界 payload 治理)─────
+
+/** 批量 fixture:一个会话 N 条无见证需求,每条产 1 条 ESCALATE finding(会话无已索引消息)。 */
+function bulkSeed(count: number) {
+  const store = openMemoryDb();
+  for (const plan of DEFAULT_PLANS) store.syncPlan(plan);
+  store.upsertSessions([{
+    id: 'claude:bulk', provider: 'claude', nativeId: 'bulk', cwd: '/repo', title: 'bulk',
+    sourceFile: '/tmp/bulk.jsonl', startedAt: NOW - 7200_000, updatedAt: NOW - 100,
+    inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: null, seenAt: NOW,
+  } as SessionRecord]);
+  store.replaceAllRequirements(Array.from({ length: count }, (_, i) => ({
+    id: `req:claude:bulk:${i + 1}`, sessionId: 'claude:bulk', seq: i + 1, text: `无见证需求 ${i + 1}`,
+    originLevel: 'user_explicit', ts: NOW - 7000_000 + i, repos: [],
+  })) as RequirementRecord[]);
+  return store;
+}
+
+describe('findings 服务端 limit(INV-2185)', () => {
+  test('默认 100:超限截断,findings_total/分布/提示齐全;findings_by_ruling 与全量一致', async () => {
+    const store = bulkSeed(120);
+    try {
+      const server = createServer(store, scheduler as never, { port: 9291, plans: DEFAULT_PLANS });
+      const res = await server.request('http://localhost/api/lineage-report?days=7');
+      expect(res.status).toBe(200);
+      const body = await res.json() as {
+        findings: Array<{ ruling: string }>;
+        findings_total: number;
+        findings_truncated: boolean;
+        findings_by_ruling: Record<string, number>;
+        findings_note: string | null;
+      };
+      expect(body.findings).toHaveLength(100);
+      expect(body.findings_total).toBe(120);
+      expect(body.findings_truncated).toBe(true);
+      expect(body.findings_note).toContain('另有 20 条未返回');
+      expect(body.findings_note).toContain('findings_limit');
+      // 分布汇总覆盖全部 120 条,不因切片丢失
+      expect(body.findings_by_ruling).toEqual({ ESCALATE: 120 });
+      // 与裁决层全量计算同口径
+      const full = buildLineageReport(store, NOW - 7 * 86_400_000, NOW + 1000);
+      expect(full.findings).toHaveLength(120);
+    } finally {
+      store.close();
+    }
+  });
+
+  test('findings_limit=1000 全量返回:truncated=false,findings_total=数组长度', async () => {
+    const store = bulkSeed(120);
+    try {
+      const server = createServer(store, scheduler as never, { port: 9291, plans: DEFAULT_PLANS });
+      const res = await server.request('http://localhost/api/lineage-report?days=7&findings_limit=1000');
+      expect(res.status).toBe(200);
+      const body = await res.json() as { findings: unknown[]; findings_total: number; findings_truncated: boolean; findings_note: string | null };
+      expect(body.findings).toHaveLength(120);
+      expect(body.findings_total).toBe(120);
+      expect(body.findings_truncated).toBe(false);
+      expect(body.findings_note).toBeNull();
+    } finally {
+      store.close();
+    }
+  });
+
+  test('非法 findings_limit 回 400:0/负数/超上限/非整数/非数字', async () => {
+    const store = bulkSeed(3);
+    try {
+      const server = createServer(store, scheduler as never, { port: 9291, plans: DEFAULT_PLANS });
+      for (const bad of ['0', '-5', '1001', '10.5', 'abc']) {
+        const res = await server.request(`http://localhost/api/lineage-report?days=7&findings_limit=${encodeURIComponent(bad)}`);
+        expect([bad, res.status]).toEqual([bad, 400]);
+      }
+      // 空参数 = 缺省(即默认 100),不报 400;不传参同
+      const ok = await server.request('http://localhost/api/lineage-report?days=7&findings_limit=');
+      expect(ok.status).toBe(200);
+      const omitted = await server.request('http://localhost/api/lineage-report?days=7');
+      expect(omitted.status).toBe(200);
+    } finally {
+      store.close();
+    }
+  });
+
+  test('MCP 偏差段超限行用 findings_total 口径:渲染 15 条,"另有 N 条(共 M 条)"', () => {
+    const store = bulkSeed(120);
+    try {
+      const body = handleMcpBody(store, { port: 9291, plans: [] }, {
+        jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'lineage_report', arguments: {} },
+      }) as { result?: { content: Array<{ text: string }> } };
+      const text = body.result!.content[0]!.text;
+      expect(text).toContain('另有 105 条未展示(共 120 条)');
+    } finally {
+      store.close();
+    }
+  });
+});
