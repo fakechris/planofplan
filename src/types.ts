@@ -389,8 +389,18 @@ export interface ProjectListItem extends Project {
   agents: ProjectAgentStat[];
   lastActive: number | null;
   commitCount: number;
-  /** 预留:窗口内推导需求数(v1 不算,恒 null)。 */
+  /** commitCount 来源:provenance=真实 git 历史归因缓存;session_commits=会话启发式归因。 */
+  commitSource?: 'provenance' | 'session_commits';
+  /** 窗口内推导需求数。 */
   requirementCount: number | null;
+  /** 是否为真实 git 仓库(远程 URL 或磁盘存在 .git)。 */
+  hasGit?: boolean;
+  /** 是否属于工具/Skill/临时目录(项目页默认折叠)。 */
+  isToolRepo?: boolean;
+  /** 归并到此主项目的全部 repo URL(含自身)。 */
+  aliasUrls?: string[];
+  /** 归并到此主项目的其它别名名称(不含自身 name)。 */
+  aliasNames?: string[];
 }
 
 export interface ProjectRequirementItem {
@@ -845,4 +855,8 @@ export interface RepoHistoryReport {
   cached: boolean;
   summary: RepoHistorySummary;
   records: CommitProvenanceRecord[];
+  /** 窗口内总 commit 记录数(启用 limit 截断时与 records.length 区分)。 */
+  recordsTotal?: number;
+  /** 是否因 limit 截断了 records 明细(summary 始终基于全量计算)。 */
+  recordsTruncated?: boolean;
 }

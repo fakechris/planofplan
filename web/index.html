@@ -124,9 +124,17 @@
       <div>
         <p class="eyebrow">PROJECTS</p>
         <h1>项目</h1>
-        <p class="hero-copy">这个项目上有哪些 agent 干过什么。</p>
+        <p class="hero-copy">这个项目上有哪些 agent 干过什么。已自动合并同名仓库、工作树与单仓父目录。</p>
+      </div>
+      <div class="session-toolbar">
+        <input id="projectSearch" type="search" placeholder="搜索项目名 / 路径 / 别名" aria-label="搜索项目" />
+        <label class="session-check">
+          <input id="projectCodeOnly" type="checkbox" checked />
+          仅看活跃代码仓
+        </label>
       </div>
     </section>
+    <p id="projectCountFoot" class="session-foot">commit 数优先取开发历史考古缓存（真实 Git 历史），未扫描仓回退会话去重归因。</p>
     <div class="session-workbench">
       <div id="projectList" class="session-list"></div>
       <div id="projectReader" class="session-reader">

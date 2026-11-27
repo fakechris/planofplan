@@ -541,4 +541,67 @@ describe('L0 文件扫描、增量缓存、HTTP API 与只读 MCP repo_history',
     expect(appJs).toContain('if (!forceDetail && renderedProjectKey === wantKey) return;');
     expect(appJs).toContain('if (seq !== projectDetailSeq || openProjectId !== id) return;');
   });
+
+  test('INV-2198: /api/projects/:id/history 支持 limit 截断同时保持全量 summary,limit=0 返回全量', async () => {
+    const store = openMemoryDb();
+    for (const plan of DEFAULT_PLANS) store.syncPlan(plan);
+    const now = Date.now();
+    store.upsertSessions([{
+      id: 'claude:lim1', provider: 'claude', nativeId: 'lim1', cwd: '/repo/demo',
+      title: 'demo', sourceFile: null, startedAt: now - 50_000, updatedAt: now - 1000,
+      inputTokens: 0, outputTokens: 0, totalTokens: 100, estimatedCostUsd: null, seenAt: now,
+    }]);
+    store.replaceSessionRepos('claude:lim1', [{
+      sessionId: 'claude:lim1', role: 'work', url: REPO_URL, root: '/repo/demo', name: 'demo', evidenceKind: 'observed',
+    }]);
+    store.materializeProjects();
+    store.upsertCommitProvenance([1, 2, 3, 4, 5].map((i) => ({
+      repoUrl: REPO_URL,
+      sha: String(i).repeat(40),
+      prNumber: i,
+      committedAt: now - i * 60_000,
+      authorName: 'Chris',
+      subject: `feat: commit ${i}`,
+      tier: 'hunk-matched' as const,
+      primaryProvider: 'claude',
+      primaryModel: 'claude-opus-5-5',
+      totalDistLines: 10,
+      matchedDistLines: 10,
+      relayKind: '' as const,
+      filesCount: 1,
+      files: ['src/x.ts'],
+      authors: [{ provider: 'claude', model: 'claude-opus-5-5', lines: 10, source: 'hunk' }],
+      declared: [],
+      witnessedAuthor: [],
+      mergedBy: [],
+      reviewers: [],
+      sessions: [],
+      analyzerVersion: REPO_HISTORY_ANALYZER_VERSION,
+      analyzedAt: now,
+    })));
+    const proj = store.listProjects().find((p) => p.url === REPO_URL)!;
+    const app = createServer(store, { refreshPlan: async () => ({ ok: true, slug: 'kimi', windows: [] }) } as never, { port: 9291, plans: DEFAULT_PLANS });
+
+    const rSlice = await (await app.request(`http://localhost/api/projects/${proj.id}/history?days=30&limit=2`)).json() as {
+      records: Array<{ sha: string }>;
+      recordsTotal: number;
+      recordsTruncated: boolean;
+      summary: { totalCommits: number };
+    };
+    expect(rSlice.records).toHaveLength(2);
+    expect(rSlice.recordsTotal).toBe(5);
+    expect(rSlice.recordsTruncated).toBe(true);
+    expect(rSlice.summary.totalCommits).toBe(5);
+
+    const rAll = await (await app.request(`http://localhost/api/projects/${proj.id}/history?days=30&limit=0`)).json() as {
+      records: Array<{ sha: string }>;
+      recordsTotal: number;
+      recordsTruncated: boolean;
+      summary: { totalCommits: number };
+    };
+    expect(rAll.records).toHaveLength(5);
+    expect(rAll.recordsTotal).toBe(5);
+    expect(rAll.recordsTruncated).toBe(false);
+    expect(rAll.summary.totalCommits).toBe(5);
+  });
 });
