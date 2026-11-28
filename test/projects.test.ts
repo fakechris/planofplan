@@ -603,3 +603,173 @@ describe('INV-2208: 全面性能与 Safari 内存优化回归锁定', () => {
     expect(appJs).toContain('&graph=0');
   });
 });
+
+describe('INV-2320: 筛选下拉框按整个时间窗口生成,筛选先于分页', () => {
+  // 验收用第 501/301 条:项目 beta 只出现在按时间最旧的第 501 条需求 / 第 301 个计划里,
+  // 默认响应(500/300)里没有它,但下拉框必须能选到,选中后必须查得到,默认上限不动。
+  const URL_C = 'git@gitlab.com:other/beta.git'; // 与 URL_B 同短名 beta,不同主机
+  function boundaryStore(withExtras = false) {
+    const store = openMemoryDb();
+    const now = Date.now();
+    store.upsertSessions([
+      session({ id: 'claude:r1', provider: 'claude', nativeId: 'r1', updatedAt: now - 1000 }),
+    ]);
+    store.replaceAllRequirements(Array.from({ length: 501 }, (_, k) => {
+      const i = k + 1;
+      return {
+        id: `req:r1:${i}`,
+        sessionId: 'claude:r1',
+        seq: i,
+        text: `需求 ${i}`,
+        originLevel: i === 501 ? 'system_inferred' as const : 'user_explicit' as const,
+        ts: now - i * 1000,
+        repos: [i === 501 ? URL_B : URL_A],
+      };
+    }));
+    for (let i = 1; i <= 301; i++) {
+      store.upsertPlanFileWithSnapshot({
+        id: `pf-${i}`,
+        path: `/repo/${i === 301 ? 'beta' : 'alpha'}/plan-${i}.md`,
+        kind: i === 301 ? 'todo' : 'plan',
+        title: `Plan ${i}`,
+        goal: `Goal ${i}`,
+        currentPhase: null,
+        repo: i === 301 ? URL_B : URL_A,
+        mtimeMs: now - i * 1000,
+        rawHash: `hash-${i}-abcdef012345`,
+        sections: [],
+        checkboxChecked: 0,
+        checkboxTotal: 0,
+        commitSha: null,
+        now,
+      });
+    }
+    if (withExtras) {
+      // 同短名的另一个 URL + 非 git 目录:各自要落进正确的桶
+      for (const [id, repo] of [['pf-b2', URL_C], ['pf-nogit', null]] as const) {
+        store.upsertPlanFileWithSnapshot({
+          id, path: `/repo/x/${id}.md`, kind: 'plan', title: id, goal: null, currentPhase: null,
+          repo, mtimeMs: now - 1000, rawHash: `hash-${id}-abcdef012345`, sections: [],
+          checkboxChecked: 0, checkboxTotal: 0, commitSha: null, now,
+        });
+      }
+    }
+    return store;
+  }
+  const get = async (server: ReturnType<typeof createServer>, path: string) =>
+    (await server.request(`http://localhost${path}`)).json();
+
+  test('需求:默认响应有界,byProject 含第 501 条的项目,选中后该条可见且上限不动', async () => {
+    const server = createServer(boundaryStore(), scheduler as never, { port: 9291, plans: DEFAULT_PLANS });
+    const def = await get(server, '/api/requirements?days=30') as {
+      total: number; truncated: boolean;
+      requirements: Array<{ id: string; repoNames: string[]; originLevel: string }>;
+      byProject: Array<{ name: string; count: number }>;
+      byLevel: Array<{ name: string; count: number }>;
+    };
+    // 默认响应仍然有上限
+    expect(def.total).toBe(501);
+    expect(def.truncated).toBe(true);
+    expect(def.requirements).toHaveLength(500);
+    expect(def.requirements.some((r) => r.repoNames.includes('beta'))).toBe(false);
+    // 项目能选到:facet 按整个时间窗口算,不受 limit 影响
+    expect(def.byProject).toEqual([{ name: 'alpha', count: 500 }, { name: 'beta', count: 1 }]);
+
+    // 选中后记录能查到
+    const picked = await get(server, '/api/requirements?days=30&project=beta') as {
+      total: number; truncated: boolean; requirements: Array<{ id: string }>; byProject: unknown; byLevel: unknown;
+    };
+    expect(picked.total).toBe(1);
+    expect(picked.truncated).toBe(false);
+    expect(picked.requirements.map((r) => r.id)).toEqual(['req:r1:501']);
+    expect(picked.byProject).toEqual(def.byProject); // 项目 facet 不吃项目自己的选择
+    expect(picked.byLevel).toEqual([{ name: 'system_inferred', count: 1 }]); // 证据 facet 受项目选择约束
+    const detail = await server.request('http://localhost/api/requirements/' + encodeURIComponent('req:r1:501'));
+    expect(detail.status).toBe(200);
+    expect(((await detail.json()) as { requirement: { id: string } }).requirement.id).toBe('req:r1:501');
+
+    // 全量逃生口不动
+    const all = await get(server, '/api/requirements?days=30&limit=0') as { requirements: unknown[]; truncated: boolean };
+    expect(all.requirements).toHaveLength(501);
+    expect(all.truncated).toBe(false);
+  });
+
+  test('计划:默认响应有界,byRepo/byKind 含第 301 个的项目,选中后该条可见且上限不动', async () => {
+    const server = createServer(boundaryStore(), scheduler as never, { port: 9291, plans: DEFAULT_PLANS });
+    const def = await get(server, '/api/planfiles?days=30') as {
+      total: number; truncated: boolean;
+      plans: Array<{ id: string; repo: string | null; repoName: string }>;
+      byRepo: Array<{ name: string; count: number }>;
+      byKind: Array<{ name: string; count: number }>;
+    };
+    // 默认响应仍然有上限
+    expect(def.total).toBe(301);
+    expect(def.truncated).toBe(true);
+    expect(def.plans).toHaveLength(300);
+    expect(def.plans.some((p) => p.repo === URL_B)).toBe(false);
+    // 项目能选到:facet 按整个时间窗口算,不受 limit 影响
+    expect(def.byRepo).toEqual([{ name: 'alpha', count: 300 }, { name: 'beta', count: 1 }]);
+    expect(def.byKind).toEqual([{ name: 'plan', count: 300 }, { name: 'todo', count: 1 }]);
+    expect(def.plans[0]).toMatchObject({ id: 'pf-1', repoName: 'alpha' });
+
+    // 选中项目后记录能查到
+    const picked = await get(server, '/api/planfiles?days=30&repo=beta') as {
+      total: number; truncated: boolean; plans: Array<{ id: string }>; byRepo: unknown; byKind: unknown;
+    };
+    expect(picked.total).toBe(1);
+    expect(picked.truncated).toBe(false);
+    expect(picked.plans.map((p) => p.id)).toEqual(['pf-301']);
+    expect(picked.byRepo).toEqual(def.byRepo); // 项目 facet 不吃项目自己的选择
+    expect(picked.byKind).toEqual([{ name: 'todo', count: 1 }]); // 类型 facet 受项目选择约束
+
+    // 选中类型后记录能查到
+    const byKind = await get(server, '/api/planfiles?days=30&kind=todo') as {
+      total: number; truncated: boolean; plans: Array<{ id: string }>; byRepo: unknown; byKind: unknown;
+    };
+    expect(byKind.total).toBe(1);
+    expect(byKind.plans.map((p) => p.id)).toEqual(['pf-301']);
+    expect(byKind.byKind).toEqual(def.byKind); // 类型 facet 不吃类型自己的选择
+    expect(byKind.byRepo).toEqual([{ name: 'beta', count: 1 }]); // 项目 facet 受类型选择约束
+
+    const detail = await server.request('http://localhost/api/planfiles/pf-301');
+    expect(detail.status).toBe(200);
+    expect(((await detail.json()) as { plan: { id: string } }).plan.id).toBe('pf-301');
+
+    // 全量逃生口不动
+    const all = await get(server, '/api/planfiles?days=30&limit=0') as { plans: unknown[]; truncated: boolean };
+    expect(all.plans).toHaveLength(301);
+    expect(all.truncated).toBe(false);
+  });
+
+  test('计划:筛选先于 limit(total/truncated 按筛选后计),同短名多 URL 与非 git 目录各自成桶', async () => {
+    const server = createServer(boundaryStore(true), scheduler as never, { port: 9291, plans: DEFAULT_PLANS });
+    // 命中 300 条、limit=2:total 是筛选后的 300,不是前 2
+    const alpha = await get(server, '/api/planfiles?days=30&repo=alpha&limit=2') as {
+      total: number; truncated: boolean; plans: unknown[];
+    };
+    expect(alpha).toMatchObject({ total: 300, truncated: true });
+    expect(alpha.plans).toHaveLength(2);
+
+    // git@gitlab.com:other/beta.git 与 https://github.com/org/beta.git 同短名,归同一个桶
+    const beta = await get(server, '/api/planfiles?days=30&repo=beta') as {
+      total: number; plans: Array<{ id: string; repo: string | null; repoName: string }>;
+      byRepo: Array<{ name: string; count: number }>;
+    };
+    expect(beta.total).toBe(2);
+    expect(beta.plans.map((p) => p.id).sort()).toEqual(['pf-301', 'pf-b2']);
+    expect(beta.plans.every((p) => p.repoName === 'beta')).toBe(true);
+    expect(beta.byRepo).toEqual([
+      { name: 'alpha', count: 300 }, { name: 'beta', count: 2 }, { name: '(非 git 目录)', count: 1 },
+    ]);
+
+    const noGit = await get(server, '/api/planfiles?days=30&repo=' + encodeURIComponent('(非 git 目录)')) as {
+      total: number; plans: Array<{ id: string; repo: string | null }>;
+    };
+    expect(noGit.total).toBe(1);
+    expect(noGit.plans).toEqual([expect.objectContaining({ id: 'pf-nogit', repo: null })]);
+
+    // 选不到的项目:空列表而不是整窗口
+    const none = await get(server, '/api/planfiles?days=30&repo=gamma') as { total: number; plans: unknown[] };
+    expect(none).toMatchObject({ total: 0, plans: [] });
+  });
+});

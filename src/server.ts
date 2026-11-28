@@ -1352,15 +1352,19 @@ export function createServer(store: Store, scheduler: Scheduler, cfg: AppConfig,
   app.get('/api/planfiles', (c) => {
     const days = Math.min(365, Math.max(1, Number(c.req.query('days') ?? 30) || 30));
     const limit = parseBoundedLimit(c.req.query('limit'), 300, 5000);
+    // 筛选下推服务端,先筛选后切片;repo 是仓库短名,桶名与匹配规则见 planRepoNameOf
+    const repo = c.req.query('repo')?.trim() || null;
+    const kind = c.req.query('kind')?.trim() || null;
     const now = Date.now();
     const since = now - days * 86_400_000;
-    // 活跃口径 = 文件 mtime(最新快照),单次 SQL 联查消除 2×N+1 快照查询(INV-2208)
-    const { total, plans: rows } = store.listPlanFilesSummary(since, limit);
+    // 活跃口径 = 文件 mtime(最新快照),单次 SQL 联查消除 2×N+1 快照查询(INV-2208);
+    // byRepo/byKind 按整个时间窗口算,不受 limit 影响(INV-2320)
+    const { total, byRepo, byKind, plans: rows } = store.listPlanFilesSummary(since, limit, { repo, kind });
     const plans = rows.map((plan) => ({
       ...plan,
       goal: plan.goal ? plan.goal.slice(0, 400) : null,
     }));
-    return c.json({ days, since, until: now, total, truncated: plans.length < total, plans });
+    return c.json({ days, since, until: now, total, truncated: plans.length < total, byRepo, byKind, plans });
   });
 
   app.get('/api/planfiles/:id', (c) => {
