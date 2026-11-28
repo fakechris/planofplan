@@ -52,5 +52,11 @@ describe('dashboard shell', () => {
     expect(appJs).not.toMatch(/api\/(requirements|planfiles)\?[^`]*limit=0/);
     expect(appJs).toContain('if (seq !== requirementsRequestSeq) return;');
     expect(appJs).toContain('if (seq !== plansRequestSeq) return;');
+    // 分组视图按实际展示的行数计「还有 N 个」:默认响应被截断时,一个项目装进来的行可能少于配额
+    expect(appJs).toContain('const shown = Math.min(take, items.length);');
+    expect(appJs).toContain('该项目还有 ${groupTotal - shown} 个');
+    // 请求期间被筛选排除的条目,其迟到的详情不盖回占位
+    expect(appJs).toContain("if (latestRequirements && !(latestRequirements.requirements || []).some((item) => item.id === id)) return;");
+    expect(appJs).toContain("if (latestPlans && !(latestPlans.plans || []).some((plan) => plan.id === id)) return;");
   });
 });

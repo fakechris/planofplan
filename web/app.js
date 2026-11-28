@@ -2219,6 +2219,8 @@ async function loadRequirementDetail(id) {
   try {
     const detail = await request(`/api/requirements/${encodeURIComponent(id)}`);
     if (openRequirementId !== id) return; // 已切走
+    // 请求期间列表换成了不含这一条的结果(筛选/时间窗变化):不把已被排除的详情盖回占位
+    if (latestRequirements && !(latestRequirements.requirements || []).some((item) => item.id === id)) return;
     readerEl.innerHTML = requirementDetailHtml(detail);
     readerEl.querySelectorAll('[data-nav]').forEach((el2) => {
       el2.addEventListener('click', () => {
@@ -2796,12 +2798,14 @@ function renderPlans() {
     for (const [name, items] of groups) {
       if (rendered >= TOTAL_CAP) break;
       const take = Math.min(GROUP_CAP, TOTAL_CAP - rendered);
-      rendered += take;
+      // 默认响应被截断时,跨在截断点上的项目装进来的行会少于配额:按实际展示的行数计
+      const shown = Math.min(take, items.length);
+      rendered += shown;
       const groupTotal = repoTotals.get(name) ?? items.length;
       chunks.push(`
         <div class="plan-group-head" title="${items[0]?.repo || ''}">${escapeHtml(name)}<span>${groupTotal} 个文件</span></div>
-        ${items.slice(0, take).map(planItemHtml).join('')}
-        ${groupTotal > take ? `<div class="session-more" disabled>… 该项目还有 ${groupTotal - take} 个,选项目或类型收窄</div>` : ''}
+        ${items.slice(0, shown).map(planItemHtml).join('')}
+        ${groupTotal > shown ? `<div class="session-more" disabled>… 该项目还有 ${groupTotal - shown} 个,选项目或类型收窄</div>` : ''}
       `);
     }
     if (visible.length > rendered) {
@@ -2842,6 +2846,8 @@ async function loadPlanDetail(id) {
   try {
     const detail = await request(`/api/planfiles/${encodeURIComponent(id)}`);
     if (openPlanId !== id) return; // 已切走
+    // 同需求页:请求期间列表已不含这一条时,不把详情盖回占位
+    if (latestPlans && !(latestPlans.plans || []).some((plan) => plan.id === id)) return;
     readerEl.innerHTML = planDetailHtml(detail);
     readerEl.querySelectorAll('[data-nav]').forEach((el2) => {
       el2.addEventListener('click', () => {
