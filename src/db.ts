@@ -36,7 +36,7 @@ import type {
   CommitRelayKind,
 } from './types.ts';
 import { buildUsageReport } from './usage.ts';
-import { nameOfUrl } from './repos.ts';
+import { nameOfUrl, planRepoNameOf } from './repos.ts';
 import { isKnownEnvelope } from './motivation.ts';
 import { backfillLaunchLinks } from './session-links.ts';
 import { materializeRequirements } from './requirements.ts';
@@ -3505,25 +3505,68 @@ export class Store {
     }));
   }
 
-  /** 窗口内计划文件摘要(单次联查最新快照与快照计数,消除 /api/planfiles 的 2×N+1 查询,INV-2208)。 */
+  /**
+   * 窗口内计划文件摘要(单次联查最新快照与快照计数,消除 /api/planfiles 的 2×N+1 查询,INV-2208)。
+   * filter.repo(仓库短名)/filter.kind 先于 limit 生效,total 按筛选后计;byRepo/byKind 按整个
+   * 时间窗口算,不受 limit 影响,且互不吃对方的选择(INV-2320)。
+   */
   listPlanFilesSummary(
     since: number,
     limit: number | null = 300,
+    filter: { repo?: string | null; kind?: string | null } = {},
   ): {
     total: number;
+    byRepo: Array<{ name: string; count: number }>;
+    byKind: Array<{ name: string; count: number }>;
     plans: Array<PlanFileRecord & {
+      repoName: string;
       activeAt: number;
       checkboxChecked: number;
       checkboxTotal: number;
       snapshotCount: number;
     }>;
   } {
-    const totalRow = this.db.query(
-      `SELECT COUNT(*) AS n
+    const repoFilter = filter.repo?.trim() || null;
+    const kindFilter = filter.kind?.trim() || null;
+    // 窗口内 (repo, kind) 分布:一次分组查询同时给出筛选后的 total 与两份 facet
+    const facetRows = this.db.query(
+      `SELECT p.repo, p.kind, COUNT(*) AS n
        FROM plan_files p
        LEFT JOIN plan_snapshots s ON s.id = p.last_snapshot_id
-       WHERE COALESCE(p.last_snapshot_mtime_ms, s.mtime_ms, p.last_seen_at) >= ?`,
-    ).get(since) as { n: number };
+       WHERE COALESCE(p.last_snapshot_mtime_ms, s.mtime_ms, p.last_seen_at) >= ?
+       GROUP BY p.repo, p.kind`,
+    ).all(since) as Array<{ repo: string | null; kind: string; n: number }>;
+    const repoCounts = new Map<string, number>();
+    const kindCounts = new Map<string, number>();
+    const repoUrls: string[] = [];
+    let matchNoRepo = false;
+    let total = 0;
+    for (const row of facetRows) {
+      const name = planRepoNameOf(row.repo);
+      const repoHit = !repoFilter || name === repoFilter;
+      const kindHit = !kindFilter || row.kind === kindFilter;
+      if (repoHit) kindCounts.set(row.kind, (kindCounts.get(row.kind) ?? 0) + row.n);
+      if (kindHit) repoCounts.set(name, (repoCounts.get(name) ?? 0) + row.n);
+      if (!repoHit || !kindHit) continue;
+      total += row.n;
+      if (row.repo) repoUrls.push(row.repo);
+      else matchNoRepo = true;
+    }
+    const where = ['COALESCE(p.last_snapshot_mtime_ms, s.mtime_ms, p.last_seen_at) >= ?'];
+    const args: Array<string | number> = [since];
+    if (kindFilter) {
+      where.push('p.kind = ?');
+      args.push(kindFilter);
+    }
+    if (repoFilter) {
+      const hits: string[] = [];
+      if (matchNoRepo) hits.push(`p.repo IS NULL OR p.repo = ''`);
+      if (repoUrls.length > 0) {
+        hits.push(`p.repo IN (${repoUrls.map(() => '?').join(', ')})`);
+        args.push(...repoUrls);
+      }
+      where.push(hits.length > 0 ? `(${hits.join(' OR ')})` : '0 = 1');
+    }
     const baseSql = `
       WITH snap_counts AS (
         SELECT plan_file_id, COUNT(*) AS cnt FROM plan_snapshots GROUP BY plan_file_id
@@ -3538,19 +3581,22 @@ export class Store {
       FROM plan_files p
       LEFT JOIN plan_snapshots s ON s.id = p.last_snapshot_id
       LEFT JOIN snap_counts sc ON sc.plan_file_id = p.id
-      WHERE COALESCE(p.last_snapshot_mtime_ms, s.mtime_ms, p.last_seen_at) >= ?
+      WHERE ${where.join(' AND ')}
       ORDER BY active_at DESC`;
     const rows = (limit != null && limit > 0
-      ? this.db.query(`${baseSql} LIMIT ?`).all(since, limit)
-      : this.db.query(baseSql).all(since)) as Array<{
+      ? this.db.query(`${baseSql} LIMIT ?`).all(...args, limit)
+      : this.db.query(baseSql).all(...args)) as Array<{
       id: string; path: string; kind: string; title: string | null; goal: string | null;
       current_phase: string | null; repo: string | null; first_seen_at: number; last_seen_at: number;
       missing_since: number | null; last_snapshot_id: string | null;
       last_snapshot_mtime_ms: number | null; last_snapshot_hash: string | null;
       active_at: number; checkbox_checked: number; checkbox_total: number; snapshot_count: number;
     }>;
+    const sortDesc = (a: [string, number], b: [string, number]) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0]));
     return {
-      total: totalRow?.n ?? rows.length,
+      total,
+      byRepo: [...repoCounts.entries()].sort(sortDesc).map(([name, count]) => ({ name, count })),
+      byKind: [...kindCounts.entries()].sort(sortDesc).map(([name, count]) => ({ name, count })),
       plans: rows.map((row) => ({
         id: row.id,
         path: row.path,
@@ -3559,6 +3605,7 @@ export class Store {
         goal: row.goal,
         currentPhase: row.current_phase,
         repo: row.repo,
+        repoName: planRepoNameOf(row.repo),
         firstSeenAt: row.first_seen_at,
         lastSeenAt: row.last_seen_at,
         missingSince: row.missing_since,

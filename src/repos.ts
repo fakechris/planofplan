@@ -84,6 +84,13 @@ export function nameOfUrl(url: string): string {
   return tail || url;
 }
 
+/** 计划页「项目」= 仓库短名;非 git 目录没有 repo,全部归入这一个桶(下拉框的选项值也是它)。 */
+export const PLAN_NO_REPO_NAME = '(非 git 目录)';
+
+export function planRepoNameOf(repo: string | null | undefined): string {
+  return repo ? nameOfUrl(repo) : PLAN_NO_REPO_NAME;
+}
+
 /**
  * 归一化仓库身份 URL(INV-2198):
  * - https://github.com/org/repo.git ↔ https://github.com/org/repo ↔ git@github.com:org/repo.git

@@ -2099,40 +2099,52 @@ function reqLevelBadge(level) {
   return `<i class="req-origin req-origin-${escapeHtml(key)}">${REQ_LEVEL_LABELS[key]}</i>`;
 }
 
+// 筛选下推服务端(先筛选后分页,INV-2320):接口默认只返回前 500 条,前端不能在截断后的
+// 行上筛选或汇总下拉框。query 记录最近一次成功响应所用的筛选,seq 用来丢弃过期响应。
+let requirementsQuery = null;
+let requirementsRequestSeq = 0;
+
+function sameFilters(a, b) {
+  return Boolean(a) && Boolean(b) && Object.keys(a).length === Object.keys(b).length
+    && Object.keys(a).every((key) => a[key] === b[key]);
+}
+
+function requirementFilters() {
+  return {
+    project: document.getElementById('reqProject')?.value || '',
+    provider: document.getElementById('reqProvider')?.value || '',
+    level: document.getElementById('reqLevel')?.value || '',
+  };
+}
+
 async function refreshRequirements() {
   const listEl = document.getElementById('reqList');
   if (!listEl) return;
+  const days = document.getElementById('usageDays')?.value || '30';
+  const query = requirementFilters();
+  const params = new URLSearchParams({ days });
+  for (const [key, value] of Object.entries(query)) if (value) params.set(key, value);
+  const seq = ++requirementsRequestSeq;
   try {
-    const days = document.getElementById('usageDays')?.value || '30';
-    latestRequirements = await request(`/api/requirements?days=${encodeURIComponent(days)}`);
+    const data = await request(`/api/requirements?${params}`);
+    if (seq !== requirementsRequestSeq) return; // 已被更新的筛选/时间窗请求取代
+    latestRequirements = data;
+    requirementsQuery = query;
   } catch {
+    if (seq !== requirementsRequestSeq) return;
     latestRequirements = null;
   }
   renderRequirements();
 }
 
-function fillRequirementFilters(all, project, provider, level) {
+function fillRequirementFilters(data) {
   const projectSel = document.getElementById('reqProject');
   const providerSel = document.getElementById('reqProvider');
   const levelSel = document.getElementById('reqLevel');
   if (!projectSel || !providerSel || !levelSel) return;
-  // facet 口径与对话页一致(c8ed083):各维度计数互不吃对方的选择
-  const projectFacets = new Map();
-  const providerFacets = new Map();
-  const levelFacets = new Map();
-  for (const item of all) {
-    if (!provider || item.provider === provider) {
-      if (!level || item.originLevel === level) {
-        for (const name of item.repoNames || []) projectFacets.set(name, (projectFacets.get(name) ?? 0) + 1);
-      }
-    }
-    if ((!project || (item.repoNames || []).includes(project)) && (!level || item.originLevel === level)) {
-      providerFacets.set(item.provider, (providerFacets.get(item.provider) ?? 0) + 1);
-    }
-    if ((!project || (item.repoNames || []).includes(project)) && (!provider || item.provider === provider)) {
-      levelFacets.set(item.originLevel, (levelFacets.get(item.originLevel) ?? 0) + 1);
-    }
-  }
+  // facet 口径与对话页一致(c8ed083):各维度计数互不吃对方的选择。选项直接用服务端 facet:
+  // 它按整个时间窗口算,不受默认 limit 截断(INV-2320)
+  const toFacets = (facets) => new Map((facets || []).map(({ name, count }) => [name, count]));
   const sortDesc = (a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0]));
   const fill = (sel, entries, allLabel, labelOf) => {
     const current = sel.value;
@@ -2142,9 +2154,9 @@ function fillRequirementFilters(all, project, provider, level) {
       .join('');
     sel.value = [...sel.options].some((option) => option.value === current) ? current : '';
   };
-  fill(projectSel, projectFacets, '全部项目', (name) => name);
-  fill(providerSel, providerFacets, '全部来源', (name) => name);
-  fill(levelSel, levelFacets, '全部证据', (name) => REQ_LEVEL_LABELS[name] || name);
+  fill(projectSel, toFacets(data.byProject), '全部项目', (name) => name);
+  fill(providerSel, toFacets(data.byProvider), '全部来源', (name) => name);
+  fill(levelSel, toFacets(data.byLevel), '全部证据', (name) => REQ_LEVEL_LABELS[name] || name);
 }
 
 function requirementItemHtml(item) {
@@ -2165,21 +2177,21 @@ function renderRequirements() {
     listEl.innerHTML = '<div class="usage-empty"><strong>需求数据不可用</strong><span>daemon 连接失败。</span></div>';
     return;
   }
-  const project = document.getElementById('reqProject')?.value || '';
-  const provider = document.getElementById('reqProvider')?.value || '';
-  const level = document.getElementById('reqLevel')?.value || '';
-  const all = latestRequirements.requirements || [];
-  const visible = all.filter((item) => (
-    (!project || (item.repoNames || []).includes(project))
-    && (!provider || item.provider === provider)
-    && (!level || item.originLevel === level)
-  ));
-  fillRequirementFilters(all, project, provider, level);
+  // 服务端已按当前筛选返回(先筛选后分页),这里不再二次筛选
+  const visible = latestRequirements.requirements || [];
+  const total = latestRequirements.total ?? visible.length;
+  fillRequirementFilters(latestRequirements);
+  // facet 可能把已选值回落成「全部」(该值在其他筛选下没有记录):按回落后的筛选补一次
+  // 请求,列表才和下拉框一致。回落只会从有值变空,最多补请求数 = 筛选个数。
+  if (requirementsQuery && !sameFilters(requirementFilters(), requirementsQuery)) {
+    void refreshRequirements();
+    return;
+  }
   if (visible.length === 0) {
     listEl.innerHTML = '<div class="usage-empty"><strong>窗口内没有需求</strong><span>调大天数或放松过滤。</span></div>';
   } else {
     listEl.innerHTML = visible.slice(0, 200).map(requirementItemHtml).join('')
-      + (visible.length > 200 ? `<div class="session-more" disabled>… 还有 ${visible.length - 200} 条,用过滤收窄</div>` : '');
+      + (total > 200 ? `<div class="session-more" disabled>… 还有 ${total - 200} 条,用过滤收窄</div>` : '');
     listEl.querySelectorAll('[data-req-open]').forEach((row) => {
       row.addEventListener('click', () => {
         openRequirementId = row.getAttribute('data-req-open');
@@ -2267,7 +2279,7 @@ function requirementDetailHtml(detail) {
 }
 
 ['reqProject', 'reqProvider', 'reqLevel'].forEach((id) => {
-  document.getElementById(id)?.addEventListener('change', renderRequirements);
+  document.getElementById(id)?.addEventListener('change', () => { void refreshRequirements(); });
 });
 
 // ── 经验卡(INV-485):约束/决定/失败尝试的人工证据沉淀 ─────────────
@@ -2682,21 +2694,35 @@ const PLAN_KIND_LABELS = {
   unknown: 'markdown',
 };
 
+// 同需求页:筛选下推服务端(先筛选后分页,INV-2320),默认响应只有前 300 个文件。
+let plansQuery = null;
+let plansRequestSeq = 0;
+
+function planFilters() {
+  return {
+    repo: document.getElementById('planRepo')?.value || '',
+    kind: document.getElementById('planKind')?.value || '',
+  };
+}
+
 async function refreshPlans() {
   const listEl = document.getElementById('planList');
   if (!listEl) return;
+  const days = document.getElementById('usageDays')?.value || '30';
+  const query = planFilters();
+  const params = new URLSearchParams({ days });
+  for (const [key, value] of Object.entries(query)) if (value) params.set(key, value);
+  const seq = ++plansRequestSeq;
   try {
-    const days = document.getElementById('usageDays')?.value || '30';
-    latestPlans = await request(`/api/planfiles?days=${encodeURIComponent(days)}`);
+    const data = await request(`/api/planfiles?${params}`);
+    if (seq !== plansRequestSeq) return; // 已被更新的筛选/时间窗请求取代
+    latestPlans = data;
+    plansQuery = query;
   } catch {
+    if (seq !== plansRequestSeq) return;
     latestPlans = null;
   }
   renderPlans();
-}
-
-function planRepoName(plan) {
-  if (!plan.repo) return '(非 git 目录)';
-  return plan.repo.replace(/^.*[/:]/, '').replace(/\.git$/, '') || plan.repo;
 }
 
 function planItemHtml(plan) {
@@ -2711,18 +2737,13 @@ function planItemHtml(plan) {
   `;
 }
 
-function fillPlanFilters(plans, repo, kind) {
+function fillPlanFilters(data) {
   const repoSel = document.getElementById('planRepo');
   const kindSel = document.getElementById('planKind');
   if (!repoSel || !kindSel) return;
-  // facet 口径(c8ed083):各维度计数互不吃对方的选择
-  const repoFacets = new Map();
-  const kindFacets = new Map();
-  for (const plan of plans) {
-    const repoName = planRepoName(plan);
-    if (!kind || plan.kind === kind) repoFacets.set(repoName, (repoFacets.get(repoName) ?? 0) + 1);
-    if (!repo || repoName === repo) kindFacets.set(plan.kind, (kindFacets.get(plan.kind) ?? 0) + 1);
-  }
+  // facet 口径(c8ed083):各维度计数互不吃对方的选择。选项直接用服务端 facet:
+  // 它按整个时间窗口算,不受默认 limit 截断(INV-2320)
+  const toFacets = (facets) => new Map((facets || []).map(({ name, count }) => [name, count]));
   const sortDesc = (a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0]));
   const fill = (sel, entries, allLabel, labelOf) => {
     const current = sel.value;
@@ -2731,8 +2752,8 @@ function fillPlanFilters(plans, repo, kind) {
       .join('');
     sel.value = [...sel.options].some((option) => option.value === current) ? current : '';
   };
-  fill(repoSel, repoFacets, '全部项目', (name) => name);
-  fill(kindSel, kindFacets, '全部类型', (value) => PLAN_KIND_LABELS[value] || value);
+  fill(repoSel, toFacets(data.byRepo), '全部项目', (name) => name);
+  fill(kindSel, toFacets(data.byKind), '全部类型', (value) => PLAN_KIND_LABELS[value] || value);
 }
 
 function renderPlans() {
@@ -2743,13 +2764,15 @@ function renderPlans() {
     listEl.innerHTML = '<div class="usage-empty"><strong>计划数据不可用</strong><span>daemon 连接失败。</span></div>';
     return;
   }
-  const all = latestPlans.plans || [];
+  // 服务端已按当前筛选返回(先筛选后分页,最近活跃在前),这里不再二次筛选
+  const visible = latestPlans.plans || [];
   const repo = document.getElementById('planRepo')?.value || '';
-  const kind = document.getElementById('planKind')?.value || '';
-  fillPlanFilters(all, repo, kind);
-  const visible = all.filter((plan) => (
-    (!repo || planRepoName(plan) === repo) && (!kind || plan.kind === kind)
-  )).sort((a, b) => (b.activeAt ?? b.lastSeenAt) - (a.activeAt ?? a.lastSeenAt));
+  fillPlanFilters(latestPlans);
+  // facet 把已选值回落成「全部」时,按回落后的筛选补一次请求(同需求页)
+  if (plansQuery && !sameFilters(planFilters(), plansQuery)) {
+    void refreshPlans();
+    return;
+  }
   if (visible.length === 0) {
     listEl.innerHTML = '<div class="usage-empty"><strong>窗口内没有计划文件</strong><span>agent 用 planning-with-files 写计划后会出现在这里。</span></div>';
   } else if (repo) {
@@ -2759,11 +2782,12 @@ function renderPlans() {
     // 默认按项目分组;大组截断,用类型/项目过滤收窄
     const byRepo = new Map();
     for (const plan of visible) {
-      const name = planRepoName(plan);
-      const list = byRepo.get(name) ?? [];
+      const list = byRepo.get(plan.repoName) ?? [];
       list.push(plan);
-      byRepo.set(name, list);
+      byRepo.set(plan.repoName, list);
     }
+    // 组头的计数用全窗口 facet:默认响应只带前 300 个文件,组内行数不是项目总数
+    const repoTotals = new Map((latestPlans.byRepo || []).map(({ name, count }) => [name, count]));
     const groups = [...byRepo.entries()].sort((a, b) => Math.max(...b[1].map((p) => p.activeAt ?? p.lastSeenAt)) - Math.max(...a[1].map((p) => p.activeAt ?? p.lastSeenAt)));
     const GROUP_CAP = 30;
     const TOTAL_CAP = 250;
@@ -2773,10 +2797,11 @@ function renderPlans() {
       if (rendered >= TOTAL_CAP) break;
       const take = Math.min(GROUP_CAP, TOTAL_CAP - rendered);
       rendered += take;
+      const groupTotal = repoTotals.get(name) ?? items.length;
       chunks.push(`
-        <div class="plan-group-head" title="${items[0]?.repo || ''}">${escapeHtml(name)}<span>${items.length} 个文件</span></div>
+        <div class="plan-group-head" title="${items[0]?.repo || ''}">${escapeHtml(name)}<span>${groupTotal} 个文件</span></div>
         ${items.slice(0, take).map(planItemHtml).join('')}
-        ${items.length > take ? `<div class="session-more" disabled>… 该项目还有 ${items.length - take} 个,选项目或类型收窄</div>` : ''}
+        ${groupTotal > take ? `<div class="session-more" disabled>… 该项目还有 ${groupTotal - take} 个,选项目或类型收窄</div>` : ''}
       `);
     }
     if (visible.length > rendered) {
@@ -2808,7 +2833,7 @@ function renderPlans() {
 }
 
 ['planRepo', 'planKind'].forEach((id) => {
-  document.getElementById(id)?.addEventListener('change', renderPlans);
+  document.getElementById(id)?.addEventListener('change', () => { void refreshPlans(); });
 });
 
 async function loadPlanDetail(id) {
